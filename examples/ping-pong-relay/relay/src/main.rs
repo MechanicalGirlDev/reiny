@@ -8,8 +8,8 @@
 
 use reiny::prelude::*;
 
-use crate::publications::Relayed;
 use crate::dependencies::ping::Ping;
+use crate::publications::Relayed;
 
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {

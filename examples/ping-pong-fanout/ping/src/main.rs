@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use reiny::prelude::*;
 
-use crate::publications::Ping;
 use crate::dependencies::pong::Pong;
+use crate::publications::Ping;
 
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {

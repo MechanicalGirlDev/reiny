@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use reiny::prelude::*;
 
-use crate::publications::Pong;
 use crate::dependencies::ping::Ping;
+use crate::publications::Pong;
 
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {
@@ -27,12 +27,13 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
         tracing::info!(seq = ping.seq, "← ping");
         // 設定された遅延を入れてから返す。
         tokio::time::sleep(Duration::from_millis(cfg.delay_ms)).await;
-        pongs.send(Pong {
-            seq: ping.seq,
-            message: cfg.reply.clone(),
-            replied_unix: cloudy.now_unix(),
-        })
-        .await?;
+        pongs
+            .send(Pong {
+                seq: ping.seq,
+                message: cfg.reply.clone(),
+                replied_unix: cloudy.now_unix(),
+            })
+            .await?;
         tracing::info!(seq = ping.seq, "pong →");
     }
 

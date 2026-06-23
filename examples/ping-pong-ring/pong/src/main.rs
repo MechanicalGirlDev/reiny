@@ -11,8 +11,8 @@
 use reiny::prelude::*;
 
 // build.rs(reiny-build)が Reiny.toml から生成する型。
-use crate::publications::Pong; // 自分が公開する型
-use crate::dependencies::ping::Ping; // 依存先 ping が公開する型
+use crate::dependencies::ping::Ping;
+use crate::publications::Pong; // 自分が公開する型 // 依存先 ping が公開する型
 
 /// `#[reiny::main]` は Reiny.toml を読み込み、name のプロセス(cloudy)を起動して
 /// `Cloudy` を渡す。型 → トピックの解決・セッション確立・graceful shutdown を肩代わりする。
@@ -26,12 +26,13 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
     // Ping を受けるたびに、同じ seq で打ち返す。shutdown(Ctrl+C)で抜ける。
     while let Some(ping) = pings.recv().await {
         tracing::info!(seq = ping.seq, "← ping");
-        pongs.send(Pong {
-            seq: ping.seq,
-            message: "pong".into(),
-            replied_unix: cloudy.now_unix(),
-        })
-        .await?;
+        pongs
+            .send(Pong {
+                seq: ping.seq,
+                message: "pong".into(),
+                replied_unix: cloudy.now_unix(),
+            })
+            .await?;
         tracing::info!(seq = ping.seq, "pong →");
     }
 

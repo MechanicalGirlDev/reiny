@@ -5,8 +5,8 @@
 
 use reiny::prelude::*;
 
-use crate::publications::Ping;
 use crate::dependencies::pong::Pong;
+use crate::publications::Ping;
 
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {
@@ -14,14 +14,24 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
     let mut pongs = cloudy.subscribe::<Pong>()?;
 
     let mut seq = 0;
-    pings.send(Ping { seq, sent_unix: cloudy.now_unix() }).await?;
+    pings
+        .send(Ping {
+            seq,
+            sent_unix: cloudy.now_unix(),
+        })
+        .await?;
     tracing::info!(seq, "ping →");
 
     while let Some(pong) = pongs.recv().await {
         // pong.message は pong 側の設定(reply)で決まる。
         tracing::info!(seq = pong.seq, reply = %pong.message, "← pong");
         seq += 1;
-        pings.send(Ping { seq, sent_unix: cloudy.now_unix() }).await?;
+        pings
+            .send(Ping {
+                seq,
+                sent_unix: cloudy.now_unix(),
+            })
+            .await?;
         tracing::info!(seq, "ping →");
     }
 

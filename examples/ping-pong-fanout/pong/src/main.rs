@@ -8,8 +8,8 @@
 
 use reiny::prelude::*;
 
-use crate::publications::Pong;
 use crate::dependencies::ping::Ping;
+use crate::publications::Pong;
 
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {
@@ -20,12 +20,13 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
     tracing::info!(id = %cloudy.id(), "pong instance ready");
 
     while let Some(ping) = pings.recv().await {
-        pongs.send(Pong {
-            seq: ping.seq,
-            from: cloudy.id().to_string(),
-            replied_unix: cloudy.now_unix(),
-        })
-        .await?;
+        pongs
+            .send(Pong {
+                seq: ping.seq,
+                from: cloudy.id().to_string(),
+                replied_unix: cloudy.now_unix(),
+            })
+            .await?;
         tracing::info!(seq = ping.seq, "pong →");
     }
 

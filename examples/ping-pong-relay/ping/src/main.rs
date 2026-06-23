@@ -17,7 +17,12 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
     let mut seq = 0;
     loop {
         tick.tick().await;
-        pings.send(Ping { seq, sent_unix: cloudy.now_unix() }).await?;
+        pings
+            .send(Ping {
+                seq,
+                sent_unix: cloudy.now_unix(),
+            })
+            .await?;
         tracing::info!(seq, "ping → relay");
         seq += 1;
     }

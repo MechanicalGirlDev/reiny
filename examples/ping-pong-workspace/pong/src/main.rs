@@ -24,12 +24,13 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
     // Ping を受けるたびに、同じ seq で打ち返す。shutdown(Ctrl+C)で抜ける。
     while let Some(ping) = pings.recv().await {
         tracing::info!(seq = ping.seq, "← ping");
-        pongs.send(Pong {
-            seq: ping.seq,
-            message: "pong".into(),
-            replied_unix: cloudy.now_unix(),
-        })
-        .await?;
+        pongs
+            .send(Pong {
+                seq: ping.seq,
+                message: "pong".into(),
+                replied_unix: cloudy.now_unix(),
+            })
+            .await?;
         tracing::info!(seq = ping.seq, "pong →");
     }
 

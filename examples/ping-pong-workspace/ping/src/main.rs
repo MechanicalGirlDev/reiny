@@ -23,24 +23,26 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
 
     // 開幕の一球。
     let mut seq = 0;
-    pings.send(Ping {
-        seq,
-        message: "ping".into(),
-        sent_unix: cloudy.now_unix(),
-    })
-    .await?;
+    pings
+        .send(Ping {
+            seq,
+            message: "ping".into(),
+            sent_unix: cloudy.now_unix(),
+        })
+        .await?;
     tracing::info!(seq, "ping →");
 
     // Pong が返るたびに seq を進めて打ち返す。shutdown(Ctrl+C)で抜ける。
     while let Some(pong) = pongs.recv().await {
         tracing::info!(seq = pong.seq, "← pong");
         seq += 1;
-        pings.send(Ping {
-            seq,
-            message: "ping".into(),
-            sent_unix: cloudy.now_unix(),
-        })
-        .await?;
+        pings
+            .send(Ping {
+                seq,
+                message: "ping".into(),
+                sent_unix: cloudy.now_unix(),
+            })
+            .await?;
         tracing::info!(seq, "ping →");
     }
 
