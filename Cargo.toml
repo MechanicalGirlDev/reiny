@@ -4,6 +4,7 @@ members = [
     "crates/reiny-proto",
     "crates/reiny-transport",
     "crates/reiny-grain",
+    "crates/reiny-launch",
 ]
 
 [workspace.package]
@@ -32,6 +33,10 @@ thiserror = "2"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+
+# 設定ファイル(launch config の [grain] 節)
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 # プロセス横断の Ctrl+C ハンドラ
 ctrlc = "3"
