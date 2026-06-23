@@ -1,0 +1,22 @@
+# Reiny.toml — reiny プロジェクトの宣言ファイル(Cargo.toml の reiny 版)。
+# 「このプロジェクトが何という名前で動き、どんな型を公開し、どんな型に依存するか」
+# を宣言する。reiny ランタイムはこれを読んでトピックと型を解決する。
+
+[project]
+# プロジェクト名 = 実行時のトピック名。reiny/<name> 名前空間で公開される。
+# このプロジェクトは reiny/pong トピックに公開する。
+name = "pong"
+# プロジェクトと、公開する型スキーマのバージョン。購読側との互換判定に使う。
+version = "0.1.0"
+description = "Ping を受けるたびに Pong を返す。リクエスト/レスポンス心拍の後半。"
+authors = ["nop <noplab90@gmail.com>"]
+license = "MIT"
+
+# このプロジェクトが reiny/pong トピックへ公開する型。
+[publications]
+Pong = { proto = "proto/pong.proto", message = "pong.Pong" }
+
+# 依存する他プロジェクト。ping に依存することで、ping が公開する Ping 型を
+# reiny/ping から受け取れる(ping ↔ pong の相互参照)。
+[dependencies]
+ping = { version = "0.1", path = "../ping" }

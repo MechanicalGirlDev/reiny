@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+// ping プロジェクトが所有・公開する型。reiny/ping トピックを流れる。
+package ping;
+
+// Ping: 1 往復ごとに送られる打球。
+message Ping {
+  // 何球目か。返ってきた Pong の seq と突き合わせて往復を追跡する。
+  uint64 seq = 1;
+  // 任意のメッセージ本文。
+  string message = 2;
+  // 送信時刻(Unix 秒)。RTT 計測に使える。
+  int64 sent_unix = 3;
+}

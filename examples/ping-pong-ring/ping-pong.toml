@@ -1,0 +1,13 @@
+# launch config — `reiny`(reiny-launch)ランチャで ping/pong をまとめて起動する。
+#
+# Reiny.toml が「各プロジェクトの身元(名前・型・依存)」を表すのに対し、こちらは
+# 「どの grain を一緒に動かすか」という *デプロイ* を表す(roslaunch 相当)。
+# キー = インスタンス名 = 既定 bin 名。
+#
+#   reiny ping-pong.toml
+#
+[grain]
+# pong を先に起動。落ちたら再起動。
+pong = { bin = "pong", on_exit = "respawn" }
+# ping は pong の後に起動する。
+ping = { bin = "ping", depends_on = ["pong"] }

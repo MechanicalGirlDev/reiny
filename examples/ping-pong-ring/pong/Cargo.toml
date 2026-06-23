@@ -1,0 +1,17 @@
+[package]
+name = "pong"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+reiny.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[build-dependencies]
+# Reiny.toml を読み、自分の [publications] の proto をコンパイルし、依存先 [dependencies]
+# の公開型も解決して、型と「型 → トピック」マッピングをコード生成する。
+reiny-build.workspace = true

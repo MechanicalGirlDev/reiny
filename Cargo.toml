@@ -6,6 +6,9 @@ members = [
     "crates/reiny-grain",
     "crates/reiny-launch",
 ]
+# examples/ は到達目標を示す設計サンプル(独立ワークスペース)。まだビルドが通らないので
+# ルートのビルド・テストには巻き込まない。
+exclude = ["examples"]
 
 [workspace.package]
 version = "0.1.0"
