@@ -1,7 +1,7 @@
 //! ping — Ping を一定間隔で broadcast し、全 pong インスタンスからの返球を受ける。
 //!
-//! 見どころ: pong を複数インスタンス起動しても、ping 側は型 `Pong` を購読するだけ。
-//! reiny がワイルドカードで全インスタンス(pong-1, pong-2, ...)の Pong をまとめて届ける。
+//! 見どころ: 各 pong は reiny/<id>/Pong へ publish。ping 側は型 `Pong` を購読するだけで、
+//! reiny が reiny/*/Pong に展開し、全インスタンス(pong-1, pong-2, ...)分がまとまって届く。
 //!
 //! 注意: これは reiny の到達目標を示す設計サンプル。umbrella crate `reiny` と
 //! `reiny-build`(Reiny.toml パーサ + codegen)は未実装なので、まだビルドは通らない。
@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use reiny::prelude::*;
 
-use reiny::publications::Ping;
-use reiny::dependencies::pong::Pong;
+use crate::publications::Ping;
+use crate::dependencies::pong::Pong;
 
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {

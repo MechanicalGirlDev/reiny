@@ -1,7 +1,7 @@
 //! pong — Ping を受けるたびに、自分のインスタンス id を載せた Pong を返す。
 //!
 //! 同じ bin を複数起動すると reiny が連番 id(pong-1, pong-2, ...)を自動採番する。
-//! それぞれが reiny/ping を購読し、それぞれが Pong を返すので、ping には N 個届く。
+//! それぞれが reiny/*/Ping を購読し、それぞれが Pong を返すので、ping には N 個届く。
 //!
 //! 注意: これは reiny の到達目標を示す設計サンプル。umbrella crate `reiny` と
 //! `reiny-build`(Reiny.toml パーサ + codegen)は未実装なので、まだビルドは通らない。

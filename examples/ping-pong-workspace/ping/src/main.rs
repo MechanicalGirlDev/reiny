@@ -10,15 +10,15 @@
 use reiny::prelude::*;
 
 // 共有カタログの型(per-project 版と違い、依存先プロジェクト名で名前空間化されない)。
-use reiny::internals::{Ping, Pong};
+use crate::internals::{Ping, Pong};
 
 /// `#[reiny::main]` は workspace の Reiny.toml を読み、このバイナリ名に対応する
-/// [projects.ping] からcloudy(reiny/ping)を起動して `Cloudy` を渡す。
+/// [projects.ping] のプロセス(cloudy)を起動して `Cloudy` を渡す(name はトピックではない)。
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {
-    // Ping は [projects.ping].publications にあるので reiny/ping へ送れる。
+    // Ping は [projects.ping].publications にあるので reiny/ping-1/Ping へ送れる。
     let pings = cloudy.publish::<Ping>()?;
-    // Pong は [projects.ping].dependencies にあるので reiny/pong を購読できる。
+    // Pong は [projects.ping].dependencies にあるので reiny/*/Pong を購読できる。
     let mut pongs = cloudy.subscribe::<Pong>()?;
 
     // 開幕の一球。

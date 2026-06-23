@@ -1,5 +1,5 @@
 [project]
-# reiny/ping トピックへ Ping を broadcast する。複数の pong インスタンスが受け取る。
+# reiny/ping-1/Ping トピックへ Ping を broadcast する。複数の pong インスタンスが受け取る。
 name = "ping"
 version = "0.1.0"
 description = "Ping を一定間隔で broadcast し、全 pong からの返球を受ける。"
@@ -9,7 +9,7 @@ license = "MIT"
 [publications]
 Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
 
-# pong の公開型 Pong を購読する。pong は複数インスタンス(pong-1, pong-2, ...)起動するが、
-# 型(=プロジェクト)で購読するのでワイルドカードで全インスタンスの Pong がまとまって届く。
+# pong の公開型 Pong を購読する。各 pong は reiny/<id>/Pong へ publish するが、
+# 型 Pong の購読は reiny/*/Pong に展開されるので、全インスタンス(pong-1, pong-2, ...)分が届く。
 [dependencies]
 pong = { version = "0.1", path = "../pong" }

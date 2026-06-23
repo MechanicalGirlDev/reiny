@@ -1,5 +1,5 @@
 [project]
-# パイプラインの中段。reiny/ping を受けて、変換した Relayed を reiny/relay へ流す。
+# パイプラインの中段。reiny/*/Ping を受けて、変換した Relayed を reiny/relay-1/Relayed へ流す。
 name = "relay"
 version = "0.1.0"
 description = "中継ノード。Ping を受けて Relayed に変換し、hop と経由 id を付けて流す。"

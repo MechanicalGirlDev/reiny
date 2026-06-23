@@ -35,10 +35,10 @@ license = "MIT"
 Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
 Pong = { proto = "proto/pong.proto", message = "pong.Pong" }
 
-# 各プロジェクト = 実行時のトピック名(reiny/<name>)。
+# 各プロジェクトの name はプロセス名。トピックは型から決まる(型 = トピック、1:1)。
 [projects.ping]
-publications = ["Ping"]   # reiny/ping へ公開
-dependencies = ["Pong"]   # reiny/pong を購読
+publications = ["Ping"]   # 型 Ping を公開(reiny/ping-1/Ping)
+dependencies = ["Pong"]   # 型 Pong を購読(reiny/*/Pong)
 
 [projects.pong]
 publications = ["Pong"]
@@ -50,8 +50,8 @@ dependencies = ["Ping"]
 ```rust
 use reiny::internals::{Ping, Pong};
 
-let pings = cloudy.publish::<Ping>()?;       // [projects.ping].publications → reiny/ping
-let mut pongs = cloudy.subscribe::<Pong>()?; // [projects.ping].dependencies → reiny/pong
+let pings = cloudy.publish::<Ping>()?;       // [projects.ping].publications → reiny/ping-1/Ping
+let mut pongs = cloudy.subscribe::<Pong>()?; // [projects.ping].dependencies → reiny/*/Pong
 ```
 
 `reiny-build`(各 member の `build.rs` から呼ぶ)が上方の `Reiny.toml` を見つけ、
@@ -72,7 +72,7 @@ ping-pong-workspace/
 ├── ping/
 │   ├── Cargo.toml
 │   ├── build.rs        # reiny-build が上方の Reiny.toml を読む
-│   └── src/main.rs     # #[reiny::main] で reiny/ping cloudyを起動
+│   └── src/main.rs     # #[reiny::main] で ping プロセス(cloudy)を起動
 └── pong/
     └── (ping と対称)
 ```
@@ -86,6 +86,6 @@ ping-pong-workspace/
 reiny ping-pong.toml
 
 # または個別に、別々の端末で
-cargo run -p pong   # reiny/pong を待ち受け
-cargo run -p ping   # reiny/ping を打ち始める
+cargo run -p pong   # pong を起動(Ping を待ち受け)
+cargo run -p ping   # ping を起動(Ping を送信開始)
 ```

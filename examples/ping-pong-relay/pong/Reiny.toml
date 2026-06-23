@@ -1,12 +1,12 @@
 [project]
-# パイプラインの sink。reiny/relay を購読してログするだけで、何も公開しない。
+# パイプラインの sink。reiny/*/Relayed を購読してログするだけで、何も公開しない。
 name = "pong"
 version = "0.1.0"
 description = "パイプラインの sink。Relayed を受けて表示する(公開なし)。"
 authors = ["nop <noplab90@gmail.com>"]
 license = "MIT"
 
-# 純粋なシンクなので公開型なし(空)。トピック reiny/pong は持たない。
+# 純粋なシンクなので公開型なし(空)。公開する型が無い = 自分のトピックを持たない。
 [publications]
 
 # 中段 relay の Relayed を購読する。

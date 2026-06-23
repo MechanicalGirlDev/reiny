@@ -1,5 +1,5 @@
 [project]
-# パイプラインの source。reiny/ping へ Ping を流すだけ(購読なし)。
+# パイプラインの source。reiny/ping-1/Ping へ Ping を流すだけ(購読なし)。
 name = "ping"
 version = "0.1.0"
 description = "パイプラインの source。Ping を一定間隔で流す。"

@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-// ping プロジェクトが所有・公開する型。reiny/ping トピックを流れる。
+// ping が公開する型 Ping。publish は reiny/<id>/Ping、購読は reiny/*/Ping。
 package ping;
 
 // Ping: 1 往復ごとに送られる打球。

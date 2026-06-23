@@ -19,19 +19,19 @@ license = "MIT"
 Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
 Pong = { proto = "proto/pong.proto", message = "pong.Pong" }
 
-# 各プロジェクト = 実行時のトピック名(reiny/<name>)。
-# publications / dependencies は [internals] のキーを名前で参照する。
+# 各プロジェクトの name はプロセス/インスタンス名。トピックは型から決まる(型 = トピック、1:1)。
+# publications / dependencies は [internals] のキー(= 型 = トピック)を名前で参照する。
 
 [projects.ping]
 version = "0.1.0"
 description = "Ping を打って Pong を待つ。"
-# reiny/ping へ Ping を公開し、reiny/pong から Pong を購読する。
+# reiny/ping-1/Ping へ Ping を公開し、reiny/*/Pong から Pong を購読する。
 publications = ["Ping"]
 dependencies = ["Pong"]
 
 [projects.pong]
 version = "0.1.0"
 description = "Ping を受けるたびに Pong を返す。"
-# reiny/pong へ Pong を公開し、reiny/ping から Ping を購読する。
+# reiny/pong-1/Pong へ Pong を公開し、reiny/*/Ping から Ping を購読する。
 publications = ["Pong"]
 dependencies = ["Ping"]

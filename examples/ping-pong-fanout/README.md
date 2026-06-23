@@ -5,7 +5,7 @@ reiny の **到達目標** を示すサンプル。1 つの `ping` が打った 
 
 ```
                    ┌──▶ pong-1 ──┐
-ping ──Ping──▶ (reiny/ping)  pong-2  ──Pong──▶ ping
+ping ──Ping──▶ (reiny/ping-1/Ping)  pong-2  ──Pong──▶ ping
                    └──▶ pong-3 ──┘
 ```
 
@@ -15,19 +15,19 @@ ping ──Ping──▶ (reiny/ping)  pong-2  ──Pong──▶ ping
 > ⚠️ これは *設計サンプル* です。現状の reiny クレートだけでは **まだビルドは通りません**
 > (umbrella crate `reiny` と `reiny-build` は今後実装)。
 
-## 見どころ: 複数インスタンス × 型での購読
+## 見どころ: 型で購読 → fan-out
 
-同じ `pong` バイナリを 3 つ起動すると、reiny が **連番 id**(`pong-1` / `pong-2` /
-`pong-3`)を自動採番します。ping 側はトピック名やインスタンス数を一切意識せず、
-**型 `Pong` を購読するだけ**:
+各 pong インスタンスは自分の `reiny/<id>/Pong`(例 `reiny/pong-1/Pong`, `reiny/pong-2/Pong`)
+へ publish します。ping 側はインスタンス数を意識せず、**型 `Pong` を subscribe するだけ**。
+reiny はこれを `reiny/*/Pong` に展開するので、全インスタンスの `Pong` がまとまって届きます。
 
 ```rust
-let mut pongs = cloudy.subscribe::<Pong>()?; // 全 pong インスタンスの Pong がまとまって届く
+let mut pongs = cloudy.subscribe::<Pong>()?; // reiny/*/Pong — 全 pong インスタンス分が届く
 ```
 
-reiny は型(=プロジェクト)単位の購読をワイルドカードに展開するので、インスタンスが
-増減しても購読側は無変更です。各 `Pong` には返した `from`(例 `"pong-2"`)が載るので、
-誰が答えたか分かります。
+同じ `pong` バイナリを 3 つ起動すると reiny が **連番 id**(`pong-1` / `pong-2` / `pong-3`)を
+自動採番し、それが publish 先トピックの `<id>` になります。各 `Pong` の `from` にも載るので
+誰が答えたか分かり、インスタンスが増減しても **型で購読する** ping 側は無変更です。
 
 ## レイアウト
 
