@@ -1,0 +1,7 @@
+# このサンプルは「スクリプトで雛形を生成する」ことを見せる。
+# 生成物(reiny new/init が作るプロジェクト)はコミットしない。
+/ping/
+/pong/
+/target/
+/dist/
+Cargo.lock

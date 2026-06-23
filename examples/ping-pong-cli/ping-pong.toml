@@ -1,0 +1,12 @@
+# launch config — 雙方向 ping-pong。pong を先に上げてから ping を起こす
+# (取りこぼしを減らすため depends_on で起動順を固定)。
+#
+#   reiny run ping-pong.toml          # 推奨(将来像)
+#   reiny ping-pong.toml              # 位置引数ショートハンド
+#   reiny --config ping-pong.toml     # 現状のランチャ(reiny-launch)の形
+#
+# このファイルだけは手書きでコミットしておく。ping/ pong/ の中身は
+# 05-build.sh までで生成されるので .gitignore 済み。
+[grain]
+pong = { bin = "pong" }
+ping = { bin = "ping", depends_on = ["pong"] }
