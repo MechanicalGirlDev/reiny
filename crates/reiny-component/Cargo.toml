@@ -1,0 +1,23 @@
+[package]
+name = "reiny-component"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HOS component framework: Component trait, process/thread hosts"
+
+[features]
+# プラグイン SDK(plugin::Plugin / gui::GuiPanel)。有効化すると、自分の component が
+# hos/<id>/{gui,topics,configs} 名前空間で hs-gui へパネルを announce し、汎用 topics と
+# TOML config も配信できる。素のトレイト利用時は transport/proto を引かないよう、これら
+# 重い依存はフィーチャ配下の optional にしている(フィーチャ名は歴史的経緯で `gui`)。
+gui = ["dep:reiny-proto", "dep:reiny-transport"]
+
+[dependencies]
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+ctrlc = { workspace = true }
+reiny-proto = { path = "../reiny-proto", optional = true }
+reiny-transport = { path = "../reiny-transport", optional = true }

@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+// Pingメッセージ: UDP通信で使用するテスト用メッセージ
+message Ping {
+  // メッセージ内容
+  string message = 1;
+  // 送信時刻（Unixタイムスタンプ）
+  int64 sent_unix = 2;
+}

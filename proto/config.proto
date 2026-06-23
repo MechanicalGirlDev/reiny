@@ -1,0 +1,15 @@
+syntax = "proto3";
+package hos;
+
+// 設定バンドル (hs-app -> 各内部コンポーネント)
+//
+// hs-app が読み込んだ正準のロボット設定 TOML を、同一マシン上の他コンポーネントへ
+// そのまま運ぶ封筒。TOML が単一の真実の源であり、ここでは設定内容を再定義しない。
+// config_dir は受信側が相対パス (URDF など) を解決するためのベースディレクトリ。
+// config_path は受信側 (GUI の設定エディタ等) が robot config 本体を書き戻すための
+// 絶対ファイルパス (config_dir だけではファイル名が分からないため別に運ぶ)。
+message RobotConfigBundle {
+  string toml = 1;        // hs-app が読み込んだ生 TOML テキスト
+  string config_dir = 2;  // 設定ファイルの絶対ディレクトリ (相対パスのベース)
+  string config_path = 3; // 設定ファイルの絶対パス (robot config 本体のファイル)
+}

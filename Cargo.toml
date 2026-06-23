@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/reiny-proto",
+    "crates/reiny-transport",
+    "crates/reiny-component",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+# Protobuf
+prost = "0.13"
+prost-build = "0.13"
+prost-types = "0.13"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# プロセス横断の Ctrl+C ハンドラ
+ctrlc = "3"
+
+# Zenoh pub/sub
+zenoh = { version = "1.0", default-features = false, features = ["transport_tcp", "transport_udp"] }

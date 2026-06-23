@@ -1,0 +1,37 @@
+syntax = "proto3";
+package hos;
+import "types/geometry.proto";
+import "types/time.proto";
+
+// 腕のコマンド
+message ArmCommand {
+  Pose target_pose = 1;          // エンドエフェクタ目標
+  float gripper_value = 2;       // グリッパー開閉 (0.0-1.0)
+}
+
+// テレオペコマンド (Unity -> Rust)
+message TeleopCommand {
+  Timestamp timestamp = 1;
+  ArmCommand left_arm = 2;
+  ArmCommand right_arm = 3;
+  InputMode input_mode = 4;
+
+  enum InputMode {
+    CONTROLLER = 0;
+    HAND_TRACKING = 1;
+  }
+}
+
+// ハンドジョイント
+message HandJoints {
+  repeated float joint_angles = 1;  // 指関節角度 (手のボーン数分)
+}
+
+// ハンドトラッキングコマンド (Unity -> Rust)
+message HandTrackingCommand {
+  Timestamp timestamp = 1;
+  Pose left_wrist = 2;
+  Pose right_wrist = 3;
+  HandJoints left_hand = 4;
+  HandJoints right_hand = 5;
+}
