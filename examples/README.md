@@ -3,10 +3,9 @@
 reiny の **到達目標** を示すサンプル集。どれも題材は最小の ping-pong 通信に統一し、
 1 つの軸だけを変えて見せています。
 
-> ⚠️ これらは「こう書けるようにしたい」という *設計サンプル* です。現状の reiny クレート
-> (`reiny-proto` / `reiny-transport` / `reiny-grain` / `reiny-launch`)だけでは
-> **まだビルドは通りません**。前提となる umbrella crate `reiny`(SDK + `#[reiny::main]` +
-> `Cloudy` ハンドル)と `reiny-build`(Reiny.toml パーサ + コード生成)は今後の実装対象です。
+> ⚠️ これらは「こう書けるようにしたい」という *設計サンプル* です。前提となる umbrella crate
+> `reiny`(SDK + `#[reiny::main]` + `Cloudy` ハンドル)と `reiny-build`(Reiny.toml パーサ +
+> コード生成)、ランチャ `reiny-launch` を土台にしています。
 
 ## 共通の約束
 

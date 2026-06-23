@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/reiny-proto",
-    "crates/reiny-transport",
-    "crates/reiny-grain",
     "crates/reiny-launch",
+    "crates/reiny-macros",
+    "crates/reiny",
+    "crates/reiny-build",
 ]
 # examples/ は到達目標を示す設計サンプル(独立ワークスペース)。まだビルドが通らないので
 # ルートのビルド・テストには巻き込まない。
@@ -16,10 +16,9 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-# Protobuf
+# Protobuf(reiny-build が各 grain の proto をコンパイルするのに使う)
 prost = "0.13"
 prost-build = "0.13"
-prost-types = "0.13"
 # protoc バイナリをクレートとして同梱し、外部インストール不要でビルドできるようにする
 protoc-bin-vendored = "3"
 
@@ -46,3 +45,8 @@ ctrlc = "3"
 
 # Zenoh pub/sub
 zenoh = { version = "1.0", default-features = false, features = ["transport_tcp", "transport_udp"] }
+
+# proc-macro 実装(#[reiny::main])
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

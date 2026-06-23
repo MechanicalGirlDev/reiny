@@ -8,7 +8,7 @@
 
 use reiny::prelude::*;
 
-use reiny::dependencies::relay::Relayed;
+use crate::dependencies::relay::Relayed;
 
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {

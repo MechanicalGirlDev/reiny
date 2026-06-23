@@ -4,6 +4,7 @@
 //!  - [publications] の proto をコンパイルして `reiny::publications::*` を生成
 //!  - [dependencies] の各プロジェクトの公開型を解決して `reiny::dependencies::<project>::*` を生成
 //!  - 「型 → トピック」マッピング(publish: Pong → reiny/<id>/Pong、subscribe: Ping → reiny/*/Ping)を埋め込む
+//!
 //! ことで、main.rs では型を指定するだけで publish/subscribe 先が決まる。
 fn main() {
     reiny_build::compile().expect("reiny codegen from Reiny.toml");

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use reiny::prelude::*;
 
-use reiny::publications::Ping;
+use crate::publications::Ping;
 
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {

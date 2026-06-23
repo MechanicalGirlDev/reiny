@@ -10,14 +10,12 @@ on:
     paths:
       - "examples/**"
       - "crates/**"
-      - "proto/**"
       - "rust-toolchain.toml"
       - ".github/workflows/examples.yml"
   pull_request:
     paths:
       - "examples/**"
       - "crates/**"
-      - "proto/**"
       - "rust-toolchain.toml"
       - ".github/workflows/examples.yml"
 

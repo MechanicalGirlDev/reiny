@@ -29,7 +29,7 @@ impl Shutdown {
         self.inner.notify.notify_waiters();
     }
 
-    /// トリガ済みかをポーリングで確認する（GUI 等の同期ループ用）。
+    /// トリガ済みかをポーリングで確認する。
     pub fn is_triggered(&self) -> bool {
         self.inner.flag.load(Ordering::SeqCst)
     }
