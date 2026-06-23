@@ -1,22 +1,22 @@
-//! GUI facet — プラグインの「画面」記述。`gui` フィーチャでのみ有効。
+//! GUI facet — grain の「画面」記述。`gui` フィーチャでのみ有効。
 //!
-//! [`GuiPanel`] で宣言的にパネル構成を組み立て、[`Plugin::gui`](crate::plugin::Plugin::gui) へ
-//! 渡す。パネルは [`PluginLayout`] として低レートで再 announce され、hs-gui がワイルドカードで
-//! 拾ってタブとして描画する。値の更新と操作の取得は [`PluginHandle`](crate::plugin::PluginHandle)
+//! [`GuiPanel`] で宣言的にパネル構成を組み立て、[`Grain::gui`](crate::grain::Grain::gui) へ
+//! 渡す。パネルは [`GrainLayout`] として低レートで再 announce され、hs-gui がワイルドカードで
+//! 拾ってタブとして描画する。値の更新と操作の取得は [`GrainHandle`](crate::grain::GrainHandle)
 //! 側のメソッドで行う(GUI は 1 facet にすぎず、topics/configs と同じインスタンスにぶら下がる)。
 //!
 //! ```no_run
-//! use reiny_component::gui::GuiPanel;
-//! use reiny_component::plugin::Plugin;
-//! # use reiny_component::Shutdown;
+//! use reiny_grain::gui::GuiPanel;
+//! use reiny_grain::grain::Grain;
+//! # use reiny_grain::Shutdown;
 //! # fn run(shutdown: Shutdown) -> anyhow::Result<()> {
 //! let panel = GuiPanel::new("System Monitor")
 //!     .gauge("cpu", "CPU", "cpu", 0.0, 100.0, "%")
 //!     .button("greet", "Greet");
-//! let plugin = Plugin::new("system-monitor").gui(panel).serve(shutdown.clone())?;
+//! let grain = Grain::new("system-monitor").gui(panel).serve(shutdown.clone())?;
 //! while !shutdown.is_triggered() {
-//!     plugin.set_number("cpu", 42.0);
-//!     while let Some(cmd) = plugin.try_command() {
+//!     grain.set_number("cpu", 42.0);
+//!     while let Some(cmd) = grain.try_command() {
 //!         tracing::info!("widget {} pressed", cmd.widget_id);
 //!     }
 //!     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -24,100 +24,98 @@
 //! # Ok(()) }
 //! ```
 
-use reiny_proto::{
-    PluginLayout, PluginValue, PluginWidget, plugin_value, plugin_widget::Kind,
-};
+use reiny_proto::{GrainLayout, GrainValue, GrainWidget, grain_value, grain_widget::Kind};
 
-/// 受信した操作コマンド。プラグイン作者は proto に直接依存せず、これと
+/// 受信した操作コマンド。grain 作者は proto に直接依存せず、これと
 /// [`command_number`] / [`command_flag`] / [`command_text`] で値を読める。
-pub use reiny_proto::PluginCommand;
+pub use reiny_proto::GrainCommand;
 
 /// 操作コマンドの値を数値として読む(数値以外/未設定は None)。
-pub fn command_number(cmd: &PluginCommand) -> Option<f64> {
+pub fn command_number(cmd: &GrainCommand) -> Option<f64> {
     match cmd.value.as_ref().and_then(|v| v.v.as_ref()) {
-        Some(plugin_value::V::Number(n)) => Some(*n),
+        Some(grain_value::V::Number(n)) => Some(*n),
         _ => None,
     }
 }
 /// 操作コマンドの値を真偽として読む(ボタンは true、トグルは ON/OFF)。
-pub fn command_flag(cmd: &PluginCommand) -> Option<bool> {
+pub fn command_flag(cmd: &GrainCommand) -> Option<bool> {
     match cmd.value.as_ref().and_then(|v| v.v.as_ref()) {
-        Some(plugin_value::V::Flag(b)) => Some(*b),
+        Some(grain_value::V::Flag(b)) => Some(*b),
         _ => None,
     }
 }
 /// 操作コマンドの値を文字列として読む(ドロップダウンの選択肢)。
-pub fn command_text(cmd: &PluginCommand) -> Option<String> {
+pub fn command_text(cmd: &GrainCommand) -> Option<String> {
     match cmd.value.as_ref().and_then(|v| v.v.as_ref()) {
-        Some(plugin_value::V::Text(s)) => Some(s.clone()),
+        Some(grain_value::V::Text(s)) => Some(s.clone()),
         _ => None,
     }
 }
 /// 操作コマンドの値を3次元ベクトルとして読む(Controller の速度指令 [vx, vy, ωz])。
-pub fn command_vec3(cmd: &PluginCommand) -> Option<[f64; 3]> {
+pub fn command_vec3(cmd: &GrainCommand) -> Option<[f64; 3]> {
     match cmd.value.as_ref().and_then(|v| v.v.as_ref()) {
-        Some(plugin_value::V::Vec3(v)) => Some([v.x, v.y, v.z]),
+        Some(grain_value::V::Vec3(v)) => Some([v.x, v.y, v.z]),
         _ => None,
     }
 }
 /// 操作コマンドの値を float 配列として読む(配列以外/未設定は None)。
-pub fn command_array(cmd: &PluginCommand) -> Option<Vec<f64>> {
+pub fn command_array(cmd: &GrainCommand) -> Option<Vec<f64>> {
     match cmd.value.as_ref().and_then(|v| v.v.as_ref()) {
-        Some(plugin_value::V::Array(a)) => Some(a.values.clone()),
+        Some(grain_value::V::Array(a)) => Some(a.values.clone()),
         _ => None,
     }
 }
 
-/// 受信した [`PluginValue`](topics 購読など)を数値として読む(数値以外/未設定は None)。
-pub fn value_as_number(v: &PluginValue) -> Option<f64> {
+/// 受信した [`GrainValue`](topics 購読など)を数値として読む(数値以外/未設定は None)。
+pub fn value_as_number(v: &GrainValue) -> Option<f64> {
     match v.v.as_ref() {
-        Some(plugin_value::V::Number(n)) => Some(*n),
+        Some(grain_value::V::Number(n)) => Some(*n),
         _ => None,
     }
 }
-/// 受信した [`PluginValue`] を真偽として読む。
-pub fn value_as_flag(v: &PluginValue) -> Option<bool> {
+/// 受信した [`GrainValue`] を真偽として読む。
+pub fn value_as_flag(v: &GrainValue) -> Option<bool> {
     match v.v.as_ref() {
-        Some(plugin_value::V::Flag(b)) => Some(*b),
+        Some(grain_value::V::Flag(b)) => Some(*b),
         _ => None,
     }
 }
-/// 受信した [`PluginValue`] を文字列として読む。
-pub fn value_as_text(v: &PluginValue) -> Option<String> {
+/// 受信した [`GrainValue`] を文字列として読む。
+pub fn value_as_text(v: &GrainValue) -> Option<String> {
     match v.v.as_ref() {
-        Some(plugin_value::V::Text(s)) => Some(s.clone()),
+        Some(grain_value::V::Text(s)) => Some(s.clone()),
         _ => None,
     }
 }
-/// 受信した [`PluginValue`] を3次元ベクトルとして読む。
-pub fn value_as_vec3(v: &PluginValue) -> Option<[f64; 3]> {
+/// 受信した [`GrainValue`] を3次元ベクトルとして読む。
+pub fn value_as_vec3(v: &GrainValue) -> Option<[f64; 3]> {
     match v.v.as_ref() {
-        Some(plugin_value::V::Vec3(v)) => Some([v.x, v.y, v.z]),
+        Some(grain_value::V::Vec3(v)) => Some([v.x, v.y, v.z]),
         _ => None,
     }
 }
-/// 受信した [`PluginValue`] を float 配列として読む(topics の構造化テレメトリ用)。
-pub fn value_as_array(v: &PluginValue) -> Option<Vec<f64>> {
+/// 受信した [`GrainValue`] を float 配列として読む(topics の構造化テレメトリ用)。
+pub fn value_as_array(v: &GrainValue) -> Option<Vec<f64>> {
     match v.v.as_ref() {
-        Some(plugin_value::V::Array(a)) => Some(a.values.clone()),
+        Some(grain_value::V::Array(a)) => Some(a.values.clone()),
         _ => None,
     }
 }
 
 /// 宣言的なパネル構成ビルダ。`new` → ウィジェット追加メソッドを連ねて
-/// [`Plugin::gui`](crate::plugin::Plugin::gui) へ渡す。`plugin_id` はインスタンス側で
+/// [`Grain::gui`](crate::grain::Grain::gui) へ渡す。`grain_id` はインスタンス側で
 /// 採番後の連番 id(例: `system-monitor-1`)が注入されるため、ここでは設定しない。
 #[derive(Debug, Clone)]
 pub struct GuiPanel {
-    layout: PluginLayout,
+    layout: GrainLayout,
 }
 
 impl GuiPanel {
     /// `title`(タブ見出し)でパネルを開始する。
     pub fn new(title: impl Into<String>) -> Self {
         Self {
-            layout: PluginLayout {
-                plugin_id: String::new(), // serve 時に採番済み id が入る
+            layout: GrainLayout {
+                grain_id: String::new(), // serve 時に採番済み id が入る
                 title: title.into(),
                 widgets: Vec::new(),
             },
@@ -125,7 +123,7 @@ impl GuiPanel {
     }
 
     fn push(mut self, id: &str, label: &str, bind_key: &str, kind: Kind) -> Self {
-        self.layout.widgets.push(PluginWidget {
+        self.layout.widgets.push(GrainWidget {
             id: id.to_string(),
             label: label.to_string(),
             bind_key: bind_key.to_string(),
@@ -176,12 +174,7 @@ impl GuiPanel {
 
     /// 押下で `flag:true` を送るボタン(表示値なし)。
     pub fn button(self, id: &str, label: &str) -> Self {
-        self.push(
-            id,
-            label,
-            "",
-            Kind::Button(reiny_proto::ButtonWidget {}),
-        )
+        self.push(id, label, "", Kind::Button(reiny_proto::ButtonWidget {}))
     }
 
     /// 連続値スライダー(変化時に `number` を送出)。現在値は `bind_key` で表示。
@@ -218,7 +211,7 @@ impl GuiPanel {
 
     /// 移動速度指令コントローラー(左右ジョイスティック＋WASD/QE＋vx/vy/ωz 上限)。
     /// hs-gui が描画・入力捕捉し、毎フレーム `vec3`([vx, vy, ωz])を送出する。
-    /// プラグインは [`command_vec3`] で読み、`hos/control/command_velocity` 等へ流す。
+    /// grain は [`command_vec3`] で読み、`hos/control/command_velocity` 等へ流す。
     pub fn controller(self, id: &str, label: &str) -> Self {
         self.push(
             id,
@@ -228,31 +221,31 @@ impl GuiPanel {
         )
     }
 
-    /// 構築済み [`PluginLayout`](内部用)。
-    pub(crate) fn into_layout(self) -> PluginLayout {
+    /// 構築済み [`GrainLayout`](内部用)。
+    pub(crate) fn into_layout(self) -> GrainLayout {
         self.layout
     }
 }
 
-// `PluginValue` は他クレート(proto)の型なので孤児則により `From` は実装できない。
+// `GrainValue` は他クレート(proto)の型なので孤児則により `From` は実装できない。
 // 代わりに小さなコンストラクタを提供し、型付きセッターから使う。
-pub(crate) fn value_number(n: f64) -> PluginValue {
-    PluginValue {
-        v: Some(plugin_value::V::Number(n)),
+pub(crate) fn value_number(n: f64) -> GrainValue {
+    GrainValue {
+        v: Some(grain_value::V::Number(n)),
     }
 }
-pub(crate) fn value_flag(b: bool) -> PluginValue {
-    PluginValue {
-        v: Some(plugin_value::V::Flag(b)),
+pub(crate) fn value_flag(b: bool) -> GrainValue {
+    GrainValue {
+        v: Some(grain_value::V::Flag(b)),
     }
 }
-pub(crate) fn value_text(s: String) -> PluginValue {
-    PluginValue {
-        v: Some(plugin_value::V::Text(s)),
+pub(crate) fn value_text(s: String) -> GrainValue {
+    GrainValue {
+        v: Some(grain_value::V::Text(s)),
     }
 }
-pub(crate) fn value_array(values: Vec<f64>) -> PluginValue {
-    PluginValue {
-        v: Some(plugin_value::V::Array(reiny_proto::FloatArray { values })),
+pub(crate) fn value_array(values: Vec<f64>) -> GrainValue {
+    GrainValue {
+        v: Some(grain_value::V::Array(reiny_proto::FloatArray { values })),
     }
 }

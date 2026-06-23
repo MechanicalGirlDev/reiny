@@ -86,56 +86,56 @@ pub mod topics {
     /// シーン編集コマンド (SceneControl: spawn/despawn/set_transform) GUI -> hs-app
     pub const SCENE_CONTROL: &str = "hos/scene/control";
 
-    // ---- プラグインインスタンス名前空間 (hos/<id>/...) ----
-    // 任意の component インスタンスが own する名前空間。<id> は基底名 + 起動順の連番
+    // ---- grain インスタンス名前空間 (hos/<id>/...) ----
+    // 任意の grain インスタンスが own する名前空間。<id> は基底名 + 起動順の連番
     // (例: system-monitor-1)。1 インスタンスは最大 3 つの facet を持つ:
     //   - gui     : GUI パネル。layout(構成)/data(値)/command(操作) + 生存 token hos/<id>/gui。
-    //   - topics  : プラグイン独自の汎用 pub/sub (hos/<id>/topics/<name>)。
-    //   - configs : プラグインの TOML 設定 (RobotConfigBundle 同形で外向きに publish)。
+    //   - topics  : grain 独自の汎用 pub/sub (hos/<id>/topics/<name>)。
+    //   - configs : grain の TOML 設定 (RobotConfigBundle 同形で外向きに publish)。
     // インスタンスの生存(= id の占有)は liveliness token hos/<id> で表す。起動時の連番採番は
     // この token を hos/* で走査して占有中の id を集め、空き最小の連番を取る。hos/* は hos の
     // 直下 1 セグメントだけに一致するため、hos/<id>/gui 等の facet token とは衝突しない。
 
     /// インスタンス生存 token 走査用ワイルドカード(連番採番で占有中 id を集める)。
-    pub const PLUGIN_INSTANCE_ALL: &str = "hos/*";
+    pub const GRAIN_INSTANCE_ALL: &str = "hos/*";
     /// GUI facet 生存 token 購読用ワイルドカード(hs-gui が GUI 付きインスタンスを拾う)。
-    pub const PLUGIN_GUI_ALL: &str = "hos/*/gui";
+    pub const GRAIN_GUI_ALL: &str = "hos/*/gui";
     /// GUI layout 購読用ワイルドカード(hs-gui が全 GUI パネルの構成宣言を受ける)。
-    pub const PLUGIN_GUI_LAYOUT_ALL: &str = "hos/*/gui/layout";
+    pub const GRAIN_GUI_LAYOUT_ALL: &str = "hos/*/gui/layout";
     /// GUI data 購読用ワイルドカード(hs-gui が全 GUI パネルの値を受ける)。
-    pub const PLUGIN_GUI_DATA_ALL: &str = "hos/*/gui/data";
+    pub const GRAIN_GUI_DATA_ALL: &str = "hos/*/gui/data";
 
     /// インスタンス生存 token キー(id 占有マーカ。GUI の有無に依らず全インスタンスが宣言)。
-    pub fn plugin_instance_liveliness(id: &str) -> String {
+    pub fn grain_instance_liveliness(id: &str) -> String {
         format!("hos/{id}")
     }
     /// GUI facet 生存 token キー(GUI パネルを持つインスタンスが宣言。hs-gui が出現/退場を観測)。
-    pub fn plugin_gui_liveliness(id: &str) -> String {
+    pub fn grain_gui_liveliness(id: &str) -> String {
         format!("hos/{id}/gui")
     }
-    /// GUI layout キー(構成宣言: プラグイン -> hs-gui)。
-    pub fn plugin_gui_layout(id: &str) -> String {
+    /// GUI layout キー(構成宣言: grain -> hs-gui)。
+    pub fn grain_gui_layout(id: &str) -> String {
         format!("hos/{id}/gui/layout")
     }
-    /// GUI data キー(値: プラグイン -> hs-gui)。
-    pub fn plugin_gui_data(id: &str) -> String {
+    /// GUI data キー(値: grain -> hs-gui)。
+    pub fn grain_gui_data(id: &str) -> String {
         format!("hos/{id}/gui/data")
     }
-    /// GUI command キー(操作: hs-gui -> プラグイン)。
-    pub fn plugin_gui_command(id: &str) -> String {
+    /// GUI command キー(操作: hs-gui -> grain)。
+    pub fn grain_gui_command(id: &str) -> String {
         format!("hos/{id}/gui/command")
     }
-    /// configs facet キー(プラグインの生 TOML 設定: プラグイン -> 外部。読取専用)。
-    pub fn plugin_config(id: &str) -> String {
+    /// configs facet キー(grain の生 TOML 設定: grain -> 外部。読取専用)。
+    pub fn grain_config(id: &str) -> String {
         format!("hos/{id}/configs")
     }
-    /// topics facet 個別キー(プラグイン独自データ: プラグイン -> 任意の購読者)。
-    pub fn plugin_topic(id: &str, name: &str) -> String {
+    /// topics facet 個別キー(grain 独自データ: grain -> 任意の購読者)。
+    pub fn grain_topic(id: &str, name: &str) -> String {
         format!("hos/{id}/topics/{name}")
     }
     /// topics facet 購読用ワイルドカード(同名トピックを全インスタンス横断で拾う)。
-    /// 連番 (-N) に縛られず「name で」購読できるので、プラグイン間連携で便利。
-    pub fn plugin_topic_any(name: &str) -> String {
+    /// 連番 (-N) に縛られず「name で」購読できるので、grain 間連携で便利。
+    pub fn grain_topic_any(name: &str) -> String {
         format!("hos/*/topics/{name}")
     }
 }
@@ -186,39 +186,36 @@ mod topic_tests {
     }
 
     #[test]
-    fn plugin_namespace_is_id_first() {
+    fn grain_namespace_is_id_first() {
         // facet は id の後ろ(hos/<id>/<facet>)。連番 id をそのまま流し込める。
         let id = "system-monitor-1";
         assert_eq!(
-            topics::plugin_instance_liveliness(id),
+            topics::grain_instance_liveliness(id),
             "hos/system-monitor-1"
         );
+        assert_eq!(topics::grain_gui_liveliness(id), "hos/system-monitor-1/gui");
         assert_eq!(
-            topics::plugin_gui_liveliness(id),
-            "hos/system-monitor-1/gui"
-        );
-        assert_eq!(
-            topics::plugin_gui_layout(id),
+            topics::grain_gui_layout(id),
             "hos/system-monitor-1/gui/layout"
         );
-        assert_eq!(topics::plugin_gui_data(id), "hos/system-monitor-1/gui/data");
+        assert_eq!(topics::grain_gui_data(id), "hos/system-monitor-1/gui/data");
         assert_eq!(
-            topics::plugin_gui_command(id),
+            topics::grain_gui_command(id),
             "hos/system-monitor-1/gui/command"
         );
-        assert_eq!(topics::plugin_config(id), "hos/system-monitor-1/configs");
+        assert_eq!(topics::grain_config(id), "hos/system-monitor-1/configs");
         assert_eq!(
-            topics::plugin_topic(id, "wave"),
+            topics::grain_topic(id, "wave"),
             "hos/system-monitor-1/topics/wave"
         );
-        assert_eq!(topics::plugin_topic_any("wave"), "hos/*/topics/wave");
+        assert_eq!(topics::grain_topic_any("wave"), "hos/*/topics/wave");
     }
 
     #[test]
     fn instance_wildcard_does_not_match_gui_facet() {
         // hos/* はインスタンス token(1 セグメント)だけ。facet token(hos/<id>/gui)とは
         // セグメント数が違うので採番走査が GUI token を拾わない、という前提を固定する。
-        assert_eq!(topics::PLUGIN_INSTANCE_ALL, "hos/*");
-        assert_eq!(topics::PLUGIN_GUI_ALL, "hos/*/gui");
+        assert_eq!(topics::GRAIN_INSTANCE_ALL, "hos/*");
+        assert_eq!(topics::GRAIN_GUI_ALL, "hos/*/gui");
     }
 }

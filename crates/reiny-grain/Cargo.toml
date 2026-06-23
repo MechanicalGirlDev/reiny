@@ -1,0 +1,20 @@
+[package]
+name = "reiny-grain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HOS grain SDK: self-announcing hos/<id>/{gui,topics,configs} instances over Zenoh"
+
+[features]
+# Grain SDK(grain::Grain / gui::GuiPanel)。有効化すると、自分の grain が
+# hos/<id>/{gui,topics,configs} 名前空間で hs-gui へパネルを announce し、汎用 topics と
+# TOML config も配信できる。素の `Shutdown` だけ使う場合は transport/proto を引かないよう、
+# これら重い依存はフィーチャ配下の optional にしている(フィーチャ名は歴史的経緯で `gui`)。
+gui = ["dep:reiny-proto", "dep:reiny-transport"]
+
+[dependencies]
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+reiny-proto = { path = "../reiny-proto", optional = true }
+reiny-transport = { path = "../reiny-transport", optional = true }

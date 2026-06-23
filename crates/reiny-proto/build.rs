@@ -27,7 +27,7 @@ fn main() -> Result<()> {
             proto_dir.join("control.proto"),
             proto_dir.join("sim.proto"),
             proto_dir.join("scene.proto"),
-            proto_dir.join("plugin.proto"),
+            proto_dir.join("grain.proto"),
         ],
         &[&proto_dir],
     )?;

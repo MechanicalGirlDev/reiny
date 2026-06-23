@@ -2,20 +2,20 @@ syntax = "proto3";
 package hos;
 import "types/time.proto";
 
-// GUI プラグイン announce 機構用メッセージ。プラグイン(任意の component)と hs-gui の間で、
-// パネル構成の宣言(hos/gui/<id>/layout)・データ配信(hos/gui/<id>/data)・操作コマンド
-// (hos/gui/<id>/command)に使う。Unity(teleop)は購読しない GUI↔プラグイン内部契約。
+// GUI grain announce 機構用メッセージ。grain(任意のプロセス)と hs-gui の間で、
+// パネル構成の宣言(hos/<id>/gui/layout)・データ配信(hos/<id>/gui/data)・操作コマンド
+// (hos/<id>/gui/command)に使う。Unity(teleop)は購読しない GUI↔grain 内部契約。
 //
 // 設計の肝:
 // - hs-gui は proto スキーマに依存せず「汎用 key→value」だけを扱う。ウィジェットは
-//   `bind_key` で PluginData.values のキーを参照し、レンダラはロボット固有の型を一切知らない。
-// - プラグインの生存は Zenoh liveliness token(hos/gui/<id>)で表現する。token が消えると
-//   hs-gui は当該タブを破棄する(= 遅延ロード/外部プラグインの動的 出現/退場)。
+//   `bind_key` で GrainData.values のキーを参照し、レンダラはロボット固有の型を一切知らない。
+// - grain の生存は Zenoh liveliness token(hos/<id>/gui)で表現する。token が消えると
+//   hs-gui は当該タブを破棄する(= 遅延ロード/外部 grain の動的 出現/退場)。
 // - layout は低レートで再 announce する(後から起動した hs-gui が拾えるように。CONFIG と同思想)。
 
 // ウィジェットが表示/送出する 1 つの値。型は表示側が解釈する(数値→ラベル/ゲージ/グラフ、
 // 真偽→トグル、文字列→ラベル/ドロップダウン選択 など)。
-message PluginValue {
+message GrainValue {
   oneof v {
     double number = 1;
     bool flag = 2;
@@ -38,13 +38,13 @@ message FloatArray {
   repeated double values = 1;
 }
 
-// ウィジェット 1 個の宣言。`id` はプラグイン内で一意で、command のルーティングに使う。
-// `bind_key` は PluginData.values のキー(表示値の参照先)。操作系ウィジェットも、現在値を
+// ウィジェット 1 個の宣言。`id` は grain 内で一意で、command のルーティングに使う。
+// `bind_key` は GrainData.values のキー(表示値の参照先)。操作系ウィジェットも、現在値を
 // 表示するために bind_key を持てる(空なら未バインド)。
-message PluginWidget {
-  string id = 1;           // プラグイン内で一意。PluginCommand.widget_id と対応。
+message GrainWidget {
+  string id = 1;           // grain 内で一意。GrainCommand.widget_id と対応。
   string label = 2;        // 表示ラベル。
-  string bind_key = 3;     // PluginData.values のキー(表示値)。空=バインドなし。
+  string bind_key = 3;     // GrainData.values のキー(表示値)。空=バインドなし。
 
   oneof kind {
     LabelWidget label_widget = 10;
@@ -70,59 +70,59 @@ message GaugeWidget {
   string unit = 3;
 }
 
-// 時系列ライングラフ。履歴は hs-gui 側がリングバッファで保持する(プラグインは現在値のみ送る)。
+// 時系列ライングラフ。履歴は hs-gui 側がリングバッファで保持する(grain は現在値のみ送る)。
 message GraphWidget {
   uint32 history = 1;     // 保持サンプル数(0 のとき hs-gui 既定)。
   double min = 2;         // y 軸下限。min==max のとき自動スケール。
   double max = 3;         // y 軸上限。
 }
 
-// 押下で PluginCommand(value=flag:true)を 1 回送出するボタン。
+// 押下で GrainCommand(value=flag:true)を 1 回送出するボタン。
 message ButtonWidget {
 }
 
-// 連続値スライダー。変化時に PluginCommand(value=number)を送出する。
+// 連続値スライダー。変化時に GrainCommand(value=number)を送出する。
 message SliderWidget {
   double min = 1;
   double max = 2;
   double step = 3;        // 0 のとき連続。
 }
 
-// ON/OFF トグル。変化時に PluginCommand(value=flag)を送出する。
+// ON/OFF トグル。変化時に GrainCommand(value=flag)を送出する。
 message ToggleWidget {
   // 現在状態は bind_key 経由(flag)で受ける。
 }
 
-// 選択肢ドロップダウン。選択時に PluginCommand(value=text:選択肢)を送出する。
+// 選択肢ドロップダウン。選択時に GrainCommand(value=text:選択肢)を送出する。
 message DropdownWidget {
   repeated string options = 1;
 }
 
 // 移動速度指令コントローラー。左右の X-Y ジョイスティック(マウスドラッグ)＋ WASD/QE キーボードと
 // vx/vy/ωz 上限スライダーから、スケール済みの速度指令 [vx, vy, ωz] を生成する。表示・入力捕捉は
-// hs-gui(ウィンドウ所有プロセス)が行い、毎フレーム PluginCommand(value=vec3)を送出する。
+// hs-gui(ウィンドウ所有プロセス)が行い、毎フレーム GrainCommand(value=vec3)を送出する。
 // 操作していない/タブ非表示のフレームはゼロを送る(デッドマン)。上限の既定値は hs-gui 側に従う。
 message ControllerWidget {
 }
 
-// hos/gui/<id>/layout — パネル構成の宣言(プラグイン -> hs-gui)。低レートで再 announce。
-message PluginLayout {
-  string plugin_id = 1;          // 一意。liveliness token / トピックキーの <id> と一致させる。
+// hos/<id>/gui/layout — パネル構成の宣言(grain -> hs-gui)。低レートで再 announce。
+message GrainLayout {
+  string grain_id = 1;           // 一意。liveliness token / トピックキーの <id> と一致させる。
   string title = 2;              // タブ見出し。
-  repeated PluginWidget widgets = 3;
+  repeated GrainWidget widgets = 3;
 }
 
-// hos/gui/<id>/data — ウィジェットへバインドする値(プラグイン -> hs-gui)。任意レート。
-message PluginData {
-  string plugin_id = 1;
+// hos/<id>/gui/data — ウィジェットへバインドする値(grain -> hs-gui)。任意レート。
+message GrainData {
+  string grain_id = 1;
   Timestamp timestamp = 2;
-  map<string, PluginValue> values = 3;  // PluginWidget.bind_key で参照。
+  map<string, GrainValue> values = 3;  // GrainWidget.bind_key で参照。
 }
 
-// hos/gui/<id>/command — ウィジェット操作(hs-gui -> プラグイン)。
-message PluginCommand {
-  string plugin_id = 1;
+// hos/<id>/gui/command — ウィジェット操作(hs-gui -> grain)。
+message GrainCommand {
+  string grain_id = 1;
   Timestamp timestamp = 2;
-  string widget_id = 3;          // 操作されたウィジェット(PluginWidget.id)。
-  PluginValue value = 4;         // ボタン=flag:true / スライダー=number / トグル=flag / ドロップダウン=text。
+  string widget_id = 3;          // 操作されたウィジェット(GrainWidget.id)。
+  GrainValue value = 4;          // ボタン=flag:true / スライダー=number / トグル=flag / ドロップダウン=text。
 }
