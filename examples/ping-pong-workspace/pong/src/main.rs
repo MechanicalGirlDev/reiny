@@ -13,13 +13,13 @@ use reiny::prelude::*;
 use reiny::types::{Ping, Pong};
 
 /// `#[reiny::main]` は workspace の Reiny.toml を読み、このバイナリ名に対応する
-/// [projects.pong] からノード(reiny/pong)を起動して `Node` を渡す。
+/// [projects.pong] からcloudy(reiny/pong)を起動して `Cloudy` を渡す。
 #[reiny::main]
-async fn main(node: Node) -> reiny::Result<()> {
+async fn main(cloudy: Cloudy) -> reiny::Result<()> {
     // Pong は [projects.pong].publications にあるので reiny/pong へ送れる。
-    let pongs = node.publish::<Pong>()?;
+    let pongs = cloudy.publish::<Pong>()?;
     // Ping は [projects.pong].dependencies にあるので reiny/ping を購読できる。
-    let mut pings = node.subscribe::<Ping>()?;
+    let mut pings = cloudy.subscribe::<Ping>()?;
 
     // Ping を受けるたびに、同じ seq で打ち返す。shutdown(Ctrl+C)で抜ける。
     while let Some(ping) = pings.recv().await {
@@ -27,7 +27,7 @@ async fn main(node: Node) -> reiny::Result<()> {
         pongs.send(Pong {
             seq: ping.seq,
             message: "pong".into(),
-            replied_unix: node.now_unix(),
+            replied_unix: cloudy.now_unix(),
         })
         .await?;
         tracing::info!(seq = ping.seq, "pong →");

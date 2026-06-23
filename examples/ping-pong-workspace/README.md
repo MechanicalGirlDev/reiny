@@ -50,8 +50,8 @@ dependencies = ["Ping"]
 ```rust
 use reiny::types::{Ping, Pong};
 
-let pings = node.publish::<Ping>()?;       // [projects.ping].publications → reiny/ping
-let mut pongs = node.subscribe::<Pong>()?; // [projects.ping].dependencies → reiny/pong
+let pings = cloudy.publish::<Ping>()?;       // [projects.ping].publications → reiny/ping
+let mut pongs = cloudy.subscribe::<Pong>()?; // [projects.ping].dependencies → reiny/pong
 ```
 
 `reiny-build`(各 member の `build.rs` から呼ぶ)が上方の `Reiny.toml` を見つけ、
@@ -72,7 +72,7 @@ ping-pong-workspace/
 ├── ping/
 │   ├── Cargo.toml
 │   ├── build.rs        # reiny-build が上方の Reiny.toml を読む
-│   └── src/main.rs     # #[reiny::main] で reiny/ping ノードを起動
+│   └── src/main.rs     # #[reiny::main] で reiny/ping cloudyを起動
 └── pong/
     └── (ping と対称)
 ```
