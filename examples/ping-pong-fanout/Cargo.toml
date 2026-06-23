@@ -1,8 +1,7 @@
 # ping-pong-fanout の cargo ワークスペース(独立ワークスペース)。
 # 1 つの ping と、複数インスタンスとして起動する 1 つの pong から成る。
 #
-# 注意: これは *目標* を示す設計サンプル。現状の reiny クレートだけでは
-# まだビルドは通らない(umbrella crate `reiny` / `reiny-build` は将来追加)。
+# `reiny` / `reiny-build` でそのままビルドできる(`cargo build`)。
 [workspace]
 resolver = "2"
 members = ["ping", "pong"]

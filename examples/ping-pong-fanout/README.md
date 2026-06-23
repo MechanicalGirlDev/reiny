@@ -1,6 +1,6 @@
 # ping-pong-fanout
 
-reiny の **到達目標** を示すサンプル。1 つの `ping` が打った 1 球を、複数の `pong`
+reiny の使い方を示すサンプル。1 つの `ping` が打った 1 球を、複数の `pong`
 インスタンスが受けてそれぞれ返す **broadcast / fan-out** です。
 
 ```
@@ -11,9 +11,6 @@ ping ──Ping──▶ (reiny/ping-1/Ping)  pong-2  ──Pong──▶ ping
 
 - **ping**: `Ping` を 1 秒ごとに broadcast し、返ってきた `Pong` を「誰が返したか」付きでログ。
 - **pong**: 同じバイナリを複数起動。各インスタンスが `Ping` を受けて、自分の id を載せた `Pong` を返す。
-
-> ⚠️ これは *設計サンプル* です。現状の reiny クレートだけでは **まだビルドは通りません**
-> (umbrella crate `reiny` と `reiny-build` は今後実装)。
 
 ## 見どころ: 型で購読 → fan-out
 
@@ -45,15 +42,16 @@ ping-pong-fanout/
     └── src/main.rs
 ```
 
-## 動かす(将来像)
+## 動かす
 
 ```sh
-# ランチャでまとめて(pong×3 + ping)
-reiny ping-pong.toml
-
-# または手で増やす: pong を好きなだけ起動してから ping
+# 手で増やす: pong を好きなだけ起動してから ping
 cargo run -p pong &   # pong-1
 cargo run -p pong &   # pong-2
 cargo run -p pong &   # pong-3
 cargo run -p ping     # 3 つの返球がまとまって届く
+
+# または、ランチャでまとめて(pong×3 + ping)
+#   ※ あらかじめ cargo build してから、bin の置き場を --bin-dir で指す
+reiny --config ping-pong.toml --bin-dir target/debug
 ```

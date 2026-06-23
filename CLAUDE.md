@@ -14,7 +14,6 @@ reiny is a Rust SDK for distributed "grains" (processes) that communicate over [
 
 - **`crates/` is the core workspace.** Root `cargo build`/`test`/`clippy`/`fmt` operate here. Each crate's purpose is in its `Cargo.toml` `description`.
 - **`examples/ping-pong-*` are each an independent cargo workspace** (own `Cargo.lock`), excluded from the root. To build or run one, `cd` into it. CI runs them as a matrix, excluding `ping-pong-cli` (shell-script walkthrough, no Rust).
-- `reiny-transport` (Zenoh + UDP, presence, `MessageRouter`) is lower-level and predates the SDK; the `reiny` SDK does **not** depend on it.
 
 ## Build-time codegen pipeline (`reiny-build` + `reiny-macros` + `reiny`)
 

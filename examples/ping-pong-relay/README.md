@@ -1,6 +1,6 @@
 # ping-pong-relay
 
-reiny の **到達目標** を示すサンプル。往復ではなく、データが **段を経て流れる**
+reiny の使い方を示すサンプル。往復ではなく、データが **段を経て流れる**
 パイプラインです。
 
 ```
@@ -12,9 +12,6 @@ reiny/ping-1/Ping     reiny/relay-1/Relayed      (購読のみ)
 - **ping**(source): `Ping` を一定間隔で流すだけ(購読しない)。
 - **relay**(transform): `Ping` を受けて `Relayed` に変換し(経由 id・hop を付与)、下流へ流す。
 - **pong**(sink): `Relayed` を購読して表示するだけ(何も公開しない)。
-
-> ⚠️ これは *設計サンプル* です。現状の reiny クレートだけでは **まだビルドは通りません**
-> (umbrella crate `reiny` と `reiny-build` は今後実装)。
 
 ## 見どころ: ノードは「購読する型」と「公開する型」を持つ
 
@@ -55,14 +52,15 @@ ping-pong-relay/
     └── src/main.rs
 ```
 
-## 動かす(将来像)
+## 動かす
 
 ```sh
-# 起動順込みでまとめて
-reiny ping-pong.toml
-
-# または別々の端末で(下流から上げると取りこぼしが少ない)
+# 別々の端末で(下流から上げると取りこぼしが少ない)
 cargo run -p pong &
 cargo run -p relay &
 cargo run -p ping
+
+# または、ランチャで起動順込みでまとめて
+#   ※ あらかじめ cargo build してから、bin の置き場を --bin-dir で指す
+reiny --config ping-pong.toml --bin-dir target/debug
 ```

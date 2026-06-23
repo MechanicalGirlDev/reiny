@@ -1,8 +1,7 @@
 # ping-pong-config の cargo ワークスペース(独立ワークスペース)。
 # pong の振る舞い(返答文・遅延)を TOML 設定で外から与える例。
 #
-# 注意: これは *目標* を示す設計サンプル。現状の reiny クレートだけでは
-# まだビルドは通らない(umbrella crate `reiny` / `reiny-build` は将来追加)。
+# `reiny` / `reiny-build` でそのままビルドできる(`cargo build`)。
 [workspace]
 resolver = "2"
 members = ["ping", "pong"]

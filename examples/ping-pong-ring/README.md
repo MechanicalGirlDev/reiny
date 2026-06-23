@@ -1,6 +1,6 @@
 # ping-pong-ring
 
-reiny の **到達目標** を示す最小サンプル。2 つのプロジェクトが型を介して往復する、
+reiny の使い方を示す最小サンプル。2 つのプロジェクトが型を介して往復する、
 いちばんシンプルな通信です。
 
 > **配置パターン: per-project(リング型)。** proto と `Reiny.toml` を **各プロジェクト**
@@ -15,11 +15,6 @@ ping  ◀── Pong(reiny/pong-1/Pong) ──   pong
 
 - **ping**: 最初の一球を打ち、`Pong` が返るたびに次の `Ping` を打ち返す。
 - **pong**: `Ping` を受けるたびに、同じ `seq` の `Pong` を返す。
-
-> ⚠️ これは「こう書けるようにしたい」という *設計サンプル* です。現状の reiny クレート
-> (`reiny-proto` / `reiny-transport` / `reiny-grain`)だけでは **まだビルドは通りません**。
-> 必要な umbrella crate `reiny`(SDK + `#[reiny::main]`)と `reiny-build`
-> (Reiny.toml パーサ + コード生成)は今後の実装対象です。
 
 ## ねらい: Reiny.toml
 
@@ -111,13 +106,14 @@ ping-pong/
     └── (ping と対称)
 ```
 
-## 動かす(将来像)
+## 動かす
 
 ```sh
-# ランチャでまとめて(launch config の [grain] を起動)
-reiny ping-pong.toml
-
-# または個別に、別々の端末で
+# 個別に、別々の端末で
 cargo run -p pong   # pong を起動(Ping を待ち受け)
 cargo run -p ping   # ping を起動(Ping を送信開始)
+
+# または、ランチャでまとめて(launch config の [grain] を起動)
+#   ※ あらかじめ cargo build してから、bin の置き場を --bin-dir で指す
+reiny --config ping-pong.toml --bin-dir target/debug
 ```

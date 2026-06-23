@@ -1,11 +1,12 @@
 # reiny examples
 
-reiny の **到達目標** を示すサンプル集。どれも題材は最小の ping-pong 通信に統一し、
+reiny の使い方を示すサンプル集。どれも題材は最小の ping-pong 通信に統一し、
 1 つの軸だけを変えて見せています。
 
-> ⚠️ これらは「こう書けるようにしたい」という *設計サンプル* です。前提となる umbrella crate
-> `reiny`(SDK + `#[reiny::main]` + `Cloudy` ハンドル)と `reiny-build`(Reiny.toml パーサ +
-> コード生成)、ランチャ `reiny-launch` を土台にしています。
+> 土台は umbrella crate `reiny`(SDK + `#[reiny::main]` + `Cloudy` ハンドル)と
+> `reiny-build`(Reiny.toml パーサ + コード生成)、ランチャ `reiny-launch`。
+> `ping-pong-cli` を除く各サンプルは `cargo build` でそのままビルドできます
+> (`ping-pong-cli` は CLI 雛形生成の到達像を示す手順書で、その CLI は未実装)。
 
 ## 共通の約束
 

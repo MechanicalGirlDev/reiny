@@ -1,13 +1,10 @@
 # ping-pong-config
 
-reiny の **到達目標** を示すサンプル。`pong` の振る舞い(返答文・遅延)をコードに
+reiny の使い方を示すサンプル。`pong` の振る舞い(返答文・遅延)をコードに
 埋め込まず、**設定(config)で外から与える** パターンです。
 
 - **ping**: いつもどおり `Ping` を打って `Pong` を待つ。
 - **pong**: `reply`(返答文)と `delay_ms`(返すまでの遅延)を **設定から読む**。
-
-> ⚠️ これは *設計サンプル* です。現状の reiny クレートだけでは **まだビルドは通りません**
-> (umbrella crate `reiny` と `reiny-build` は今後実装)。
 
 ## 見どころ: 型付き設定 `[config]`
 
@@ -52,13 +49,14 @@ ping-pong-config/
     └── src/main.rs     # cloudy.config() で読む
 ```
 
-## 動かす(将来像)
+## 動かす
 
 ```sh
-# 設定ファイル込みでまとめて起動(reply="PONG!", delay=250ms)
-reiny ping-pong.toml
-
 # 設定なしだと Reiny.toml [config] の既定値(reply="pong", delay=0)で動く
 cargo run -p pong &
 cargo run -p ping
+
+# ランチャでまとめて起動(reply="PONG!", delay=250ms)
+#   ※ あらかじめ cargo build してから、bin の置き場を --bin-dir で指す
+reiny --config ping-pong.toml --bin-dir target/debug
 ```

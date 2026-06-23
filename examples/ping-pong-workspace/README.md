@@ -1,14 +1,11 @@
 # ping-pong-workspace
 
-reiny の **到達目標** を示すサンプル。通信の中身は [`../ping-pong-ring`](../ping-pong-ring)
+reiny の使い方を示すサンプル。通信の中身は [`../ping-pong-ring`](../ping-pong-ring)
 と同じ ping ↔ pong の往復ですが、**proto と `Reiny.toml` の置き方** が違います。
 
 > **配置パターン: ワークスペース共有。** proto と `Reiny.toml` を **ワークスペース直下に
 > 1 つだけ** 置き、members(`ping/`・`pong/`)で共有します。型は共有カタログ `[internals]`
 > に集約し、各プロジェクトは「カタログのどの型を公開/購読するか」を宣言するだけです。
-
-> ⚠️ これは「こう書けるようにしたい」という *設計サンプル* です。現状の reiny クレート
-> だけでは **まだビルドは通りません**(umbrella crate `reiny` と `reiny-build` は今後実装)。
 
 ## 2 つの配置パターンの違い
 
@@ -79,13 +76,14 @@ ping-pong-workspace/
 
 ★ が ring 版との差分（proto と Reiny.toml がワークスペースに集約されている）。
 
-## 動かす(将来像)
+## 動かす
 
 ```sh
-# ランチャでまとめて(launch config の [grain] を起動)
-reiny ping-pong.toml
-
-# または個別に、別々の端末で
+# 個別に、別々の端末で
 cargo run -p pong   # pong を起動(Ping を待ち受け)
 cargo run -p ping   # ping を起動(Ping を送信開始)
+
+# または、ランチャでまとめて(launch config の [grain] を起動)
+#   ※ あらかじめ cargo build してから、bin の置き場を --bin-dir で指す
+reiny --config ping-pong.toml --bin-dir target/debug
 ```

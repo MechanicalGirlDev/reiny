@@ -5,8 +5,7 @@
 # 配置パターン: ワークスペース共有。proto と Reiny.toml はワークスペース直下に 1 つだけ
 # 置き、members はそれを共有する(per-project 版は ../ping-pong-ring)。
 #
-# 注意: これは *目標* を示す設計サンプル。現状の reiny クレートだけでは
-# まだビルドは通らない(umbrella crate `reiny` / `reiny-build` は将来追加)。
+# `reiny` / `reiny-build` でそのままビルドできる(`cargo build`)。
 [workspace]
 resolver = "2"
 members = ["ping", "pong"]
@@ -18,7 +17,7 @@ license = "MIT"
 authors = ["nop <noplab90@gmail.com>"]
 
 [workspace.dependencies]
-# 将来の umbrella crate: SDK 本体 + #[reiny::main] マクロ + ランタイム。
+# umbrella crate: SDK 本体 + #[reiny::main] マクロ + ランタイム。
 reiny = { path = "../../crates/reiny" }
 # Reiny.toml と proto を読んで型・トピックマッピングを生成する build 補助。
 reiny-build = { path = "../../crates/reiny-build" }
