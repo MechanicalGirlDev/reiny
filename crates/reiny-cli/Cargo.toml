@@ -3,14 +3,19 @@ name = "reiny-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "reiny CLI: grain 雛形生成(new/init/add)・build・run・compress を束ねる `reiny` コマンド"
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "reiny CLI: scaffold grains (new/init/add), build, run, and compress via the `reiny` command"
+keywords = ["reiny", "cli", "scaffold", "launcher"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "reiny"
 path = "src/main.rs"
 
 [dependencies]
-reiny-launch = { path = "../reiny-launch" }
+reiny-launch = { path = "../reiny-launch", version = "0.1.0" }
 clap = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }

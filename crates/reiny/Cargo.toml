@@ -3,10 +3,15 @@ name = "reiny"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "reiny SDK: 型を渡すだけで pub/sub する Cloudy と #[reiny::main] ランタイム"
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "reiny SDK: publish/subscribe by Rust type via Cloudy and the #[reiny::main] runtime"
+keywords = ["zenoh", "pubsub", "distributed", "actor", "grain"]
+categories = ["network-programming", "asynchronous"]
 
 [dependencies]
-reiny-macros = { path = "../reiny-macros" }
+reiny-macros = { path = "../reiny-macros", version = "0.1.0" }
 prost = { workspace = true }
 zenoh = { workspace = true }
 tokio = { workspace = true }

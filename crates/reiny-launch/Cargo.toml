@@ -3,7 +3,12 @@ name = "reiny-launch"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
 description = "reiny launcher: spawn grain processes from a launch config's [grain] section"
+keywords = ["reiny", "launcher", "process", "supervisor"]
+categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
 anyhow = { workspace = true }

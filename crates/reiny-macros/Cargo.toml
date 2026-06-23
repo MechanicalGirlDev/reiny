@@ -3,7 +3,12 @@ name = "reiny-macros"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "reiny の #[reiny::main] proc-macro。reiny クレート経由で使う(直接依存しない)。"
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "The #[reiny::main] proc-macro for reiny (use via the reiny crate, not directly)"
+keywords = ["reiny", "macro", "proc-macro", "pubsub"]
+categories = ["development-tools::procedural-macro-helpers"]
 
 [lib]
 proc-macro = true

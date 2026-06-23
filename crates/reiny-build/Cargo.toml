@@ -3,7 +3,12 @@ name = "reiny-build"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "reiny build 補助: Reiny.toml を読み proto をコンパイルして型・トピックを生成する"
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "reiny build helper: reads Reiny.toml, compiles protos, and generates types and topics"
+keywords = ["reiny", "build", "protobuf", "codegen", "prost"]
+categories = ["development-tools::build-utils"]
 
 [dependencies]
 prost-build = { workspace = true }
