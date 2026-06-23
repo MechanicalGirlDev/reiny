@@ -1,20 +1,19 @@
 //! launch config の `[grain]` 節から launch plan(起動する grain 群と順序)を導出する。
 //! `reiny --config <launch>.toml` を唯一のエントリポイントとする。
 //!
-//! HumanoidSystem の hs-launch と違い、**既知種別/プラグインの区別は無い**。すべてのキーが
+//! `HumanoidSystem` の hs-launch と違い、**既知種別/プラグインの区別は無い**。すべてのキーが
 //! 対等な grain で、キー名 = インスタンス名 = 既定 bin 名。bin は同一ワークスペースの
 //! target ディレクトリから起動する(別ワークスペースの plugin 探索は持たない)。
 //!
 //! 既定の規約(override は `[grain]` のインラインテーブルで可能):
-//! - bin = キー名、depends_on = []、on_exit = ignore。
+//! - `bin` = キー名、`depends_on` = []、`on_exit` = ignore。
 //! - `config = "..."` を与えると起動引数に `--config <abs>` を付与する。
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub use crate::config::OnExit;
-use crate::config::{GrainSpec, LaunchConfig};
+use crate::config::{GrainSpec, LaunchConfig, OnExit};
 
 /// 解決済みの1 grain 起動仕様(規約 + override 適用後)。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,16 +35,25 @@ pub struct ResolvedGrain {
 /// launch config から導出した launch plan。
 #[derive(Debug, Clone, Default)]
 pub struct LaunchPlan {
+    /// 起動順未解決の grain 群(規約 + override 適用後)。順序は [`Self::topo_order`] で決める。
     pub grains: Vec<ResolvedGrain>,
 }
 
 /// launch plan の検証エラー。
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LaunchError {
+    /// 同名の grain が 2 つ以上ある(キー = インスタンス名は plan 内で一意)。
     #[error("duplicate grain name '{0}'")]
     DuplicateName(String),
+    /// `depends_on` が plan に存在しない grain を指している。
     #[error("grain '{grain}' depends_on undefined grain '{dep}'")]
-    UndefinedDependency { grain: String, dep: String },
+    UndefinedDependency {
+        /// 依存を宣言した側の grain 名。
+        grain: String,
+        /// 参照先(未定義)の grain 名。
+        dep: String,
+    },
+    /// `depends_on` に循環がある。
     #[error("dependency cycle detected involving '{0}'")]
     Cycle(String),
 }
@@ -100,20 +108,9 @@ impl LaunchPlan {
         self.topo_order().map(|_| ())
     }
 
-    /// depends_on を満たす起動順(インデックス列)を返す。循環時は `Cycle`。
+    /// `depends_on` を満たす起動順(インデックス列)を返す。循環時は `Cycle`。
     pub fn topo_order(&self) -> Result<Vec<usize>, LaunchError> {
         use std::collections::HashMap;
-
-        let index: HashMap<&str, usize> = self
-            .grains
-            .iter()
-            .enumerate()
-            .map(|(i, g)| (g.name.as_str(), i))
-            .collect();
-
-        // 0=未訪問, 1=訪問中, 2=完了
-        let mut state = vec![0u8; self.grains.len()];
-        let mut order = Vec::with_capacity(self.grains.len());
 
         fn visit(
             i: usize,
@@ -137,6 +134,17 @@ impl LaunchPlan {
             order.push(i);
             Ok(())
         }
+
+        let index: HashMap<&str, usize> = self
+            .grains
+            .iter()
+            .enumerate()
+            .map(|(i, g)| (g.name.as_str(), i))
+            .collect();
+
+        // 0=未訪問, 1=訪問中, 2=完了
+        let mut state = vec![0u8; self.grains.len()];
+        let mut order = Vec::with_capacity(self.grains.len());
 
         for i in 0..self.grains.len() {
             visit(i, &self.grains, &index, &mut state, &mut order)?;
@@ -177,6 +185,7 @@ fn resolve_relative(base: &Path, p: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)] // テストは panic で失敗を表現してよい
 mod tests {
     use super::*;
 

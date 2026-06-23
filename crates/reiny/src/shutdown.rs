@@ -7,7 +7,7 @@ use tokio::sync::Notify;
 
 /// クローン可能な共有シャットダウンシグナル。
 #[derive(Clone, Default)]
-pub struct Shutdown {
+pub(crate) struct Shutdown {
     inner: Arc<Inner>,
 }
 
@@ -19,23 +19,23 @@ struct Inner {
 
 impl Shutdown {
     /// 未トリガの新規シグナルを生成。
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// シャットダウンを要求する（冪等）。
-    pub fn trigger(&self) {
+    pub(crate) fn trigger(&self) {
         self.inner.flag.store(true, Ordering::SeqCst);
         self.inner.notify.notify_waiters();
     }
 
     /// トリガ済みかをポーリングで確認する。
-    pub fn is_triggered(&self) -> bool {
+    pub(crate) fn is_triggered(&self) -> bool {
         self.inner.flag.load(Ordering::SeqCst)
     }
 
     /// トリガまで非同期に待つ（tokio コンポーネント用）。
-    pub async fn wait(&self) {
+    pub(crate) async fn wait(&self) {
         loop {
             if self.is_triggered() {
                 return;
@@ -51,6 +51,7 @@ impl Shutdown {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)] // テストは panic で失敗を表現してよい
 mod tests {
     use super::*;
     use std::time::Duration;

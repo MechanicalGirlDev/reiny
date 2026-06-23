@@ -4,9 +4,10 @@ reiny の使い方を示すサンプル集。どれも題材は最小の ping-po
 1 つの軸だけを変えて見せています。
 
 > 土台は umbrella crate `reiny`(SDK + `#[reiny::main]` + `Cloudy` ハンドル)と
-> `reiny-build`(Reiny.toml パーサ + コード生成)、ランチャ `reiny-launch`。
+> `reiny-build`(Reiny.toml パーサ + コード生成)、ランチャ `reiny-launch`、CLI `reiny-cli`。
 > `ping-pong-cli` を除く各サンプルは `cargo build` でそのままビルドできます
-> (`ping-pong-cli` は CLI 雛形生成の到達像を示す手順書で、その CLI は未実装)。
+> (`ping-pong-cli` は CLI `reiny`(`reiny-cli`)で雛形を生成する手順書。`cargo build -p
+> reiny-cli` した `reiny` を PATH に通せばスクリプトがそのまま通ります)。
 
 ## 共通の約束
 
@@ -41,7 +42,7 @@ reiny の使い方を示すサンプル集。どれも題材は最小の ping-po
 
 | サンプル | 内容 |
 | --- | --- |
-| [ping-pong-cli](ping-pong-cli) | 静的なプロジェクト木ではなく **シェルスクリプトで `reiny` CLI を順に叩く** 手順を見せる。`reiny new` / `init` / `add` / `build` / `run` の期待挙動 |
+| [ping-pong-cli](ping-pong-cli) | 静的なプロジェクト木ではなく **シェルスクリプトで `reiny` CLI を順に叩く** 手順を見せる。`reiny new` / `init` / `add` / `build` / `run` / `compress` を実行 |
 
 ## どれから読むか
 

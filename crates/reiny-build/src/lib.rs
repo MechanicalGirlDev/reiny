@@ -14,6 +14,10 @@
 //! - **workspace 共有**(`[internals]` / `[projects.*]` を持つ Reiny.toml): 共有カタログ
 //!   `[internals]` を全部コンパイルし `internals::*` として公開する。
 
+// build スクリプトから呼ばれる補助 crate なので、設定不備は context 付き panic で
+// 即座に build を止めるのが正しい。unwrap/expect/panic 系の制限は本 crate では外す。
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Write as _;
@@ -229,9 +233,7 @@ fn resolve_per_project(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
 fn resolve_workspace(manifest: &Manifest, root: &Path, pkg_name: &str) -> Result<Vec<Entry>> {
     if !manifest.projects.contains_key(pkg_name) {
         bail!(
-            "package '{}' has no [projects.{}] entry in the workspace Reiny.toml",
-            pkg_name,
-            pkg_name
+            "package '{pkg_name}' has no [projects.{pkg_name}] entry in the workspace Reiny.toml"
         );
     }
 
@@ -266,7 +268,7 @@ fn split_message(message: &str) -> Result<(Vec<String>, String)> {
     let parts: Vec<&str> = message.split('.').filter(|s| !s.is_empty()).collect();
     let (ident, package) = parts.split_last().context("empty message path")?;
     Ok((
-        package.iter().map(|s| s.to_string()).collect(),
+        package.iter().map(ToString::to_string).collect(),
         ident.to_string(),
     ))
 }
@@ -369,7 +371,7 @@ fn render_generated(entries: &[Entry], config: Option<&toml::Table>) -> Result<S
                 .filter(|e| e.exposure == Exposure::Dependencies(dep.clone()))
                 .collect();
             // dependencies::<dep> から __pb は super::super::__pb。
-            writeln!(out, "    pub mod {} {{", dep).ok();
+            writeln!(out, "    pub mod {dep} {{").ok();
             for e in &group {
                 writeln!(
                     out,

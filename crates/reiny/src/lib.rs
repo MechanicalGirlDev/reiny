@@ -117,28 +117,30 @@ impl Cloudy {
 
     /// 自分のインスタンス id(`--id` / `--name`、なければ `CARGO_PKG_NAME`)。
     /// ランチャは同じ bin を複数起動すると連番(例 `pong-1`, `pong-2`)を振る。
+    #[must_use]
     pub fn id(&self) -> &str {
         &self.id
     }
 
     /// 現在時刻(Unix 秒)。メッセージのタイムスタンプ用の小道具。
+    #[must_use]
     pub fn now_unix(&self) -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
     }
 
     /// `--config` で渡された設定 table(無ければ `None`)。`reiny-build` 生成の
     /// 型付き `config()` 拡張が `[config]` の既定値に重ねて読むための原データ。
     #[doc(hidden)]
+    #[must_use]
     pub fn config_table(&self) -> Option<&toml::Table> {
         self.config.as_ref()
     }
 
     /// シャットダウンが要求されるまで待つ(自前のループを持つ grain 用)。
     pub async fn shutdown(&self) {
-        self.shutdown.wait().await
+        self.shutdown.wait().await;
     }
 }
 
@@ -162,6 +164,8 @@ impl<T: Message + Topic> Publisher<T> {
 /// `recv` はシャットダウン(Ctrl+C)で `None` を返すので、`while let Some(m) = sub.recv().await`
 /// のループが Ctrl+C で自然に抜ける。
 pub struct Subscriber<T: Message + Default> {
+    // フィールド名が型名と重なるが、内側の zenoh subscriber を素直に指す名前。
+    #[allow(clippy::struct_field_names)]
     subscriber: ZSubscriber<FifoChannelHandler<Sample>>,
     shutdown: Shutdown,
     _marker: PhantomData<T>,
@@ -176,7 +180,7 @@ impl<T: Message + Default + Topic> Subscriber<T> {
         loop {
             tokio::select! {
                 biased;
-                _ = self.shutdown.wait() => return None,
+                () = self.shutdown.wait() => return None,
                 sample = self.subscriber.recv_async() => {
                     match sample {
                         Ok(sample) => {
@@ -185,7 +189,6 @@ impl<T: Message + Default + Topic> Subscriber<T> {
                                 Ok(msg) => return Some(msg),
                                 Err(e) => {
                                     tracing::warn!(ty = T::TYPE, error = %e, "skipping undecodable sample");
-                                    continue;
                                 }
                             }
                         }

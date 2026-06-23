@@ -2,18 +2,56 @@
 resolver = "2"
 members = [
     "crates/reiny-launch",
+    "crates/reiny-cli",
     "crates/reiny-macros",
     "crates/reiny",
     "crates/reiny-build",
 ]
-# examples/ は到達目標を示す設計サンプル(独立ワークスペース)。まだビルドが通らないので
-# ルートのビルド・テストには巻き込まない。
+# examples/ は各々が独立した cargo ワークスペース(own Cargo.lock)。ルートのビルド・
+# テストには巻き込まない(各 example は cd して個別にビルドする)。
 exclude = ["examples"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+
+# ライブラリとして公開する SDK 向けの Clippy/rustc 強化セット。
+# 各クレートは [lints] workspace = true で継承する。
+# CI ゲート `cargo clippy --all-targets -- -D warnings` を通すため、
+# 本リポジトリの方針上不要・誤検知になるものは allow で明示緩和する。
+[workspace.lints.rust]
+# 公開 API のドキュメント漏れを検知(ライブラリの最低限の品質)。
+missing_docs = "warn"
+# 他クレートから使えない pub は誤り。API 表面を意図どおりに保つ。
+unreachable_pub = "warn"
+# edition 2024 で unsafe fn 内の暗黙 unsafe を禁止し、SAFETY 境界を明示させる。
+unsafe_op_in_unsafe_fn = "warn"
+unused_lifetimes = "warn"
+
+[workspace.lints.clippy]
+# 既定の all に加え pedantic を底上げ。個別 lint より優先度を下げ、
+# 下の allow で上書きできるようにする(priority が大きいほど後勝ち)。
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# --- パニック経路・お手軽コードをライブラリ本体から締め出す ---
+# 公開コードでの unwrap/expect/panic はエラー型に置き換える。テストや build.rs では
+# クレート/モジュール側で #[allow] して個別に許可する。
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+# unsafe ブロックには必ず SAFETY コメントを要求する。
+undocumented_unsafe_blocks = "warn"
+
+# --- pedantic のうち本リポジトリでは方針外/ノイズになるものを緩和 ---
+# crate 名と型名の重複(例: reiny::ReinyError 相当)は意図的に許容。
+module_name_repetitions = "allow"
+# 公開 fn ごとの # Errors / # Panics 節は今は必須にしない。
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
 
 [workspace.dependencies]
 # Protobuf(reiny-build が各 grain の proto をコンパイルするのに使う)

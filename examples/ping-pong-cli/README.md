@@ -1,14 +1,20 @@
 # ping-pong-cli
 
-reiny の **到達目標** を示すサンプル。他のサンプルが「完成したプロジェクト木」を
-見せるのに対し、これは **`reiny` の CLI で雛形をゼロから組み立てる手順** を
-シェルスクリプトで見せます。`reiny new` / `reiny init` / `reiny add` / `reiny build` /
-`reiny run` を順に叩くと、ping ↔ pong の往復が立ち上がる、という到達像です。
+他のサンプルが「完成したプロジェクト木」を見せるのに対し、これは **`reiny` の CLI で
+雛形をゼロから組み立てる手順** をシェルスクリプトで見せます。`reiny new` / `reiny init` /
+`reiny add` / `reiny build` / `reiny run` を順に叩くと、ping と pong が立ち上がります。
 
-> ⚠️ これは *設計サンプル* です。umbrella crate `reiny` / `reiny-build` は実装済みですが、
-> `reiny new` / `init` / `add` / `build` / `compress` といった **雛形生成系の CLI サブコマンドは
-> まだ未実装**(現状のランチャは `reiny --config <launch>.toml` のみ)。そのため
-> このスクリプトはそのままでは通りません。「こう叩けるようにしたい」という期待挙動の仕様です。
+> CLI は `reiny-cli` crate(バイナリ名 `reiny`)として実装済みです。リポジトリ直下で
+> `cargo build -p reiny-cli` してから `target/debug` を PATH に通すと、下のスクリプトが
+> そのまま通ります:
+>
+> ```sh
+> cargo build -p reiny-cli
+> export PATH="$(git rev-parse --show-toplevel)/target/debug:$PATH"
+> ```
+>
+> 生成される ping/pong は、上方探索で見つけた reiny crate への path 依存を埋めた
+> 独立 cargo プロジェクトです(`.gitignore` 済み)。
 
 ## このサンプルがコミットしているもの
 

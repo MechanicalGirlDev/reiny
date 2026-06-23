@@ -7,7 +7,7 @@
 //! - **インラインテーブル** = launch override 付きの詳細形
 //!   (`monitor = { bin = "...", on_exit = "respawn" }`)。
 //!
-//! HumanoidSystem の `[component]` と違い、**既知種別(control/gui/policy/physics)も
+//! `HumanoidSystem` の `[component]` と違い、**既知種別(control/gui/policy/physics)も
 //! プラグインという区別も無い**。すべてのキーは対等な「grain」で、キー名 = インスタンス名 =
 //! 既定 bin 名。ランチャは各 grain を同一ワークスペースの子プロセスとして起動する。
 
@@ -73,6 +73,7 @@ pub struct GrainEntry {
 
 impl GrainSpec {
     /// grain config ファイルへのパス(launch config dir 基準)。
+    #[must_use]
     pub fn config(&self) -> Option<&Path> {
         match self {
             Self::Config(p) => Some(p),
@@ -81,6 +82,7 @@ impl GrainSpec {
     }
 
     /// bin 名の override(未指定はキー名)。
+    #[must_use]
     pub fn bin(&self) -> Option<&str> {
         match self {
             Self::Config(_) => None,
@@ -89,6 +91,7 @@ impl GrainSpec {
     }
 
     /// 追加起動引数。
+    #[must_use]
     pub fn args(&self) -> &[String] {
         match self {
             Self::Config(_) => &[],
@@ -96,7 +99,8 @@ impl GrainSpec {
         }
     }
 
-    /// depends_on。
+    /// `depends_on`。
+    #[must_use]
     pub fn depends_on(&self) -> &[String] {
         match self {
             Self::Config(_) => &[],
@@ -104,7 +108,8 @@ impl GrainSpec {
         }
     }
 
-    /// on_exit(未指定は `Ignore`)。
+    /// `on_exit`(未指定は `Ignore`)。
+    #[must_use]
     pub fn on_exit(&self) -> OnExit {
         match self {
             Self::Config(_) => OnExit::default(),
@@ -112,7 +117,8 @@ impl GrainSpec {
         }
     }
 
-    /// log_level の override。
+    /// `log_level` の override。
+    #[must_use]
     pub fn log_level(&self) -> Option<&str> {
         match self {
             Self::Config(_) => None,
@@ -121,6 +127,7 @@ impl GrainSpec {
     }
 
     /// 起動対象か(既定 true)。`enabled = false` で外す。
+    #[must_use]
     pub fn enabled(&self) -> bool {
         match self {
             Self::Config(_) => true,
@@ -130,6 +137,7 @@ impl GrainSpec {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)] // テストは panic で失敗を表現してよい
 mod tests {
     use super::*;
 

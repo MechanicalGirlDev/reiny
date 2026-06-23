@@ -32,7 +32,20 @@ Because the key is the Rust type, two crates sharing a type resolve to the same 
 
 - **`Cargo.toml`** — Rust build.
 - **`Reiny.toml`** — reiny's manifest: identity, published/dependency types, `[config]` schema + defaults. Read at build time by `reiny-build` (schema: `crates/reiny-build/src/lib.rs`, `Manifest`).
-- **launch config** (e.g. `ping-pong.toml`) — *deployment*: a `[grain]` table read by the `reiny-launch` CLI saying which grains to spawn together (`depends_on`, `on_exit`, etc.). Every key is an equal grain (no privileged component types); key = instance name = default bin name.
+- **launch config** (e.g. `ping-pong.toml`) — *deployment*: a `[grain]` table read by the launcher saying which grains to spawn together (`depends_on`, `on_exit`, etc.). Every key is an equal grain (no privileged component types); key = instance name = default bin name.
+
+## The `reiny` CLI (`reiny-cli`) — one binary, several non-obvious behaviors
+
+The `reiny` binary lives in **`reiny-cli`** (it depends on `reiny-launch` as a library; `reiny-launch` is now lib-only). Subcommands `new`/`init`/`add`/`build`/`run`/`compress` plus two non-subcommand entry paths handled *before* clap in `main`:
+
+- **Backward-compat launch:** `reiny <launch>.toml` (bare positional) and `reiny --config <launch>.toml` both mean `reiny run`.
+- **Renamed-launcher self mode:** if `argv[0]`'s basename isn't `reiny` (i.e. a `reiny compress --launcher <name>` artifact), it reads `<name>.toml` next to itself and launches with no args.
+
+Facts that span files:
+- `reiny build` is just `cargo build` in the cwd — codegen happens via the grain's `build.rs` (`reiny_build::compile()`), so the wrapper stays thin.
+- `reiny new`/`init` scaffold **standalone** cargo projects (not workspace members); their `Cargo.toml` gets **path deps** to the reiny crates found by searching upward for `crates/reiny` + `crates/reiny-build` (so generated projects build inside this repo). `reiny add` only edits the target's `Reiny.toml` `[dependencies]` (textual insert, preserving comments) — never `src`.
+- `reiny run` must find grain bins that may live in **separate `target/` dirs** (each scaffolded grain is its own project). It builds a search-dir list (`<launch>/<grain>/target/{debug,release}`, `<launch>/target/...`, the launcher's own dir) and hands it to `reiny_launch::run_launch_dirs` (the multi-dir generalization of `run_launch`).
+- `reiny compress` bundles only what's needed (reachable grain bins + non-system `.so`s via `ldd` + launch config + the launcher itself) into one self-contained dir.
 
 ## Conventions & gotchas
 

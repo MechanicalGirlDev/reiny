@@ -2015,11 +2015,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "reiny-launch"
+name = "reiny-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "reiny-launch",
+ "serde",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "reiny-launch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "ctrlc",
  "serde",
  "thiserror 2.0.18",
