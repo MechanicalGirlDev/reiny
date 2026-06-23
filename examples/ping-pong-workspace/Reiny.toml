@@ -2,7 +2,7 @@
 #
 # per-project 版(../ping-pong-ring)では各プロジェクトが自分の Reiny.toml と proto を
 # 持ち、相手の「プロジェクト」に依存して型を引いた。こちらはワークスペースに 1 つだけ
-# Reiny.toml を置き、型を共有カタログ [types] に集約する。各プロジェクトは
+# Reiny.toml を置き、型を共有カタログ [internals] に集約する。各プロジェクトは
 # [projects.<name>] で「カタログのどの型を公開し / 購読するか」を宣言するだけ。
 #
 #   per-project: 型はプロジェクトが所有 → 依存は「他プロジェクト」を指す
@@ -15,12 +15,12 @@ authors = ["nop <noplab90@gmail.com>"]
 license = "MIT"
 
 # 共有メッセージカタログ。ワークスペース直下の proto/ で定義し、全プロジェクトが参照できる。
-[types]
+[internals]
 Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
 Pong = { proto = "proto/pong.proto", message = "pong.Pong" }
 
 # 各プロジェクト = 実行時のトピック名(reiny/<name>)。
-# publications / dependencies は [types] のキーを名前で参照する。
+# publications / dependencies は [internals] のキーを名前で参照する。
 
 [projects.ping]
 version = "0.1.0"

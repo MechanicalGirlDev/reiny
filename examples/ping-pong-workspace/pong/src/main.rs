@@ -1,7 +1,7 @@
 //! pong — Ping を受け取るたびに、同じ seq の Pong を返す。
 //!
-//! ワークスペース共有版: 型は workspace の Reiny.toml [types] が定義する共有カタログから
-//! `reiny::types::*` として来る。このプロジェクトが何を公開/購読してよいかは
+//! ワークスペース共有版: 型は workspace の Reiny.toml [internals] が定義する共有カタログから
+//! `reiny::internals::*` として来る。このプロジェクトが何を公開/購読してよいかは
 //! [projects.pong] の publications/dependencies で決まる(reiny-build が検証する)。
 //!
 //! 注意: これは reiny の到達目標を示す設計サンプル。umbrella crate `reiny` と
@@ -10,7 +10,7 @@
 use reiny::prelude::*;
 
 // 共有カタログの型(per-project 版と違い、依存先プロジェクト名で名前空間化されない)。
-use reiny::types::{Ping, Pong};
+use reiny::internals::{Ping, Pong};
 
 /// `#[reiny::main]` は workspace の Reiny.toml を読み、このバイナリ名に対応する
 /// [projects.pong] からcloudy(reiny/pong)を起動して `Cloudy` を渡す。

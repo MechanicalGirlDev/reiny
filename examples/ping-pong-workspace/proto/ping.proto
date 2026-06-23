@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-// 共有カタログの型。ワークスペースの Reiny.toml [types] から参照される。
+// 共有カタログの型。ワークスペースの Reiny.toml [internals] から参照される。
 package ping;
 
 // Ping: 1 往復ごとに送られる打球。
