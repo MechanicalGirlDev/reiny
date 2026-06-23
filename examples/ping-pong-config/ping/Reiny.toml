@@ -1,0 +1,12 @@
+[project]
+name = "ping"
+version = "0.1.0"
+description = "Ping を打って Pong を待つ(設定例の相手役)。"
+authors = ["nop <noplab90@gmail.com>"]
+license = "MIT"
+
+[publications]
+Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
+
+[dependencies]
+pong = { version = "0.1", path = "../pong" }

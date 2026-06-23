@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package ping;
+
+// Ping: broadcast される打球。
+message Ping {
+  // 何球目か。返ってきた Pong の seq と突き合わせる。
+  uint64 seq = 1;
+  // 送信時刻(Unix 秒)。
+  int64 sent_unix = 2;
+}

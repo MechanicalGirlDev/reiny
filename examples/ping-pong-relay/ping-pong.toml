@@ -1,0 +1,10 @@
+# launch config — ping → relay → pong の順に起動する 3 段パイプライン。
+#
+# depends_on で起動順を固定: ping(source)→ relay(transform)→ pong(sink)。
+#
+#   reiny ping-pong.toml
+#
+[grain]
+ping = { bin = "ping" }
+relay = { bin = "relay", depends_on = ["ping"] }
+pong = { bin = "pong", depends_on = ["relay"] }

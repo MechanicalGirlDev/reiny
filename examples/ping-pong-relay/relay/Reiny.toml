@@ -1,0 +1,15 @@
+[project]
+# パイプラインの中段。reiny/ping を受けて、変換した Relayed を reiny/relay へ流す。
+name = "relay"
+version = "0.1.0"
+description = "中継ノード。Ping を受けて Relayed に変換し、hop と経由 id を付けて流す。"
+authors = ["nop <noplab90@gmail.com>"]
+license = "MIT"
+
+# 自分が公開する変換後の型。
+[publications]
+Relayed = { proto = "proto/relayed.proto", message = "relay.Relayed" }
+
+# 上流 ping の Ping を購読する。
+[dependencies]
+ping = { version = "0.1", path = "../ping" }

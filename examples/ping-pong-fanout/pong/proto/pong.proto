@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package pong;
+
+// Pong: 返球。どのインスタンスが返したかを from に載せる。
+message Pong {
+  // 対応する Ping の seq。
+  uint64 seq = 1;
+  // 返したインスタンスの id(例 "pong-2")。fanout で誰が答えたか分かる。
+  string from = 2;
+  // 返球時刻(Unix 秒)。
+  int64 replied_unix = 3;
+}

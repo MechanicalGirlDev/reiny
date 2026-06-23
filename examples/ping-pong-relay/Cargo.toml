@@ -1,0 +1,21 @@
+# ping-pong-relay の cargo ワークスペース(独立ワークスペース)。
+# ping(source)→ relay(transform)→ pong(sink)の 3 段パイプライン。
+#
+# 注意: これは *目標* を示す設計サンプル。現状の reiny クレートだけでは
+# まだビルドは通らない(umbrella crate `reiny` / `reiny-build` は将来追加)。
+[workspace]
+resolver = "2"
+members = ["ping", "relay", "pong"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["nop <noplab90@gmail.com>"]
+
+[workspace.dependencies]
+reiny = "0.1"
+reiny-build = "0.1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

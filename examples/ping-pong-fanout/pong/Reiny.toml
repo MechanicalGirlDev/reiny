@@ -1,0 +1,13 @@
+[project]
+# reiny/pong トピックへ Pong を返す。複数インスタンス(pong-1, pong-2, ...)起動できる。
+name = "pong"
+version = "0.1.0"
+description = "Ping を受けるたびに、自分のインスタンス id を載せた Pong を返す。"
+authors = ["nop <noplab90@gmail.com>"]
+license = "MIT"
+
+[publications]
+Pong = { proto = "proto/pong.proto", message = "pong.Pong" }
+
+[dependencies]
+ping = { version = "0.1", path = "../ping" }

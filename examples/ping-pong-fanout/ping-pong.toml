@@ -1,0 +1,13 @@
+# launch config — pong を 3 インスタンス、ping を 1 つ起動する。
+#
+# キーはインスタンス名。bin はどれも "pong" を指すので、同じ pong バイナリが 3 つ動く。
+# reiny は起動時に連番 id(pong-1 / pong-2 / pong-3)を自動採番する。
+# ping はそれら全員より後に起動する。
+#
+#   reiny ping-pong.toml
+#
+[grain]
+pong-1 = { bin = "pong", on_exit = "respawn" }
+pong-2 = { bin = "pong", on_exit = "respawn" }
+pong-3 = { bin = "pong", on_exit = "respawn" }
+ping = { bin = "ping", depends_on = ["pong-1", "pong-2", "pong-3"] }

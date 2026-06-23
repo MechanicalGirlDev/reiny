@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package pong;
+
+// Pong: 返球。message は pong の設定(reply)で決まる。
+message Pong {
+  uint64 seq = 1;
+  // 設定で与えられた返答メッセージ。
+  string message = 2;
+  int64 replied_unix = 3;
+}

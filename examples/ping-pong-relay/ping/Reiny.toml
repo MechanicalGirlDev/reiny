@@ -1,0 +1,13 @@
+[project]
+# パイプラインの source。reiny/ping へ Ping を流すだけ(購読なし)。
+name = "ping"
+version = "0.1.0"
+description = "パイプラインの source。Ping を一定間隔で流す。"
+authors = ["nop <noplab90@gmail.com>"]
+license = "MIT"
+
+[publications]
+Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
+
+# source なので依存なし(空)。
+[dependencies]

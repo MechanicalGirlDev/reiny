@@ -1,0 +1,11 @@
+# launch config — pong に設定ファイルを渡して起動する。
+#
+# `config = "..."` は launch config ディレクトリ基準のパス。ランチャは pong に
+# `--config <abs>` を付けて起動し、pong は Reiny.toml [config] の既定値の上に
+# このファイルの値を重ねる。
+#
+#   reiny ping-pong.toml
+#
+[grain]
+pong = { bin = "pong", config = "pong.config.toml", on_exit = "respawn" }
+ping = { bin = "ping", depends_on = ["pong"] }

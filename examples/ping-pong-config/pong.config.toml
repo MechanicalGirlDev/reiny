@@ -1,0 +1,4 @@
+# pong の設定上書き。Reiny.toml [config] の既定値(reply="pong", delay_ms=0)を上書きする。
+# launch config の `config = "pong.config.toml"` で pong に渡される。
+reply = "PONG!"
+delay_ms = 250

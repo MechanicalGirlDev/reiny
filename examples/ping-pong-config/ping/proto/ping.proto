@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package ping;
+
+// Ping: 1 往復ごとに送られる打球。
+message Ping {
+  uint64 seq = 1;
+  int64 sent_unix = 2;
+}

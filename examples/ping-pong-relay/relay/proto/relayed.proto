@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package relay;
+
+// Relayed: 中継ノードが Ping を変換して流す型。
+message Relayed {
+  // 元の Ping の seq を引き継ぐ。
+  uint64 seq = 1;
+  // 経由した中継ノードの id(例 "relay-1")。
+  string via = 2;
+  // ホップ数(この例では常に 1。多段中継なら増やす)。
+  uint32 hops = 3;
+  // 元の Ping の送信時刻(Unix 秒)。sink で end-to-end の経過を測れる。
+  int64 origin_unix = 4;
+}
