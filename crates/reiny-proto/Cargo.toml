@@ -9,3 +9,4 @@ prost-types = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }
+protoc-bin-vendored = { workspace = true }

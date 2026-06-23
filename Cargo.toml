@@ -16,6 +16,8 @@ license = "MIT"
 prost = "0.13"
 prost-build = "0.13"
 prost-types = "0.13"
+# protoc バイナリをクレートとして同梱し、外部インストール不要でビルドできるようにする
+protoc-bin-vendored = "3"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

@@ -16,6 +16,18 @@ fn main() -> Result<()> {
 
     println!("cargo:rerun-if-changed={}", proto_dir_str);
 
+    // `protoc` が PATH や PROTOC で与えられていない場合は、同梱した protoc バイナリを使う。
+    // これにより外部ツールのインストールなしで `cargo build` だけでビルドできる。
+    println!("cargo:rerun-if-env-changed=PROTOC");
+    if env::var_os("PROTOC").is_none() {
+        if let Ok(protoc) = protoc_bin_vendored::protoc_bin_path() {
+            // SAFETY: ビルドスクリプトは単一スレッドで実行されるため競合しない。
+            unsafe {
+                env::set_var("PROTOC", protoc);
+            }
+        }
+    }
+
     prost_build::Config::new().compile_protos(
         &[
             proto_dir.join("types/geometry.proto"),
