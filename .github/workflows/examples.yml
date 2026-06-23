@@ -1,0 +1,71 @@
+# examples/ 配下の各サンプル(cli を除く)を検証する CI。
+# 各 example は reiny 本体とは分離した独立 cargo ワークスペースなので、
+# ワークスペースごとにマトリクスで fmt / clippy / build を回す。
+# ping-pong-cli はシェルスクリプトのみのため対象外。
+name: examples
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "examples/**"
+      - "crates/**"
+      - "proto/**"
+      - "rust-toolchain.toml"
+      - ".github/workflows/examples.yml"
+  pull_request:
+    paths:
+      - "examples/**"
+      - "crates/**"
+      - "proto/**"
+      - "rust-toolchain.toml"
+      - ".github/workflows/examples.yml"
+
+# 同一 ref の古い実行はキャンセルして CI 時間を節約する。
+concurrency:
+  group: examples-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: ${{ matrix.example }}
+    runs-on: ubuntu-latest
+    strategy:
+      # 1 つ落ちても他の example の結果は見たいので fail-fast は無効。
+      fail-fast: false
+      matrix:
+        example:
+          - ping-pong-config
+          - ping-pong-fanout
+          - ping-pong-relay
+          - ping-pong-ring
+          - ping-pong-workspace
+    defaults:
+      run:
+        working-directory: examples/${{ matrix.example }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # toolchain は rust-toolchain.toml(channel = "1.96")が上方探索で効く。
+      # fmt / clippy コンポーネントだけ明示的に入れておく。
+      - name: Install Rust 1.96 (rustfmt, clippy)
+        run: rustup toolchain install 1.96 --profile minimal --component rustfmt --component clippy
+
+      # protoc は protoc-bin-vendored で同梱されるため別途インストール不要。
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/${{ matrix.example }}
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: build
+        run: cargo build --all-targets
