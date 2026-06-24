@@ -15,7 +15,9 @@ name = "reiny"
 path = "src/main.rs"
 
 [dependencies]
-reiny-launch = { path = "../reiny-launch", version = "0.1.0" }
+reiny-launch = { path = "../reiny-launch", version = "0.2.0" }
+# Reiny.toml の解決・型/トピック導出だけ使う(`reiny check`)。prost-build は引かない。
+reiny-build = { path = "../reiny-build", version = "0.2.0", default-features = false }
 clap = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }

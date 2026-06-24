@@ -10,9 +10,16 @@ description = "reiny build helper: reads Reiny.toml, compiles protos, and genera
 keywords = ["reiny", "build", "protobuf", "codegen", "prost"]
 categories = ["development-tools::build-utils"]
 
+[features]
+# 既定では proto コンパイル機能込み(grain の build.rs はこれを使う)。
+# `default-features = false` にすると Reiny.toml の解決・型/トピック導出だけが残り、
+# prost-build / protoc を引かない(`reiny check` のような内省用途向け)。
+default = ["compile"]
+compile = ["dep:prost-build", "dep:protoc-bin-vendored"]
+
 [dependencies]
-prost-build = { workspace = true }
-protoc-bin-vendored = { workspace = true }
+prost-build = { workspace = true, optional = true }
+protoc-bin-vendored = { workspace = true, optional = true }
 serde = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }

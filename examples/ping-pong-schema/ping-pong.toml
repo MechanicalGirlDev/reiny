@@ -1,0 +1,8 @@
+# launch config — ping/pong をまとめて起動する(../ping-pong-workspace と同じ)。
+# 共有スキーマクレートはライブラリなので grain には現れない(ビルド時に共有されるだけ)。
+#
+#   reiny ping-pong.toml
+#
+[grain]
+pong = { bin = "pong", on_exit = "respawn" }
+ping = { bin = "ping", depends_on = ["pong"] }

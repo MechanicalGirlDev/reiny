@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+// 共有スキーマの型。ワークスペースの Reiny.toml [internals] から参照され、
+// [schema].crate のクレートだけが 1 度コンパイルする。
+package pong;
+
+// Pong: 受け取った Ping への返球。
+message Pong {
+  // 対応する Ping の seq をそのまま返す。送り主が往復を突き合わせられる。
+  uint64 seq = 1;
+  // 任意のメッセージ本文。
+  string message = 2;
+  // 返球時刻(Unix 秒)。
+  int64 replied_unix = 3;
+}

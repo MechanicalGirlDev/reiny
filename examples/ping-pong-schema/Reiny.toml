@@ -1,0 +1,42 @@
+# Reiny.toml — 共有スキーマクレート版のワークスペース reiny マニフェスト。
+#
+# ../ping-pong-workspace と同じ「workspace 共有 [internals]」配置だが、`[schema]` を足して
+# いる点が違う。[internals] の型を **[schema].crate のクレート(pingpong-schema)だけ**が
+# prost コンパイル + impl Topic し、ping / pong はそれを Cargo 依存として再エクスポートする。
+# こうすると、grain ごとに proto を再コンパイルしていた分(../ping-pong-workspace は ping と
+# pong が両方 [internals] を prost ビルドする)が 1 度で済む。
+#
+#   workspace        : 各 grain が [internals] を自前で prost ビルド
+#   workspace+schema : スキーマクレートが 1 度だけビルド、grain は依存して共有
+#
+# `reiny check` でモード(workspace+schema)と型 → トピックを確認できる。
+
+[workspace]
+version = "0.2.0"
+description = "共有スキーマクレートで [internals] を 1 度だけ生成する ping-pong。"
+authors = ["nop <noplab90@gmail.com>"]
+license = "MIT"
+
+# 共有メッセージカタログ。ワークスペース直下の proto/ で定義する。
+[internals]
+Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
+Pong = { proto = "proto/pong.proto", message = "pong.Pong" }
+
+# このクレートが [internals] を 1 度だけコンパイルして型 + Topic を提供する。
+# 名前は schema/ クレートのパッケージ名と一致させる(reiny-build がこれで本体/消費を判定)。
+[schema]
+crate = "pingpong-schema"
+
+# 各 grain の publish/subscribe 宣言。型 = トピックなので、どの grain が公開しても同じ型は
+# 同じトピックになる。proto の再コンパイルはせず pingpong-schema を共有する。
+[projects.ping]
+version = "0.2.0"
+description = "Ping を打って Pong を待つ。"
+publications = ["Ping"]
+dependencies = ["Pong"]
+
+[projects.pong]
+version = "0.2.0"
+description = "Ping を受けるたびに Pong を返す。"
+publications = ["Pong"]
+dependencies = ["Ping"]

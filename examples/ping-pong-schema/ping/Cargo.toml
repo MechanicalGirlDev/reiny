@@ -1,0 +1,19 @@
+[package]
+name = "ping"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+reiny.workspace = true
+# 共有スキーマクレート。型(Ping/Pong)はここから来る。prost は不要(型を使うだけ)。
+pingpong-schema.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[build-dependencies]
+# 消費モード: proto は再コンパイルせず、pingpong-schema を internals として再エクスポートする
+# 薄い生成物だけを出す(reiny-build がパッケージ名で消費モードと判定)。
+reiny-build.workspace = true

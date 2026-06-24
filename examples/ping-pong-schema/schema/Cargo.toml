@@ -1,0 +1,19 @@
+[package]
+name = "pingpong-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# 共有スキーマ「ライブラリ」。bin ではない。
+[lib]
+
+[dependencies]
+# 生成物の impl Topic が ::reiny を、prost 型が ::prost を参照する。
+reiny.workspace = true
+prost.workspace = true
+
+[build-dependencies]
+# ワークスペースの Reiny.toml [internals] を、このクレート(= [schema].crate)が
+# 1 度だけ prost コンパイルする。
+reiny-build.workspace = true

@@ -5,6 +5,7 @@
 //! --launcher` でリネームされた配布物)のときは、引数なしで隣の `<basename>.toml` を起動する。
 
 mod buildcmd;
+mod checkcmd;
 mod compress;
 mod runcmd;
 mod scaffold;
@@ -19,7 +20,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "reiny",
     version,
-    about = "reiny grain CLI: new / init / add / build / run / compress"
+    about = "reiny grain CLI: new / init / add / check / build / run / compress"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -54,6 +55,11 @@ enum Command {
     Add {
         /// 依存先プロジェクトへのパス。
         path: PathBuf,
+    },
+    /// Reiny.toml を解決し、型 → トピック対応とモードを表示する(proto はコンパイルしない)。
+    Check {
+        /// 対象ディレクトリ(省略時はカレントから上方へ Reiny.toml を探す)。
+        path: Option<PathBuf>,
     },
     /// Reiny.toml 駆動の codegen を走らせてビルドする(cargo build のラッパ)。
     Build {
@@ -119,6 +125,7 @@ fn main() -> Result<()> {
             name,
         } => scaffold::init(path.as_deref(), publish.as_deref(), name.as_deref()),
         Command::Add { path } => scaffold::add(&path),
+        Command::Check { path } => checkcmd::check(path.as_deref()),
         Command::Build { release, args } => buildcmd::build(release, &args),
         Command::Run {
             config,
@@ -161,7 +168,9 @@ fn renamed_launcher_config() -> Result<Option<PathBuf>> {
 
 /// 後方互換の launch 起動形を検出する。`reiny --config X` / `reiny X`(サブコマンドでない位置引数)。
 fn backward_compat_config(argv: &[String]) -> Option<PathBuf> {
-    const SUBCOMMANDS: [&str; 7] = ["new", "init", "add", "build", "run", "compress", "help"];
+    const SUBCOMMANDS: [&str; 8] = [
+        "new", "init", "add", "check", "build", "run", "compress", "help",
+    ];
     let first = argv.get(1)?;
     if first == "--config" {
         return argv.get(2).map(PathBuf::from);
@@ -214,7 +223,7 @@ mod tests {
 
     #[test]
     fn subcommands_are_not_backward_compat() {
-        for sub in ["new", "init", "add", "build", "run", "compress"] {
+        for sub in ["new", "init", "add", "check", "build", "run", "compress"] {
             assert_eq!(backward_compat_config(&args(&[sub])), None, "{sub}");
         }
     }

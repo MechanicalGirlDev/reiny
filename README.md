@@ -35,7 +35,7 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
 | [`reiny-macros`](crates/reiny-macros) | The `#[reiny::main]` proc-macro (used via `reiny`) |
 | [`reiny-build`](crates/reiny-build) | `build.rs` helper: compiles protos from `Reiny.toml` and generates types/topics |
 | [`reiny-launch`](crates/reiny-launch) | Launcher library: spawns grain processes from a launch config's `[grain]` section |
-| [`reiny-cli`](crates/reiny-cli) | The `reiny` command: scaffold (new/init/add), build, run, compress |
+| [`reiny-cli`](crates/reiny-cli) | The `reiny` command: scaffold (new/init/add), check, build, run, compress |
 
 ## Getting started
 
@@ -44,9 +44,13 @@ Use the `reiny` CLI to scaffold a grain project.
 ```sh
 cargo install reiny-cli   # installs the `reiny` command
 reiny new my-grain
+reiny check my-grain       # show the type → topic map (no build)
 ```
 
 See [`examples/`](examples) for runnable demos (each is its own cargo workspace).
+For larger workspaces, [`examples/ping-pong-schema`](examples/ping-pong-schema)
+shows the `[schema]` shared-schema crate that compiles the message catalog once
+instead of per grain.
 
 ## License
 

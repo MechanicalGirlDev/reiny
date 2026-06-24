@@ -41,6 +41,7 @@ jobs:
           - ping-pong-relay
           - ping-pong-ring
           - ping-pong-workspace
+          - ping-pong-schema
     defaults:
       run:
         working-directory: examples/${{ matrix.example }}

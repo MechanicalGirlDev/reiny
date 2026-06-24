@@ -28,7 +28,8 @@ reiny の使い方を示すサンプル集。どれも題材は最小の ping-po
 | サンプル | 内容 |
 | --- | --- |
 | [ping-pong-ring](ping-pong-ring) | proto と Reiny.toml を **各プロジェクト** に配置。型は各々が所有し相互依存(リング)。 |
-| [ping-pong-workspace](ping-pong-workspace) | proto と Reiny.toml を **ワークスペースに 1 つ** 集約。型は共有カタログ `[internals]`。 |
+| [ping-pong-workspace](ping-pong-workspace) | proto と Reiny.toml を **ワークスペースに 1 つ** 集約。型は共有カタログ `[internals]`。各 grain が proto を自前でビルド。 |
+| [ping-pong-schema](ping-pong-schema) | workspace 共有 + `[schema]`。`[internals]` を **共有スキーマクレートが 1 度だけ** prost ビルドし、各 grain はそれを Cargo 依存として共有(proto 再コンパイルなし)。 |
 
 ### 通信トポロジ / 機能
 

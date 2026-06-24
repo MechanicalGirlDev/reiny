@@ -1,0 +1,33 @@
+# ping-pong-schema の cargo ワークスペース。
+# schema/(共有スキーマクレート)+ ping/ + pong/(消費 grain)を束ねる。reiny 本体の
+# ワークスペースとは分離した独立ワークスペースなので、ルートの `cargo build` には巻き込まれない。
+#
+# 配置パターン: workspace 共有 + [schema]。proto と Reiny.toml はワークスペース直下に 1 つだけ
+# 置き、[internals] を schema/ クレートが 1 度だけ prost コンパイルする。ping/pong はそれを
+# Cargo 依存として共有し、自前の proto 再コンパイルをしない(../ping-pong-workspace との差)。
+#
+# `reiny ping-pong.toml` で起動、`reiny check` でモードと型 → トピックを確認できる。
+[workspace]
+resolver = "2"
+members = ["schema", "ping", "pong"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+authors = ["nop <noplab90@gmail.com>"]
+
+[workspace.dependencies]
+# umbrella crate: SDK 本体 + #[reiny::main] + schema! マクロ + ランタイム。
+reiny = { path = "../../crates/reiny" }
+# Reiny.toml と proto を読んで型・トピックを生成する build 補助。
+reiny-build = { path = "../../crates/reiny-build" }
+# 共有スキーマクレート。ping/pong はこれを依存して [internals] の型を引く。
+pingpong-schema = { path = "schema" }
+# prost は **スキーマクレートだけ**が要る(生成 prost 型を持つのはそのクレート)。
+# 消費 grain(ping/pong)は型を使うだけなので prost を直接依存しない。
+prost = "0.13"
+
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

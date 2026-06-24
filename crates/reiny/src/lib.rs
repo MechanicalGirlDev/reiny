@@ -34,6 +34,30 @@ use shutdown::Shutdown;
 /// `#[reiny::main]` — grain のエントリポイント属性。詳細は [`reiny_macros::main`]。
 pub use reiny_macros::main;
 
+/// 共有スキーマクレート(`[schema] crate = ...`)の `lib.rs` に置く 1 行。
+///
+/// workspace モードで `[internals]` を **1 度だけ** prost コンパイル + `impl Topic` する
+/// クレートが、`reiny-build` 生成物(`$OUT_DIR/reiny_generated.rs`)をライブラリとして取り込み、
+/// `internals` / `__pb` を公開する。消費側 grain はこのクレートを Cargo 依存にするだけで、
+/// 自前の proto 再コンパイルが要らなくなる(`#[reiny::main]` の取り込みと同じ仕組み)。
+///
+/// ```ignore
+/// // myapp-schema/src/lib.rs
+/// reiny::schema!();
+/// // → myapp_schema::internals::* が他の grain から使える
+/// ```
+#[macro_export]
+macro_rules! schema {
+    () => {
+        #[doc(hidden)]
+        mod __reiny_generated {
+            include!(concat!(env!("OUT_DIR"), "/reiny_generated.rs"));
+        }
+        #[allow(unused_imports)]
+        pub use __reiny_generated::*;
+    };
+}
+
 /// `reiny-build` 生成の `config()` 拡張が設定 table を読むための再エクスポート。
 /// 利用側 crate に `toml` 依存を持たせずに済ませる(prost と違い hidden)。
 #[doc(hidden)]

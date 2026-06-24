@@ -20,9 +20,10 @@ reiny is a Rust SDK for distributed "grains" (processes) that communicate over [
 The cross-cutting flow to understand before touching any of these three:
 
 1. Each grain's `build.rs` calls `reiny_build::compile()`.
-2. `compile()` searches *upward* for the nearest `Reiny.toml` and resolves it in one of two modes:
+2. `compile()` searches *upward* for the nearest `Reiny.toml` and resolves it in one of two layouts (`reiny_build::Mode`):
    - **per-project** (`[project]`): own `[publications]` + each `[dependencies]` project's public types → `publications::*` and `dependencies::<project>::*`.
    - **workspace** (`[internals]` / `[projects.*]`): the shared `[internals]` catalog → `internals::*`; the current package must appear as `[projects.<pkg-name>]`.
+     - With an optional `[schema] crate = "<pkg>"`, workspace splits by the *current package*: the package whose name equals `[schema].crate` compiles `[internals]` **once** (full prost + `impl Topic`, exposed via `reiny::schema!()` in its `lib.rs`); every other package becomes a **consumer** that recompiles no protos and just re-exports `::<schema_crate>::internals::*` as `crate::internals`. This removes per-grain duplicate proto compilation. The shared `Topic`/`Message` impls live only in the schema crate (coherence makes them global). See `examples/ping-pong-schema`.
 3. It compiles the protos with prost and writes `$OUT_DIR/reiny_generated.rs`: prost output under `__pb`, the re-export modules above, one `impl ::reiny::Topic` per type (where the topic string is embedded), and — if `[config]` is present — a typed `config::Config` plus a `cloudy.config()` extension trait.
 4. `#[reiny::main]` `include!`s `reiny_generated.rs` into the crate root — which is why user code says `crate::publications::Ping`, not `reiny::...` — and wraps the async `main` in `reiny::__rt::run`.
 
@@ -31,17 +32,18 @@ Because the key is the Rust type, two crates sharing a type resolve to the same 
 ## Three manifest files (don't conflate)
 
 - **`Cargo.toml`** — Rust build.
-- **`Reiny.toml`** — reiny's manifest: identity, published/dependency types, `[config]` schema + defaults. Read at build time by `reiny-build` (schema: `crates/reiny-build/src/lib.rs`, `Manifest`).
+- **`Reiny.toml`** — reiny's manifest: identity, published/dependency types, optional `[schema] crate` (workspace shared-schema crate), `[config]` schema + defaults. Read at build time by `reiny-build` (schema: `crates/reiny-build/src/lib.rs`, `Manifest`).
 - **launch config** (e.g. `ping-pong.toml`) — *deployment*: a `[grain]` table read by the launcher saying which grains to spawn together (`depends_on`, `on_exit`, etc.). Every key is an equal grain (no privileged component types); key = instance name = default bin name.
 
 ## The `reiny` CLI (`reiny-cli`) — one binary, several non-obvious behaviors
 
-The `reiny` binary lives in **`reiny-cli`** (it depends on `reiny-launch` as a library; `reiny-launch` is now lib-only). Subcommands `new`/`init`/`add`/`build`/`run`/`compress` plus two non-subcommand entry paths handled *before* clap in `main`:
+The `reiny` binary lives in **`reiny-cli`** (it depends on `reiny-launch` as a library; `reiny-launch` is now lib-only). Subcommands `new`/`init`/`add`/`check`/`build`/`run`/`compress` plus two non-subcommand entry paths handled *before* clap in `main`:
 
 - **Backward-compat launch:** `reiny <launch>.toml` (bare positional) and `reiny --config <launch>.toml` both mean `reiny run`.
 - **Renamed-launcher self mode:** if `argv[0]`'s basename isn't `reiny` (i.e. a `reiny compress --launcher <name>` artifact), it reads `<name>.toml` next to itself and launches with no args.
 
 Facts that span files:
+- `reiny check [path]` resolves the nearest `Reiny.toml` and prints its layout mode + type→topic table **without compiling protos**. It uses `reiny-build` with `default-features = false` (the `compile` feature, which pulls `prost-build`/`protoc`, is off), calling `reiny_build::describe()` (the catalog view, not package-bound — contrast `compile()`'s package-scoped `resolve_for`). Manifest validation (identifier checks, topic-collision) runs here too, so misconfig surfaces at `check` time, not just at build.
 - `reiny build` is just `cargo build` in the cwd — codegen happens via the grain's `build.rs` (`reiny_build::compile()`), so the wrapper stays thin.
 - `reiny new`/`init` scaffold **standalone** cargo projects (not workspace members); their `Cargo.toml` gets **path deps** to the reiny crates found by searching upward for `crates/reiny` + `crates/reiny-build` (so generated projects build inside this repo). `reiny add` only edits the target's `Reiny.toml` `[dependencies]` (textual insert, preserving comments) — never `src`.
 - `reiny run` must find grain bins that may live in **separate `target/` dirs** (each scaffolded grain is its own project). It builds a search-dir list (`<launch>/<grain>/target/{debug,release}`, `<launch>/target/...`, the launcher's own dir) and hands it to `reiny_launch::run_launch_dirs` (the multi-dir generalization of `run_launch`).
@@ -50,5 +52,8 @@ Facts that span files:
 ## Conventions & gotchas
 
 - **Comments and rustdoc are in Japanese.** Match that, and read them for design intent before changing behavior.
+- **`reiny-build` validates identifiers up front.** `[dependencies]` keys, `[publications]`/`[internals]` aliases, and `[schema].crate` all become Rust identifiers in generated code, so a hyphen (or keyword) is rejected with an actionable error pointing at the section — instead of a downstream `rustc` syntax error in `reiny_generated.rs`. Topic-segment collisions (two distinct types mapping to the same type name) are likewise rejected (`validate_no_topic_collision`).
+- **`REINY_VERBOSE=1`** (a build-time env var) makes `reiny_build::compile()` print the resolved mode, every type→topic, and the deduped proto set via `cargo:warning=` — handy when an ownership/dependency assignment isn't compiling the type you expect.
+- **`reiny-build` is feature-split.** The default `compile` feature pulls `prost-build`/`protoc`; `default-features = false` leaves only manifest resolution + topic derivation (used by `reiny check`). Keep prost-touching code under `#[cfg(feature = "compile")]`.
 - `protoc` is **vendored** via `protoc-bin-vendored` — a bare `cargo build` needs no system protoc.
 - CI gate (mirror locally before pushing): `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo build --all-targets`. Run a single crate/test with `cargo test -p <crate>` / `cargo test <name>`.
