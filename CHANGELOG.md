@@ -6,10 +6,11 @@ All notable changes to the reiny workspace crates (`reiny`, `reiny-build`,
 
 ## 0.3.0 — unreleased
 
-Escape-hatch and schema-scaling pass. Design record: `docs/design/0.3.0.md`.
+Escape-hatch pass. Design record: `docs/design/0.3.0.md` (§8 records what shipped
+and where the implementation departed from the design).
 
-**BREAKING (wire):** topic keys gain a namespace segment — `reiny/<ns>/<id>/<TYPE>`
-(publish) and `reiny/<ns>/*/<TYPE>` (subscribe), with `<ns>` defaulting to
+**BREAKING (wire):** topic keys gain a namespace segment — `reiny/<domain>/<id>/<TYPE>`
+(publish) and `reiny/<domain>/*/<TYPE>` (subscribe), with `<domain>` defaulting to
 `"default"`. 0.2 and 0.3 grains cannot talk to each other; upgrade every grain
 together. No compatibility shim is provided. User code is otherwise
 source-compatible: `publish::<T>()`, `subscribe::<T>()` and `recv()` keep both
@@ -18,19 +19,22 @@ their signatures and their meaning.
 ### Added
 
 - **`Cloudy::session()` + `pub use zenoh`** — the escape hatch. Everything reiny
-  does not wrap (queryable, liveliness, attachments, scouting) becomes reachable
-  directly. This makes `zenoh` a *public* dependency of `reiny`: a zenoh major
-  bump is from now on a reiny breaking change.
+  does not wrap (queryable, attachments, scouting, arbitrary key expressions)
+  becomes reachable directly. This makes `zenoh` a *public* dependency of
+  `reiny`: a zenoh major bump is from now on a reiny breaking change.
 - **Session configuration.** `RuntimeOptions` + `run_with()`, plus
-  `--zenoh-config <path>`, `--domain <ns>`, `--connect <endpoint>`,
-  `--zenoh-mode peer|client` (and `REINY_DOMAIN`). `reiny-launch` gains `domain`
-  and `zenoh_config` per `[grain]`. reiny does **not** define a TOML schema for
-  zenoh configuration — the JSON5 file is passed straight through.
+  `--domain <ns>` (or `REINY_DOMAIN`), `--zenoh-config <path>`,
+  `--connect <endpoint>` (repeatable) and `--zenoh-mode peer|client`.
+  `reiny-launch` gains a launch-wide `domain` key and per-`[grain]` `domain` /
+  `zenoh_config`. reiny does **not** define a TOML schema for zenoh
+  configuration — the JSON5 file is passed straight through, and the two CLI
+  shorthands become `Config::insert_json5` overrides.
 - **Presence.** `Cloudy::publish::<T>()` now also declares a liveliness token on
   the same key, so `Cloudy::publishers::<T>()` (snapshot) and
   `watch_publishers::<T>()` (`Joined` / `Left` stream) report who is currently
   publishing a type. Replaces the hand-rolled heartbeat + timeout liveness that
-  downstreams had to write after the session was closed off.
+  downstreams had to write after the session was closed off. There is no
+  opt-out: a publisher without a token would make the answers untrustworthy.
 - **Sender identity.** `Subscriber::recv_envelope()` returns `Envelope<T>`
   (`value` + `source` + zenoh `timestamp`), and
   `Cloudy::subscriber::<T>().from(id)` subscribes to a single publisher instead
@@ -40,26 +44,12 @@ their signatures and their meaning.
   a periodic re-publish. Implemented with a queryable plus one `get()` (no
   `zenoh-ext` dependency); a query reply is dropped once a live sample from that
   source has already been delivered.
-- **QoS builder.** `Cloudy::publisher::<T>()` exposes `priority`, `congestion`
-  and `express`.
-- **`Topic::SCHEMA: Option<u64>`** — schema fingerprint carried in the zenoh
-  attachment; a mismatch is warned about once per source and the sample dropped.
-  It is a defaulted associated const, so hand-written `impl Topic` stays valid
-  unchanged.
-- **`Cloudy::shutdown_now()`** and **`Cloudy::extra_args()`**.
+- **`Cloudy::shutdown_now()`**, **`Cloudy::extra_args()`**, **`Cloudy::domain()`**.
 - **`reiny_build::compile_with(|cfg| …)`** — direct access to
   `prost_build::Config` (`type_attribute` for serde derives,
   `file_descriptor_set_path` for dynamic decoding, `bytes`, …). `compile()`
-  becomes `compile_with(|_| {})`.
-- **Multi-crate `[schema]`.** A workspace `Reiny.toml` may declare several
-  `[schema.<name>]` entries (`crate`, `protos`, `depends`), splitting the shared
-  schema across independently publishable crates. reiny-build compiles only the
-  current crate's protos, auto-generates `extern_path` for the others (so leaf
-  types are never generated twice), emits `impl Topic` only for its own types,
-  and hands the proto include dir + owned FQN list to dependents through cargo
-  `links` metadata (`DEP_*_PROTO_INCLUDE` / `DEP_*_PROTO_TYPES`) so published
-  crates resolve from crates.io. The 0.2 single `[schema] crate = "…"` form keeps
-  working as sugar for one entry.
+  becomes `compile_with(|_| {})`, and `prost_build` is re-exported so build
+  scripts name the same version reiny compiled against.
 
 ### Changed
 
@@ -67,7 +57,11 @@ their signatures and their meaning.
   `RuntimeOptions.install_tracing` (default `true`; also
   `#[reiny::main(tracing = false)]`) lets a grain install its own `tracing`
   subscriber, and `worker_threads` configures the tokio runtime. On unix,
-  `SIGTERM` triggers shutdown in addition to Ctrl+C.
+  `SIGTERM` triggers shutdown in addition to Ctrl+C, and a signal handler that
+  cannot be installed now waits forever instead of shutting the grain down.
+- `--id` / `--domain` are validated as single key segments at startup. A value
+  containing `/`, `*`, `?`, `#`, `$`, `@` or whitespace used to silently corrupt
+  every key the grain touched.
 - `reiny-build` selects `protoc` via `Config::protoc_executable()` instead of
   writing the `PROTOC` process environment variable from the build script.
 
@@ -76,9 +70,16 @@ their signatures and their meaning.
 - Unknown CLI arguments are still ignored rather than rejected (grain-specific
   flags are none of reiny's business), but are now retrievable through
   `Cloudy::extra_args()`.
+- **No QoS builder.** zenoh keeps the `priority` / `congestion_control` /
+  `express` setters behind its `internal` *and* `unstable` features; opening two
+  feature doors for three setters is not worth it when `Cloudy::session()`
+  already reaches them. See `docs/design/0.3.0.md` §8.
 - Deliberately **not** added: typed request/response, `subscribe_raw`, topic
   remapping, QoS in `Reiny.toml`, `[projects.*]` enforcement, and latched history
   beyond the latest value. Rationale in `docs/design/0.3.0.md` §4.
+- Still outstanding from the design: multi-crate `[schema.<name>]` and the
+  `Topic::SCHEMA` fingerprint (design §3.1 / §2.7). Both hang off the same
+  descriptor set and are planned as one follow-up.
 
 ## 0.2.0
 

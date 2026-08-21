@@ -30,9 +30,13 @@ pub enum OnExit {
     ShutdownAll,
 }
 
-/// launch config のルート。`[grain]` テーブルのみを持つ。
+/// launch config のルート。`[grain]` テーブルと、その全体に効く既定値。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct LaunchConfig {
+    /// この launch 全体の論理名前空間(`--domain`)。同じ LAN / マシン上の別の launch と
+    /// 混ざらなくなる —— 実機とログ再生、ロボット 2 体、CI の並列ジョブが同じ理由で救われる。
+    /// grain 側の `domain` が指定されていればそちらが勝つ。
+    pub domain: Option<String>,
     /// 起動する grain 群。キー = インスタンス名 = 既定 bin 名。`BTreeMap` でキー順を
     /// 決定的にし、起動順(依存が無いとき)を安定させる。
     #[serde(default)]
@@ -67,6 +71,12 @@ pub struct GrainEntry {
     pub on_exit: Option<OnExit>,
     /// ログレベルの override。
     pub log_level: Option<String>,
+    /// 論理名前空間の override(未指定は launch config の `domain`)。
+    /// 別 domain の grain 同士は通信しないので、通常は launch 全体で揃える。
+    pub domain: Option<String>,
+    /// zenoh セッション設定ファイル(JSON5)への、launch config ディレクトリ基準のパス。
+    /// 指定すると起動引数に `--zenoh-config <abs>` を付与する。
+    pub zenoh_config: Option<PathBuf>,
     /// false で当該 grain を起動対象から外す(既定 true)。
     pub enabled: Option<bool>,
 }
@@ -126,6 +136,24 @@ impl GrainSpec {
         }
     }
 
+    /// `domain` の override。
+    #[must_use]
+    pub fn domain(&self) -> Option<&str> {
+        match self {
+            Self::Config(_) => None,
+            Self::Detailed(e) => e.domain.as_deref(),
+        }
+    }
+
+    /// zenoh セッション設定ファイルへのパス(launch config dir 基準)。
+    #[must_use]
+    pub fn zenoh_config(&self) -> Option<&Path> {
+        match self {
+            Self::Config(_) => None,
+            Self::Detailed(e) => e.zenoh_config.as_deref(),
+        }
+    }
+
     /// 起動対象か(既定 true)。`enabled = false` で外す。
     #[must_use]
     pub fn enabled(&self) -> bool {
@@ -174,6 +202,27 @@ mod tests {
         assert_eq!(g.on_exit(), OnExit::Respawn);
         assert_eq!(g.depends_on(), ["gui".to_string()]);
         assert_eq!(g.args(), ["--fast".to_string()]);
+    }
+
+    #[test]
+    fn domain_and_zenoh_config_parse() {
+        let c = config(
+            r#"
+            domain = "lab"
+
+            [grain]
+            gui = { config = "configs/gui.toml", zenoh_config = "z.json5" }
+            solo = { bin = "solo", domain = "other" }
+        "#,
+        );
+        assert_eq!(c.domain.as_deref(), Some("lab"));
+        assert_eq!(c.grain["gui"].zenoh_config(), Some(Path::new("z.json5")));
+        assert_eq!(
+            c.grain["gui"].domain(),
+            None,
+            "grain 未指定なら launch 既定に委ねる"
+        );
+        assert_eq!(c.grain["solo"].domain(), Some("other"));
     }
 
     #[test]

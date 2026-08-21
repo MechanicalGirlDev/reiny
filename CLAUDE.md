@@ -8,7 +8,7 @@ Capture only what reading the code won't tell you: cross-file architecture, the 
 
 ## Orientation
 
-reiny is a Rust SDK for distributed "grains" (processes) that communicate over [Zenoh](https://zenoh.io) pub/sub. Organizing principle: **type = topic**. A grain publishes and subscribes *by Rust type*, never by topic string — publishing `T` goes to `reiny/<id>/T`, subscribing to `T` receives `reiny/*/T` (the same type from every publisher). The type→topic mapping is generated at build time from a `Reiny.toml`, so user code only ever names types.
+reiny is a Rust SDK for distributed "grains" (processes) that communicate over [Zenoh](https://zenoh.io) pub/sub. Organizing principle: **type = topic**. A grain publishes and subscribes *by Rust type*, never by topic string — publishing `T` goes to `reiny/<domain>/<id>/T`, subscribing to `T` receives `reiny/<domain>/*/T` (the same type from every publisher; `<domain>` is a logical namespace from `--domain` / `REINY_DOMAIN`, default `"default"`). The type→topic mapping is generated at build time from a `Reiny.toml`, so user code only ever names types.
 
 ## Two build worlds — the root workspace excludes `examples/`
 
@@ -56,4 +56,6 @@ Facts that span files:
 - **`REINY_VERBOSE=1`** (a build-time env var) makes `reiny_build::compile()` print the resolved mode, every type→topic, and the deduped proto set via `cargo:warning=` — handy when an ownership/dependency assignment isn't compiling the type you expect.
 - **`reiny-build` is feature-split.** The default `compile` feature pulls `prost-build`/`protoc`; `default-features = false` leaves only manifest resolution + topic derivation (used by `reiny check`). Keep prost-touching code under `#[cfg(feature = "compile")]`.
 - `protoc` is **vendored** via `protoc-bin-vendored` — a bare `cargo build` needs no system protoc.
+- **`crates/reiny/src/e2e.rs` is a live-zenoh test, not a unit test.** It opens three real sessions over a fixed loopback port (`tcp/127.0.0.1:37447`, multicast off) to check presence / latched / domain isolation together. It lives in `src/` rather than `tests/` because it needs the private `Cloudy::new` — adding a public constructor just to test would be the wrong trade. If it starts failing everywhere at once, suspect that port.
+- **zenoh is a public dependency** (`pub use zenoh` + `Cloudy::session()`). Bumping zenoh's major version is a reiny breaking change; say so in the CHANGELOG when it happens. QoS setters (`priority` / `congestion_control` / `express`) are deliberately *not* wrapped — zenoh gates them behind its `internal` **and** `unstable` features, and `session()` reaches them anyway.
 - CI gate (mirror locally before pushing): `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo build --all-targets`. Run a single crate/test with `cargo test -p <crate>` / `cargo test <name>`.

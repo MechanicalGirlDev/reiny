@@ -249,12 +249,38 @@ impl Resolution {
 // エントリポイント
 // ---------------------------------------------------------------------------
 
+/// prost-build そのもの。[`compile_with`] のクロージャが受け取る `Config` の型を
+/// 利用側 `build.rs` が名指しできるよう再エクスポートする(版ズレ防止)。
+#[cfg(feature = "compile")]
+pub use prost_build;
+
 /// `build.rs` から呼ぶ。Reiny.toml を読み、proto をコンパイルして生成物を `$OUT_DIR` に出す。
 ///
 /// `compile` 機能(既定 on)が要る。`reiny check` のように prost を引きたくない内省用途では
 /// [`resolve`] を直接使う。
 #[cfg(feature = "compile")]
 pub fn compile() -> Result<()> {
+    compile_with(|_| {})
+}
+
+/// [`compile`] と同じだが、prost へ渡す直前の `prost_build::Config` を触れる。
+///
+/// reiny が prost のノブを塞がないための逃げ道。`type_attribute` で wire 型に serde を
+/// derive する、`file_descriptor_set_path` を出して `prost-reflect` で動的デコードする、
+/// `bytes()` / `btree_map` / `boxed` …… いずれも reiny 側に専用 API を足さずに済む。
+///
+/// ```ignore
+/// // build.rs
+/// reiny_build::compile_with(|c| {
+///     c.type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]");
+/// })
+/// .expect("reiny codegen");
+/// ```
+///
+/// `out_dir` / `include_file` は reiny が生成物を組み立てるのに使うので、
+/// クロージャで上書きしても reiny の生成物とは噛み合わなくなる(触らないこと)。
+#[cfg(feature = "compile")]
+pub fn compile_with(customize: impl FnOnce(&mut prost_build::Config)) -> Result<()> {
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").context("CARGO_MANIFEST_DIR not set")?);
     let out_dir = PathBuf::from(env::var("OUT_DIR").context("OUT_DIR not set")?);
@@ -268,7 +294,7 @@ pub fn compile() -> Result<()> {
     let generated = if let Mode::SchemaConsumer { crate_ident } = &resolution.mode {
         render_consumer(crate_ident)
     } else {
-        compile_protos(&resolution.entries, &out_dir)?;
+        compile_protos(&resolution.entries, &out_dir, customize)?;
         render_generated(&resolution.entries, resolution.config.as_ref())?
     };
 
@@ -527,7 +553,11 @@ fn split_message(message: &str) -> Result<(Vec<String>, String)> {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "compile")]
-fn compile_protos(entries: &[Entry], out_dir: &Path) -> Result<()> {
+fn compile_protos(
+    entries: &[Entry],
+    out_dir: &Path,
+    customize: impl FnOnce(&mut prost_build::Config),
+) -> Result<()> {
     // 重複 proto を除いた一覧と、include に使う親ディレクトリ集合。
     let mut protos: Vec<PathBuf> = Vec::new();
     let mut includes: Vec<PathBuf> = Vec::new();
@@ -543,17 +573,6 @@ fn compile_protos(entries: &[Entry], out_dir: &Path) -> Result<()> {
         }
     }
 
-    // protoc が外から与えられていなければ同梱バイナリを使う(外部インストール不要)。
-    println!("cargo:rerun-if-env-changed=PROTOC");
-    if env::var_os("PROTOC").is_none()
-        && let Ok(protoc) = protoc_bin_vendored::protoc_bin_path()
-    {
-        // SAFETY: build script は単一スレッド。
-        unsafe {
-            env::set_var("PROTOC", protoc);
-        }
-    }
-
     let mut config = prost_build::Config::new();
     config
         .out_dir(out_dir)
@@ -562,6 +581,19 @@ fn compile_protos(entries: &[Entry], out_dir: &Path) -> Result<()> {
     // 生成型は prost-derive 由来で `::prost` を参照するため、利用側 crate は `prost` 依存が要る
     // (prost / tonic と同じ前提)。prost_path はderive 呼び出しだけ変えても展開内の `::prost`
     // は残るので、既定の `::prost` のまま利用側に prost を持たせる。
+
+    // protoc が外から与えられていなければ同梱バイナリを使う(外部インストール不要)。
+    // プロセスグローバルな `env::set_var("PROTOC")` ではなく config に載せる —— build script は
+    // 単一スレッドとはいえ、他人のプロセス環境を書き換えずに済むならその方がよい。
+    println!("cargo:rerun-if-env-changed=PROTOC");
+    if env::var_os("PROTOC").is_none()
+        && let Ok(protoc) = protoc_bin_vendored::protoc_bin_path()
+    {
+        config.protoc_executable(protoc);
+    }
+
+    // 利用側のカスタマイズは reiny の既定の**後**に当てる(上書きできる側にする)。
+    customize(&mut config);
 
     config
         .compile_protos(&protos, &includes)

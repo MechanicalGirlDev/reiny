@@ -127,7 +127,7 @@ fn write_cargo_toml(dir: &Path, proj: &str) -> Result<()> {
             "warning: reiny crates not found above {} — using version deps (won't build offline)",
             dir.display()
         );
-        ("\"0.1\"".to_string(), "\"0.1\"".to_string())
+        ("\"0.3\"".to_string(), "\"0.3\"".to_string())
     };
 
     let path = dir.join("Cargo.toml");
