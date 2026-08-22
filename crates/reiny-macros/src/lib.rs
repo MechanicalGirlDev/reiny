@@ -9,16 +9,34 @@
 //!    (外部クレート `reiny::` の名前空間には利用側固有の生成型を後入れできないため、
 //!    `reiny::publications` ではなく `crate::publications` になる。)
 //! 2. **ランタイム起動** — `async fn main(cloudy: Cloudy) -> reiny::Result<()>` を実行する
-//!    同期 `fn main` を生成し、tokio ランタイム・Zenoh セッション・Ctrl+C シャットダウンを
-//!    [`reiny::__rt::run`] に肩代わりさせる。
+//!    同期 `fn main` を生成し、tokio ランタイム・Zenoh セッション・シグナルシャットダウンを
+//!    `reiny::run_with` に肩代わりさせる。
+//!
+//! 唯一のオプションは `#[reiny::main(tracing = false)]` で、reiny に
+//! `tracing_subscriber` をグローバル登録させない(自前の subscriber を持つ grain 用)。
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{ItemFn, parse_macro_input};
+use syn::{ItemFn, LitBool, parse_macro_input};
 
 /// grain のエントリポイント。`async fn main(cloudy: Cloudy) -> reiny::Result<()>` に付ける。
+///
+/// `#[reiny::main(tracing = false)]` で reiny の `tracing_subscriber` 登録を止められる。
+/// `tracing_subscriber::try_init` は**後勝ちしない**ので、自前の subscriber を持つ grain が
+/// 「reiny より先に入れる」順序依存を抱えずに済む唯一の方法がこれ。
 #[proc_macro_attribute]
-pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let mut install_tracing = true;
+    let attr_parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("tracing") {
+            install_tracing = meta.value()?.parse::<LitBool>()?.value();
+            Ok(())
+        } else {
+            Err(meta.error("unknown #[reiny::main] option (only `tracing = false` is supported)"))
+        }
+    });
+    parse_macro_input!(attr with attr_parser);
+
     let user_fn = parse_macro_input!(item as ItemFn);
 
     // async であることを要求する(reiny の main は async)。
@@ -46,12 +64,14 @@ pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[allow(unused_imports)]
         pub use __reiny_generated::*;
 
-        // 2. 同期エントリ。ランタイム構築・Zenoh セッション・Ctrl+C は reiny に任せる。
+        // 2. 同期エントリ。ランタイム構築・Zenoh セッション・シグナルは reiny に任せる。
         fn main() -> ::reiny::Result<()> {
             #(#attrs)*
             async fn __reiny_user_main(#inputs) #output #body
 
-            ::reiny::__rt::run(env!("CARGO_PKG_NAME"), __reiny_user_main)
+            let mut __opts = ::reiny::RuntimeOptions::from_args(env!("CARGO_PKG_NAME"));
+            __opts.install_tracing = #install_tracing;
+            ::reiny::run_with(__opts, __reiny_user_main)
         }
     };
 

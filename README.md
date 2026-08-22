@@ -7,11 +7,13 @@ reiny is a Rust SDK for distributed "grains" (processes) that communicate over
 [Zenoh](https://zenoh.io) pub/sub. The organizing principle is **type = topic**:
 grains publish and subscribe by **Rust type**, never by topic string.
 
-- Publishing type `T` goes to `reiny/<id>/T`
-- Subscribing to type `T` receives `reiny/*/T` (the same type from every publisher)
+- Publishing type `T` goes to `reiny/<domain>/<id>/T`
+- Subscribing to type `T` receives `reiny/<domain>/*/T` (the same type from every publisher)
 
 The type → topic mapping is generated at build time by `reiny-build` (each
 grain's `build.rs`) from a `Reiny.toml`, so user code never names a topic string.
+`<domain>` is a logical namespace (`--domain` / `REINY_DOMAIN`, default
+`"default"`): grains in different domains never see each other, even on one LAN.
 
 ```rust,ignore
 use reiny::prelude::*;
@@ -26,6 +28,11 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
     Ok(())
 }
 ```
+
+Anything reiny does not wrap is reachable through `cloudy.session()`, which hands
+you the zenoh `Session` directly. reiny re-exports zenoh (`pub use zenoh`) so you
+never link two versions — the trade is that **zenoh's semver becomes yours**: a
+zenoh major bump is a reiny breaking change.
 
 ## Crates
 

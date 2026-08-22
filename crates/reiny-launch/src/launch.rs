@@ -81,7 +81,7 @@ impl LaunchPlan {
             .grain
             .iter()
             .filter(|(_, spec)| spec.enabled())
-            .map(|(name, spec)| resolve(name, spec, &cfg_dir))
+            .map(|(name, spec)| resolve(name, spec, &cfg_dir, config.domain.as_deref()))
             .collect();
 
         Self { grains }
@@ -154,12 +154,31 @@ impl LaunchPlan {
 }
 
 /// grain を規約既定 + override から組む。config があれば `--config <abs>` を付与。
-fn resolve(name: &str, spec: &GrainSpec, cfg_dir: &Path) -> ResolvedGrain {
+/// `domain` は grain の指定 → launch 全体の既定 の順で、あれば `--domain <ns>` を付与する
+/// (どちらも無ければ grain 側の既定 = `REINY_DOMAIN` か `"default"` に委ねる)。
+fn resolve(
+    name: &str,
+    spec: &GrainSpec,
+    cfg_dir: &Path,
+    default_domain: Option<&str>,
+) -> ResolvedGrain {
     let mut args = Vec::new();
     if let Some(cfg) = spec.config() {
         args.push("--config".to_string());
         args.push(
             resolve_relative(cfg_dir, cfg)
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    if let Some(domain) = spec.domain().or(default_domain) {
+        args.push("--domain".to_string());
+        args.push(domain.to_string());
+    }
+    if let Some(zcfg) = spec.zenoh_config() {
+        args.push("--zenoh-config".to_string());
+        args.push(
+            resolve_relative(cfg_dir, zcfg)
                 .to_string_lossy()
                 .into_owned(),
         );
@@ -214,6 +233,42 @@ mod tests {
         assert!(gui.depends_on.is_empty());
         assert!(gui.args.iter().any(|a| a == "--config"));
         assert!(gui.args.iter().any(|a| a.ends_with("configs/gui.toml")));
+    }
+
+    #[test]
+    fn domain_comes_from_grain_then_launch_default() {
+        let p = plan(
+            r#"
+            domain = "lab"
+
+            [grain]
+            gui = "configs/gui.toml"
+            solo = { bin = "solo", domain = "other" }
+        "#,
+        );
+        let arg_after = |g: &ResolvedGrain, flag: &str| {
+            g.args
+                .iter()
+                .position(|a| a == flag)
+                .and_then(|i| g.args.get(i + 1))
+                .cloned()
+        };
+        let gui = get(&p, "gui").expect("gui present");
+        assert_eq!(arg_after(gui, "--domain"), Some("lab".to_string()));
+        let solo = get(&p, "solo").expect("solo present");
+        assert_eq!(arg_after(solo, "--domain"), Some("other".to_string()));
+    }
+
+    #[test]
+    fn no_domain_anywhere_means_no_flag() {
+        let p = plan(
+            r#"
+            [grain]
+            gui = "configs/gui.toml"
+        "#,
+        );
+        let gui = get(&p, "gui").expect("gui present");
+        assert!(!gui.args.iter().any(|a| a == "--domain"));
     }
 
     #[test]
