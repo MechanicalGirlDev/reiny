@@ -12,6 +12,7 @@ use zenoh::Wait;
 use zenoh::handlers::FifoChannelHandler;
 use zenoh::liveliness::LivelinessToken;
 use zenoh::pubsub::{Publisher as ZPublisher, Subscriber as ZSubscriber};
+use zenoh::qos::{CongestionControl, Priority};
 use zenoh::query::{Query, Queryable, Reply};
 use zenoh::sample::{Sample, SampleKind};
 use zenoh::time::Timestamp;
@@ -37,14 +38,13 @@ pub struct Envelope<T> {
 // ---------------------------------------------------------------------------
 
 /// [`Cloudy::publisher`] が返す builder。何も指定しなければ [`Cloudy::publish`] と同じ。
-///
-/// QoS(priority / congestion control / express)はここには**無い**。zenoh は該当 setter を
-/// `internal` + `unstable` feature の裏に置いており、3 つの setter のためにその 2 枚を開けるのは
-/// 割に合わない。必要なら [`Cloudy::session`] から `declare_publisher` を直接呼ぶ。
 #[must_use = "builder は .build() するまで何もしない"]
 pub struct PublisherBuilder<'a, T> {
     cloudy: &'a Cloudy,
     latched: bool,
+    priority: Option<Priority>,
+    congestion: Option<CongestionControl>,
+    express: Option<bool>,
     _marker: PhantomData<T>,
 }
 
@@ -53,6 +53,9 @@ impl<'a, T> PublisherBuilder<'a, T> {
         Self {
             cloudy,
             latched: false,
+            priority: None,
+            congestion: None,
+            express: None,
             _marker: PhantomData,
         }
     }
@@ -61,6 +64,24 @@ impl<'a, T> PublisherBuilder<'a, T> {
     /// 「起動時に 1 回配れば済む設定」を定期再送し続けるタスクの代わり。履歴は 1 件だけ。
     pub fn latched(mut self) -> Self {
         self.latched = true;
+        self
+    }
+
+    /// zenoh の送信優先度。
+    pub fn priority(mut self, priority: Priority) -> Self {
+        self.priority = Some(priority);
+        self
+    }
+
+    /// 輻輳時に捨てるか待つか。
+    pub fn congestion(mut self, congestion: CongestionControl) -> Self {
+        self.congestion = Some(congestion);
+        self
+    }
+
+    /// バッチングを飛ばして即時送信する(低レイテンシ・低スループット)。
+    pub fn express(mut self, express: bool) -> Self {
+        self.express = Some(express);
         self
     }
 
@@ -73,10 +94,19 @@ impl<'a, T> PublisherBuilder<'a, T> {
         let key = self.cloudy.key_for(self.cloudy.id(), T::TYPE);
         let session = self.cloudy.session();
 
-        let publisher = session
-            .declare_publisher(key.clone())
-            .wait()
-            .map_err(anyhow::Error::msg)?;
+        // QoS setter は zenoh 側で `#[internal_trait]` により固有メソッドとしても生えているので、
+        // `QoSBuilderTrait` を import せず(= `internal` feature を開けず)に呼べる。
+        let mut builder = session.declare_publisher(key.clone());
+        if let Some(p) = self.priority {
+            builder = builder.priority(p);
+        }
+        if let Some(c) = self.congestion {
+            builder = builder.congestion_control(c);
+        }
+        if let Some(e) = self.express {
+            builder = builder.express(e);
+        }
+        let publisher = builder.wait().map_err(anyhow::Error::msg)?;
 
         let token = session
             .liveliness()
@@ -86,7 +116,12 @@ impl<'a, T> PublisherBuilder<'a, T> {
 
         let last: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
         let queryable = if self.latched {
-            Some(declare_latch(self.cloudy, &key, Arc::clone(&last))?)
+            Some(declare_latch(
+                self.cloudy,
+                &key,
+                Arc::clone(&last),
+                T::SCHEMA,
+            )?)
         } else {
             None
         };
@@ -108,6 +143,7 @@ fn declare_latch(
     cloudy: &Cloudy,
     key: &str,
     last: Arc<Mutex<Option<Vec<u8>>>>,
+    fingerprint: Option<u64>,
 ) -> Result<Queryable<()>> {
     let reply_key = key.to_string();
     cloudy
@@ -116,9 +152,13 @@ fn declare_latch(
         .callback(move |query: Query| {
             // poison しても latched は「最後の値を返すだけ」なので、取れなければ黙って何も返さない。
             let payload = last.lock().ok().and_then(|g| g.clone());
-            if let Some(bytes) = payload
-                && let Err(e) = query.reply(reply_key.clone(), bytes).wait()
-            {
+            let Some(bytes) = payload else { return };
+            // ライブ経路と同じ指紋を載せる。載せないと latched 応答だけ照合を素通りする。
+            let mut reply = query.reply(reply_key.clone(), bytes);
+            if let Some(fingerprint) = fingerprint {
+                reply = reply.attachment(fingerprint.to_le_bytes().to_vec());
+            }
+            if let Err(e) = reply.wait() {
                 tracing::warn!(key = %reply_key, error = %e, "latched reply failed");
             }
         })
@@ -142,7 +182,7 @@ pub struct Publisher<T> {
 }
 
 impl<T: Message + Topic> Publisher<T> {
-    /// メッセージを encode して発行する。
+    /// メッセージを encode して発行する。`T::SCHEMA` があれば指紋を attachment に載せる。
     pub async fn send(&self, message: T) -> Result<()> {
         let buf = message.encode_to_vec();
         if self.queryable.is_some()
@@ -150,7 +190,12 @@ impl<T: Message + Topic> Publisher<T> {
         {
             *slot = Some(buf.clone());
         }
-        self.publisher.put(buf).await.map_err(anyhow::Error::msg)?;
+        // attachment setter も `#[internal_trait]` の固有メソッド側を使う(trait import 不要)。
+        let mut put = self.publisher.put(buf);
+        if let Some(fingerprint) = T::SCHEMA {
+            put = put.attachment(fingerprint.to_le_bytes().to_vec());
+        }
+        put.await.map_err(anyhow::Error::msg)?;
         Ok(())
     }
 }
@@ -219,6 +264,7 @@ impl<'a, T> SubscriberBuilder<'a, T> {
             latched,
             latched_done: !self.latched,
             seen: HashSet::new(),
+            warned: HashSet::new(),
             shutdown: self.cloudy.shutdown_handle(),
             _marker: PhantomData,
         })
@@ -239,6 +285,8 @@ pub struct Subscriber<T> {
     latched_done: bool,
     /// ライブ sample を配り終えた送信元。latched 応答がこれより後に届いたら捨てる。
     seen: HashSet<String>,
+    /// スキーマ指紋の不一致を既に警告した送信元(送信元ごとに 1 度だけ鳴らす)。
+    warned: HashSet<String>,
     shutdown: Shutdown,
     _marker: PhantomData<T>,
 }
@@ -259,6 +307,7 @@ impl<T: Message + Default + Topic> Subscriber<T> {
             latched,
             latched_done,
             seen,
+            warned,
             shutdown,
             ..
         } = self;
@@ -278,6 +327,9 @@ impl<T: Message + Default + Topic> Subscriber<T> {
                     if seen.contains(&source) {
                         continue;
                     }
+                    if !schema_matches::<T>(sample, &source, warned) {
+                        continue;
+                    }
                     if let Some(value) = decode::<T>(sample) {
                         return Some(Envelope { value, source, timestamp: sample.timestamp().copied() });
                     }
@@ -287,6 +339,9 @@ impl<T: Message + Default + Topic> Subscriber<T> {
                     let source = source_of(sample.key_expr().as_str()).to_string();
                     if !*latched_done {
                         seen.insert(source.clone());
+                    }
+                    if !schema_matches::<T>(&sample, &source, warned) {
+                        continue;
                     }
                     if let Some(value) = decode::<T>(&sample) {
                         return Some(Envelope { value, source, timestamp: sample.timestamp().copied() });
@@ -304,6 +359,35 @@ async fn recv_reply(handler: Option<&FifoChannelHandler<Reply>>) -> Option<Reply
         Some(h) => h.recv_async().await.ok(),
         None => std::future::pending().await,
     }
+}
+
+/// attachment に載った送信側の指紋を自分の `T::SCHEMA` と突き合わせる。
+///
+/// 素通しにするのは「照合できないとき」だけ —— どちらかが `None`(手書き `impl Topic` や
+/// 指紋を載せない送信側)、または attachment が既知の形(8 バイト LE)でないとき。不一致
+/// だけを落とし、その送信元については 1 度しか警告しない(毎サンプル鳴らすとログが埋まる)。
+fn schema_matches<T: Topic>(sample: &Sample, source: &str, warned: &mut HashSet<String>) -> bool {
+    let (Some(mine), Some(attachment)) = (T::SCHEMA, sample.attachment()) else {
+        return true;
+    };
+    let bytes = attachment.to_bytes();
+    let Ok(raw) = <[u8; 8]>::try_from(bytes.as_ref()) else {
+        return true; // reiny の指紋ではない attachment。他人のものなので触らない。
+    };
+    let theirs = u64::from_le_bytes(raw);
+    if theirs == mine {
+        return true;
+    }
+    if warned.insert(source.to_string()) {
+        tracing::warn!(
+            ty = T::TYPE,
+            source,
+            expected = format!("{mine:016x}"),
+            received = format!("{theirs:016x}"),
+            "schema fingerprint mismatch; dropping samples from this source"
+        );
+    }
+    false
 }
 
 fn decode<T: Message + Default + Topic>(sample: &Sample) -> Option<T> {

@@ -60,6 +60,8 @@ missing_panics_doc = "allow"
 # Protobuf(reiny-build が各 grain の proto をコンパイルするのに使う)
 prost = "0.13"
 prost-build = "0.13"
+# descriptor set(prost-build が書き出すもの)を読むための型定義。
+prost-types = "0.13"
 # protoc バイナリをクレートとして同梱し、外部インストール不要でビルドできるようにする
 protoc-bin-vendored = "3"
 

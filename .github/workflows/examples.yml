@@ -42,6 +42,7 @@ jobs:
           - ping-pong-ring
           - ping-pong-workspace
           - ping-pong-schema
+          - ping-pong-schema-split
     defaults:
       run:
         working-directory: examples/${{ matrix.example }}

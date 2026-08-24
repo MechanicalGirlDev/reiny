@@ -1,0 +1,21 @@
+[package]
+name = "pingpong-msg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+# この区画に依存する区画は今のところ無いが、スキーマクレートは一律で links を持たせる
+# (後から誰かが depends に足したとき、書き忘れで詰まらないように)。
+links = "pingpong-msg"
+
+[lib]
+
+[dependencies]
+reiny.workspace = true
+prost.workspace = true
+# [schema.msg] の depends = ["geometry"] と同じ辺。cargo は **直接依存** にしか
+# DEP_* を渡さないので、この 1 行が無いと build.rs が geometry のメタを見つけられない。
+pingpong-geometry.workspace = true
+
+[build-dependencies]
+reiny-build.workspace = true

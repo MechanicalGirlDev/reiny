@@ -1,0 +1,18 @@
+[package]
+name = "pong"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+reiny.workspace = true
+# スキーマクレート 2 つ。crate::internals は両方の和になるので、両方が要る。
+pingpong-geometry.workspace = true
+pingpong-msg.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[build-dependencies]
+reiny-build.workspace = true

@@ -15,10 +15,13 @@ categories = ["development-tools::build-utils"]
 # `default-features = false` にすると Reiny.toml の解決・型/トピック導出だけが残り、
 # prost-build / protoc を引かない(`reiny check` のような内省用途向け)。
 default = ["compile"]
-compile = ["dep:prost-build", "dep:protoc-bin-vendored"]
+compile = ["dep:prost-build", "dep:protoc-bin-vendored", "dep:prost", "dep:prost-types"]
 
 [dependencies]
 prost-build = { workspace = true, optional = true }
+# descriptor set の decode 用（型 → 指紋、区画が公開する FQN 一覧の両方をここから作る）。
+prost = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
 protoc-bin-vendored = { workspace = true, optional = true }
 serde = { workspace = true }
 toml = { workspace = true }

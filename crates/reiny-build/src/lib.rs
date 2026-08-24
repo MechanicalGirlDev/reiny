@@ -50,19 +50,73 @@ struct Manifest {
     #[serde(default)]
     projects: BTreeMap<String, ProjectDecl>,
     /// workspace 共有スキーマクレート(あれば、型を 1 度だけ生成して共有する)。
-    schema: Option<Schema>,
+    schema: Option<SchemaDecl>,
     /// per-project の型付き設定スキーマ + 既定値(`cloudy.config()` で読む)。
     config: Option<toml::Table>,
 }
 
-/// `[schema] crate = "myapp-schema"`。workspace モードで、`[internals]` の型を **この
-/// クレートだけ**が prost コンパイル + `impl Topic` し、他の grain はそれを Cargo 依存として
-/// 再エクスポートする(grain ごとの重複 prost コンパイルを無くす)。`crate` はキーワードなので
-/// rename で受ける。
+/// `[schema]` の 2 形。`crate` はキーワードなので rename で受ける。
+///
+/// - **単一形**(0.2)`[schema] crate = "myapp-schema"` —— `[internals]` 全部を 1 クレートが
+///   prost コンパイル + `impl Topic` し、grain は Cargo 依存として再エクスポートする。
+/// - **多クレート形**(0.3)`[schema.<name>] crate/protos/depends` —— スキーマを独立に公開可能な
+///   複数クレートへ割る。所属は proto パスから決まり、リーフ型は `extern_path` で 1 度しか
+///   生成されない。
+///
+/// untagged なので単一形を先に試す(`crate` キーが文字列なら単一形、そうでなければ区画表)。
 #[derive(Debug, Deserialize)]
-struct Schema {
+#[serde(untagged)]
+enum SchemaDecl {
+    Single(SchemaSingle),
+    Multi(BTreeMap<String, SchemaPartDef>),
+}
+
+#[derive(Debug, Deserialize)]
+struct SchemaSingle {
     #[serde(rename = "crate")]
     crate_name: String,
+}
+
+/// `[schema.<name>]` の 1 区画。
+#[derive(Debug, Deserialize)]
+struct SchemaPartDef {
+    #[serde(rename = "crate")]
+    crate_name: String,
+    /// この区画が所有する proto(Reiny.toml のあるディレクトリ基準)。
+    protos: Vec<String>,
+    /// 依存する区画名。**推移的に閉じている**必要があり、同じ辺が Cargo の依存にも要る。
+    #[serde(default)]
+    depends: Vec<String>,
+}
+
+/// 正規化した 1 スキーマクレート。単一形は `name: None` / `protos: None`
+/// (= `[internals]` 全部を持つ)として畳む。
+#[derive(Debug, Clone)]
+struct SchemaPart {
+    /// `[schema.<name>]` の区画名。単一形は `None`。
+    name: Option<String>,
+    crate_name: String,
+    /// 所有 proto の絶対パス。単一形は `None`。
+    protos: Option<Vec<PathBuf>>,
+    depends: Vec<String>,
+}
+
+impl SchemaPart {
+    /// extern crate 名(`myapp-proto-geometry` → `myapp_proto_geometry`)。
+    fn crate_ident(&self) -> String {
+        self.crate_name.replace('-', "_")
+    }
+}
+
+/// スキーマクレート 1 件の内省ビュー(`reiny check` 用)。
+#[derive(Debug, Clone)]
+pub struct SchemaCrateInfo {
+    /// `[schema.<name>]` の区画名。単一 `[schema]` なら `None`。
+    pub part: Option<String>,
+    /// Cargo パッケージ名。
+    pub crate_name: String,
+    /// 依存する区画名。
+    pub depends: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,9 +176,19 @@ struct Entry {
     exposure: Exposure,
     /// コンパイルすべき proto の絶対パス。
     proto: PathBuf,
+    /// この型を所有するスキーマ区画名(多クレート形のみ)。proto パスから決まる。
+    owner: Option<String>,
 }
 
 impl Entry {
+    /// proto の完全メッセージ名(例 `hs.Vector3`)。descriptor 由来の指紋を引く鍵。
+    #[cfg(feature = "compile")]
+    fn fq_name(&self) -> String {
+        let mut segs = self.package.clone();
+        segs.push(self.ident.clone());
+        segs.join(".")
+    }
+
     /// `__reiny_generated` から見た型パス(例 `__pb::ping::Ping`)。
     fn type_path(&self) -> String {
         let mut segs = vec!["__pb".to_string()];
@@ -146,14 +210,19 @@ pub enum Mode {
     /// workspace 共有(`[internals]`/`[projects]`、`[schema]` 無し)。各 grain が
     /// `[internals]` を自前で prost コンパイルする(従来どおり)。
     Workspace,
-    /// workspace + `[schema]`。自分が **スキーマクレート本体**で、`[internals]` を 1 度だけ
-    /// prost コンパイル + `impl Topic` する。grain はこれを Cargo 依存として共有する。
-    Schema,
+    /// workspace + `[schema]`。自分が **スキーマクレート本体**で、担当分を prost コンパイル +
+    /// `impl Topic` する。grain はこれを Cargo 依存として共有する。
+    Schema {
+        /// 多クレート形(`[schema.<name>]`)での担当区画名。単一 `[schema]` なら `None`
+        /// (= `[internals]` 全部を持つ)。
+        part: Option<String>,
+    },
     /// workspace + `[schema]`。自分はスキーマを **消費する grain**。proto は再コンパイルせず、
-    /// スキーマクレート(`crate_ident`)の型を `internals` として再エクスポートするだけ。
+    /// スキーマクレート群の型を `internals` として再エクスポートするだけ。
     SchemaConsumer {
         /// 依存するスキーマクレートの extern ident(`myapp-schema` → `myapp_schema`)。
-        crate_ident: String,
+        /// 多クレート形では全区画が並ぶ(`internals` はその和集合)。
+        crate_idents: Vec<String>,
     },
 }
 
@@ -164,7 +233,8 @@ impl Mode {
         match self {
             Mode::PerProject => "per-project",
             Mode::Workspace => "workspace",
-            Mode::Schema => "workspace+schema (schema crate)",
+            Mode::Schema { part: None } => "workspace+schema",
+            Mode::Schema { part: Some(_) } => "workspace+schema (part)",
             Mode::SchemaConsumer { .. } => "workspace+schema (consumer)",
         }
     }
@@ -183,6 +253,8 @@ pub struct TypeInfo {
     pub module: String,
     /// コンパイル対象 proto の絶対パス。
     pub proto: PathBuf,
+    /// 所有するスキーマ区画名(多クレート形のみ)。
+    pub owner: Option<String>,
 }
 
 /// Reiny.toml を解決した結果。proto コンパイル前の純粋な情報なので、`compile` 機能(prost)無しでも
@@ -192,8 +264,8 @@ pub struct Resolution {
     entries: Vec<Entry>,
     config: Option<toml::Table>,
     manifest_path: PathBuf,
-    /// `[schema].crate`(あれば)。表示用。
-    schema_crate: Option<String>,
+    /// 正規化した `[schema]` 区画群(無ければ空)。
+    schema_parts: Vec<SchemaPart>,
 }
 
 impl Resolution {
@@ -215,10 +287,17 @@ impl Resolution {
         self.config.is_some()
     }
 
-    /// `[schema].crate`(workspace 共有スキーマクレート名)。無ければ `None`。
+    /// `[schema]` が宣言するスキーマクレート群(無ければ空)。単一形は 1 件で `part` が `None`。
     #[must_use]
-    pub fn schema_crate(&self) -> Option<&str> {
-        self.schema_crate.as_deref()
+    pub fn schema_crates(&self) -> Vec<SchemaCrateInfo> {
+        self.schema_parts
+            .iter()
+            .map(|p| SchemaCrateInfo {
+                part: p.name.clone(),
+                crate_name: p.crate_name.clone(),
+                depends: p.depends.clone(),
+            })
+            .collect()
     }
 
     /// 解決済みの型一覧(トピック・モジュール付き)。
@@ -240,6 +319,7 @@ impl Resolution {
                     Exposure::Dependencies(d) => format!("dependencies::{d}"),
                 },
                 proto: e.proto.clone(),
+                owner: e.owner.clone(),
             })
             .collect()
     }
@@ -289,13 +369,22 @@ pub fn compile_with(customize: impl FnOnce(&mut prost_build::Config)) -> Result<
     let resolution = resolve_for(&manifest_dir, &pkg_name)?;
     report_verbose(&resolution);
 
-    // スキーマ消費 grain は proto を再コンパイルせず、スキーマクレートを再エクスポートするだけ。
-    // それ以外は proto をコンパイルして完全な生成物を出す。
-    let generated = if let Mode::SchemaConsumer { crate_ident } = &resolution.mode {
-        render_consumer(crate_ident)
+    // スキーマ消費 grain は proto を再コンパイルせず、スキーマクレート群を再エクスポートするだけ。
+    // それ以外は担当分の proto をコンパイルして完全な生成物を出す。
+    let generated = if let Mode::SchemaConsumer { crate_idents } = &resolution.mode {
+        render_consumer(crate_idents)
     } else {
-        compile_protos(&resolution.entries, &out_dir, customize)?;
-        render_generated(&resolution.entries, resolution.config.as_ref())?
+        let plan = compile_plan(&resolution)?;
+        let fds = compile_protos(&plan, &out_dir, customize)?;
+        let scan = scan_descriptors(&fds, &plan.own_names);
+        if let Some(meta) = &plan.emit_meta {
+            emit_schema_metadata(meta, &scan.fqns)?;
+        }
+        render_generated(
+            &plan.entries,
+            resolution.config.as_ref(),
+            &scan.fingerprints,
+        )?
     };
 
     let generated_path = out_dir.join("reiny_generated.rs");
@@ -317,7 +406,7 @@ pub fn describe(dir: &Path) -> Result<Resolution> {
         .expect("Reiny.toml has a parent")
         .to_path_buf();
 
-    let schema_crate = manifest.schema.as_ref().map(|s| s.crate_name.clone());
+    let schema_parts = normalize_schema(&manifest, &manifest_root)?;
 
     let (mode, entries) = if manifest.project.is_some() {
         (
@@ -326,19 +415,12 @@ pub fn describe(dir: &Path) -> Result<Resolution> {
         )
     } else if !manifest.internals.is_empty() || !manifest.projects.is_empty() {
         // カタログ視点: どの 1 パッケージにも束縛しない。[schema] があればその旨を示す。
-        if let Some(s) = &manifest.schema {
-            let crate_ident = s.crate_name.replace('-', "_");
-            ensure_rust_ident(&crate_ident, "[schema].crate", "[schema]")?;
-        }
-        let mut entries = Vec::new();
-        for (alias, td) in &manifest.internals {
-            ensure_rust_ident(alias, "internals alias", "[internals]")?;
-            entries.push(make_entry(alias, td, &manifest_root, Exposure::Internals)?);
-        }
-        let mode = if schema_crate.is_some() {
-            Mode::Schema
-        } else {
+        let mut entries = internals_entries(&manifest, &manifest_root)?;
+        assign_owners(&mut entries, &schema_parts, &manifest_path)?;
+        let mode = if schema_parts.is_empty() {
             Mode::Workspace
+        } else {
+            Mode::Schema { part: None }
         };
         (mode, entries)
     } else {
@@ -355,7 +437,7 @@ pub fn describe(dir: &Path) -> Result<Resolution> {
         entries,
         config: manifest.config,
         manifest_path,
-        schema_crate,
+        schema_parts,
     })
 }
 
@@ -371,7 +453,7 @@ fn resolve_for(manifest_dir: &Path, pkg_name: &str) -> Result<Resolution> {
         .to_path_buf();
     rerun_if_changed(&manifest_path);
 
-    let schema_crate = manifest.schema.as_ref().map(|s| s.crate_name.clone());
+    let schema_parts = normalize_schema(&manifest, &manifest_root)?;
 
     let (mode, entries) = if manifest.project.is_some() {
         (
@@ -379,7 +461,13 @@ fn resolve_for(manifest_dir: &Path, pkg_name: &str) -> Result<Resolution> {
             resolve_per_project(&manifest, &manifest_root)?,
         )
     } else if !manifest.internals.is_empty() || !manifest.projects.is_empty() {
-        resolve_workspace(&manifest, &manifest_root, pkg_name, &manifest_path)?
+        resolve_workspace(
+            &manifest,
+            &manifest_root,
+            pkg_name,
+            &manifest_path,
+            &schema_parts,
+        )?
     } else {
         bail!(
             "{} has neither [project] (per-project) nor [internals]/[projects] (workspace)",
@@ -394,7 +482,7 @@ fn resolve_for(manifest_dir: &Path, pkg_name: &str) -> Result<Resolution> {
         entries,
         config: manifest.config,
         manifest_path,
-        schema_crate,
+        schema_parts,
     })
 }
 
@@ -480,44 +568,214 @@ fn resolve_workspace(
     root: &Path,
     pkg_name: &str,
     manifest_path: &Path,
+    parts: &[SchemaPart],
 ) -> Result<(Mode, Vec<Entry>)> {
     // [schema] の有無と、自分がスキーマクレート本体かでモードを決める。
     let in_projects = manifest.projects.contains_key(pkg_name);
-    let mode = if let Some(schema) = &manifest.schema {
-        let crate_ident = schema.crate_name.replace('-', "_");
-        ensure_rust_ident(&crate_ident, "[schema].crate", "[schema]")?;
-        if pkg_name == schema.crate_name {
-            Mode::Schema
-        } else if in_projects {
-            // 消費 grain は [projects.<pkg>] に居る必要がある。
-            Mode::SchemaConsumer { crate_ident }
+    let mode = if parts.is_empty() {
+        if in_projects {
+            Mode::Workspace
         } else {
             bail!(
-                "package '{pkg_name}' は {} の [projects.{pkg_name}] にも [schema].crate \
-                 (= '{}') にも該当しません",
-                manifest_path.display(),
-                schema.crate_name
+                "package '{pkg_name}' has no [projects.{pkg_name}] entry in the workspace \
+                 Reiny.toml ({})",
+                manifest_path.display()
             );
         }
+    } else if let Some(mine) = parts.iter().find(|p| p.crate_name == pkg_name) {
+        Mode::Schema {
+            part: mine.name.clone(),
+        }
     } else if in_projects {
-        Mode::Workspace
+        // 消費 grain は [projects.<pkg>] に居る必要がある。internals は全区画の和。
+        Mode::SchemaConsumer {
+            crate_idents: parts.iter().map(SchemaPart::crate_ident).collect(),
+        }
     } else {
+        let names: Vec<&str> = parts.iter().map(|p| p.crate_name.as_str()).collect();
         bail!(
-            "package '{pkg_name}' has no [projects.{pkg_name}] entry in the workspace \
-             Reiny.toml ({})",
-            manifest_path.display()
+            "package '{pkg_name}' は {} の [projects.{pkg_name}] にも、スキーマクレート \
+             ({}) のいずれにも該当しません",
+            manifest_path.display(),
+            names.join(" / ")
         );
     };
 
     // entries は全モードで [internals] を解決しておく(消費モードでは内省・診断にのみ使い、
-    // proto はコンパイルしない)。
+    // proto はコンパイルしない)。所有区画は proto パスから決まる。
+    let mut entries = internals_entries(manifest, root)?;
+    assign_owners(&mut entries, parts, manifest_path)?;
+
+    Ok((mode, entries))
+}
+
+/// `[internals]` を `Exposure::Internals` の Entry 群にする(所有区画はまだ空)。
+fn internals_entries(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     for (alias, td) in &manifest.internals {
         ensure_rust_ident(alias, "internals alias", "[internals]")?;
         entries.push(make_entry(alias, td, root, Exposure::Internals)?);
     }
+    Ok(entries)
+}
 
-    Ok((mode, entries))
+// ---------------------------------------------------------------------------
+// [schema] の正規化と所有割り当て
+// ---------------------------------------------------------------------------
+
+/// パス比較用の正準形。`[internals].proto` と `[schema.*].protos` が同じファイルを別表記
+/// (`./x.proto` と `x.proto` など)で指しても同一と判定できるようにする。
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// `[schema]` を区画の並びへ正規化し、識別子・依存の健全性を検証する。
+/// `[schema]` が無ければ空。
+fn normalize_schema(manifest: &Manifest, root: &Path) -> Result<Vec<SchemaPart>> {
+    let Some(decl) = &manifest.schema else {
+        return Ok(Vec::new());
+    };
+    let parts: Vec<SchemaPart> = match decl {
+        SchemaDecl::Single(single) => vec![SchemaPart {
+            name: None,
+            crate_name: single.crate_name.clone(),
+            protos: None,
+            depends: Vec::new(),
+        }],
+        SchemaDecl::Multi(map) => {
+            if map.is_empty() {
+                bail!(
+                    "[schema] に区画がありません([schema] crate = \"...\" か [schema.<name>] を書いてください)"
+                );
+            }
+            let mut out = Vec::new();
+            for (name, def) in map {
+                if def.protos.is_empty() {
+                    bail!(
+                        "[schema.{name}] の protos が空です(この区画が所有する proto を列挙してください)"
+                    );
+                }
+                let mut protos = Vec::new();
+                for p in &def.protos {
+                    let abs = resolve_relative(root, Path::new(p));
+                    if !abs.is_file() {
+                        bail!(
+                            "[schema.{name}] の proto が見つかりません: {}",
+                            abs.display()
+                        );
+                    }
+                    protos.push(abs);
+                }
+                out.push(SchemaPart {
+                    name: Some(name.clone()),
+                    crate_name: def.crate_name.clone(),
+                    protos: Some(protos),
+                    depends: def.depends.clone(),
+                });
+            }
+            out
+        }
+    };
+
+    for p in &parts {
+        ensure_rust_ident(&p.crate_ident(), "[schema].crate", "[schema]")?;
+    }
+    validate_depends(&parts)?;
+    Ok(parts)
+}
+
+/// `depends` が実在の区画を指し、循環が無く、**推移的に閉じている**ことを確かめる。
+///
+/// 閉じている必要があるのは protoc の都合である: `c` の proto が `b` の proto を import し、
+/// その `b` が `a` を import していると、`a` の型も `c` の descriptor set に入ってくる。
+/// `c` が `a` を extern しないと `a` の型が `c` にも生成され、同じ型が 2 つできてしまう。
+/// cargo は **直接依存** にしか `DEP_*` を渡さないので、reiny 側で閉包を要求するしかない。
+fn validate_depends(parts: &[SchemaPart]) -> Result<()> {
+    let by_name: BTreeMap<&str, &SchemaPart> = parts
+        .iter()
+        .filter_map(|p| p.name.as_deref().map(|n| (n, p)))
+        .collect();
+
+    for p in parts {
+        let Some(me) = p.name.as_deref() else {
+            continue;
+        };
+        for dep in &p.depends {
+            if dep == me {
+                bail!("[schema.{me}] の depends が自分自身を指しています");
+            }
+            if !by_name.contains_key(dep.as_str()) {
+                bail!("[schema.{me}] の depends にある `{dep}` という区画がありません");
+            }
+        }
+        // 推移閉包を辿り、宣言漏れがあれば名指しで指摘する(循環もここで検出)。
+        let mut stack: Vec<&str> = p.depends.iter().map(String::as_str).collect();
+        let mut seen: Vec<&str> = Vec::new();
+        while let Some(cur) = stack.pop() {
+            if cur == me {
+                bail!("[schema] の depends に循環があります(`{me}` に戻ってきました)");
+            }
+            if seen.contains(&cur) {
+                continue;
+            }
+            seen.push(cur);
+            let Some(part) = by_name.get(cur) else {
+                continue;
+            };
+            for next in &part.depends {
+                if !p.depends.iter().any(|d| d == next) {
+                    bail!(
+                        "[schema.{me}] の depends は推移的に閉じている必要があります: \
+                         `{cur}` が `{next}` に依存しているので、[schema.{me}] の depends にも \
+                         `{next}` を、Cargo の依存にもそのクレートを足してください"
+                    );
+                }
+                stack.push(next);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 各 `[internals]` 型の所有区画を proto パスから決める。多クレート形でのみ意味を持つ。
+/// どの区画にも属さない proto、2 区画が取り合う proto はここで弾く。
+fn assign_owners(entries: &mut [Entry], parts: &[SchemaPart], manifest_path: &Path) -> Result<()> {
+    // 単一形(protos = None)は全部を持つので割り当て不要。
+    if parts.iter().all(|p| p.protos.is_none()) {
+        return Ok(());
+    }
+
+    let mut owner_of: BTreeMap<PathBuf, &str> = BTreeMap::new();
+    for part in parts {
+        let (Some(name), Some(protos)) = (part.name.as_deref(), part.protos.as_ref()) else {
+            continue;
+        };
+        for proto in protos {
+            let key = canonical(proto);
+            if let Some(prev) = owner_of.get(&key) {
+                bail!(
+                    "proto {} を [schema.{prev}] と [schema.{name}] が両方 protos に挙げています",
+                    proto.display()
+                );
+            }
+            owner_of.insert(key, name);
+        }
+    }
+
+    for e in entries {
+        let key = canonical(&e.proto);
+        let Some(owner) = owner_of.get(&key) else {
+            bail!(
+                "{} の [internals] `{}` が使う proto {} は、どの [schema.<name>] の protos にも \
+                 挙がっていません(所有区画は proto パスで決まります)",
+                manifest_path.display(),
+                e.alias,
+                e.proto.display()
+            );
+        };
+        e.owner = Some((*owner).to_string());
+    }
+    Ok(())
 }
 
 /// `TypeDef` から `Entry` を組む。proto パスは `base` 基準で絶対化する。
@@ -535,6 +793,7 @@ fn make_entry(alias: &str, td: &TypeDef, base: &Path, exposure: Exposure) -> Res
         ident,
         exposure,
         proto,
+        owner: None,
     })
 }
 
@@ -549,35 +808,236 @@ fn split_message(message: &str) -> Result<(Vec<String>, String)> {
 }
 
 // ---------------------------------------------------------------------------
-// proto コンパイル(compile 機能でのみビルド。CLI 内省では使わない)
+// コンパイル計画(compile 機能でのみビルド。CLI 内省では使わない)
+// ---------------------------------------------------------------------------
+
+/// 「このパッケージが何をコンパイルし、何を外部参照にするか」を 1 つにまとめたもの。
+/// 単一 `[schema]` / workspace / per-project では素直に全部を持ち、`[schema.<name>]` の
+/// 1 区画をビルドしているときだけ、自分の担当分に絞られて `externs` が埋まる。
+#[cfg(feature = "compile")]
+struct CompilePlan<'a> {
+    /// 生成物へ出す型(区画ビルドでは自分が所有するものだけ)。
+    entries: Vec<&'a Entry>,
+    /// prost に渡す proto。
+    protos: Vec<PathBuf>,
+    /// protoc の include ディレクトリ。
+    includes: Vec<PathBuf>,
+    /// `(".hs.Vector3", "::myapp_proto_geometry::__pb::hs::Vector3")`。
+    /// これがあると prost は当該型を **生成せず** 参照だけを差し替える。
+    externs: Vec<(String, String)>,
+    /// descriptor 上での自分のファイル名。空なら「全部自分のもの」とみなす。
+    own_names: Vec<String>,
+    /// `links` メタを出す(= 他のスキーマクレートから参照されうる)なら Some。
+    emit_meta: Option<PartMeta>,
+}
+
+/// スキーマ区画が下流へ渡すもの。
+#[cfg(feature = "compile")]
+struct PartMeta {
+    crate_name: String,
+    include: PathBuf,
+}
+
+#[cfg(feature = "compile")]
+fn compile_plan(resolution: &Resolution) -> Result<CompilePlan<'_>> {
+    let part_name = match &resolution.mode {
+        Mode::Schema { part } => part.clone(),
+        _ => None,
+    };
+
+    let Some(part_name) = part_name else {
+        // 単一 [schema] / workspace / per-project: 従来どおり全部を自分でコンパイルする。
+        let mut protos: Vec<PathBuf> = Vec::new();
+        let mut includes: Vec<PathBuf> = Vec::new();
+        for e in &resolution.entries {
+            if !protos.contains(&e.proto) {
+                protos.push(e.proto.clone());
+            }
+            if let Some(parent) = e.proto.parent()
+                && !includes.contains(&parent.to_path_buf())
+            {
+                includes.push(parent.to_path_buf());
+            }
+        }
+        return Ok(CompilePlan {
+            entries: resolution.entries.iter().collect(),
+            protos,
+            includes,
+            externs: Vec::new(),
+            own_names: Vec::new(),
+            emit_meta: None,
+        });
+    };
+
+    let part = resolution
+        .schema_parts
+        .iter()
+        .find(|p| p.name.as_deref() == Some(part_name.as_str()))
+        .with_context(|| format!("[schema.{part_name}] が見つかりません"))?;
+    let protos = part
+        .protos
+        .clone()
+        .with_context(|| format!("[schema.{part_name}] に protos がありません"))?;
+
+    // 自分の proto 群の共通祖先を 1 本の include にする。descriptor 上のファイル名も
+    // ここからの相対で決まるので、下流に渡す include と必ず同じものを使う。
+    let root = common_ancestor(&protos)
+        .with_context(|| format!("[schema.{part_name}] の protos に共通の親がありません"))?;
+    let own_names = protos
+        .iter()
+        .map(|p| {
+            p.strip_prefix(&root).map_or_else(
+                |_| p.to_string_lossy().into_owned(),
+                |r| r.to_string_lossy().replace('\\', "/"),
+            )
+        })
+        .collect();
+
+    let mut includes = vec![root.clone()];
+    let mut externs = Vec::new();
+    for dep_name in &part.depends {
+        let dep = resolution
+            .schema_parts
+            .iter()
+            .find(|p| p.name.as_deref() == Some(dep_name.as_str()))
+            .with_context(|| format!("[schema.{dep_name}] が見つかりません"))?;
+        let (include, types) = read_dep_metadata(&dep.crate_name)?;
+        if !includes.contains(&include) {
+            includes.push(include);
+        }
+        let ident = dep.crate_ident();
+        for fqn in types {
+            let rust = format!("::{ident}::__pb::{}", fqn.replace('.', "::"));
+            externs.push((format!(".{fqn}"), rust));
+        }
+    }
+
+    let entries = resolution
+        .entries
+        .iter()
+        .filter(|e| e.owner.as_deref() == Some(part_name.as_str()))
+        .collect();
+
+    Ok(CompilePlan {
+        entries,
+        protos,
+        includes,
+        externs,
+        own_names,
+        emit_meta: Some(PartMeta {
+            crate_name: part.crate_name.clone(),
+            include: root,
+        }),
+    })
+}
+
+/// 与えられたファイル群の共通の親ディレクトリ。
+#[cfg(feature = "compile")]
+fn common_ancestor(paths: &[PathBuf]) -> Option<PathBuf> {
+    let mut iter = paths.iter().map(|p| p.parent().map(Path::to_path_buf));
+    let mut acc = iter.next()??;
+    for next in iter {
+        let next = next?;
+        while !next.starts_with(&acc) {
+            acc = acc.parent()?.to_path_buf();
+        }
+    }
+    Some(acc)
+}
+
+/// cargo が `DEP_<LINKS>_<KEY>` を作るときの名前変換(大文字化 + 非英数を `_` に)。
+#[cfg(feature = "compile")]
+fn envify(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// 依存スキーマクレートが `links` 経由で渡した include ディレクトリと FQN 一覧を読む。
+///
+/// cargo は **直接依存** の build script が出したメタしか渡さないので、ここが取れないのは
+/// たいてい「Cargo の依存に入っていない」か「相手が `links` を宣言していない」のどちらか。
+#[cfg(feature = "compile")]
+fn read_dep_metadata(dep_crate: &str) -> Result<(PathBuf, Vec<String>)> {
+    let key = envify(dep_crate);
+    let include = env::var(format!("DEP_{key}_PROTO_INCLUDE"));
+    let types = env::var(format!("DEP_{key}_PROTO_TYPES"));
+    let (Ok(include), Ok(types)) = (include, types) else {
+        bail!(
+            "スキーマクレート `{dep_crate}` のメタ(DEP_{key}_PROTO_INCLUDE / _PROTO_TYPES)が \
+             見つかりません。(1) `{dep_crate}` をこのクレートの [dependencies] に直接足す、\
+             (2) `{dep_crate}` の Cargo.toml に `links = \"{dep_crate}\"` を書く —— の 2 つを \
+             確認してください(cargo は直接依存にしかメタを渡しません)"
+        );
+    };
+    let types = types
+        .split(',')
+        .filter(|t| !t.is_empty())
+        .map(ToString::to_string)
+        .collect();
+    Ok((PathBuf::from(include), types))
+}
+
+/// 自分の include ディレクトリと、自分が定義した FQN 一覧を下流へ渡す。
+/// `links` が無いと cargo はこれを誰にも配らないので、その場で気付けるようにする。
+#[cfg(feature = "compile")]
+fn emit_schema_metadata(meta: &PartMeta, fqns: &[String]) -> Result<()> {
+    // links を足した/消した瞬間に下の検査をやり直させる。reiny-build は rerun-if-changed を
+    // 明示している都合上、これが無いと Cargo.toml を直しても build script が再実行されない。
+    println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_LINKS");
+    let want = envify(&meta.crate_name);
+    match env::var("CARGO_MANIFEST_LINKS") {
+        Ok(links) if envify(&links) == want => {}
+        Ok(links) => bail!(
+            "`{}` の Cargo.toml の links が `{links}` になっています。reiny は依存側から \
+             DEP_{want}_* を引くので、`links = \"{}\"` にしてください",
+            meta.crate_name,
+            meta.crate_name
+        ),
+        Err(_) => bail!(
+            "スキーマクレート `{}` の Cargo.toml に `links = \"{}\"` が要ります。\
+             これが無いと cargo が proto の include パスと型一覧を依存側へ渡せません \
+             (reiny は Cargo.toml を書き換えられないので、この 1 行だけ手で足してください)",
+            meta.crate_name,
+            meta.crate_name
+        ),
+    }
+    println!("cargo:proto_include={}", meta.include.display());
+    println!("cargo:proto_types={}", fqns.join(","));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// proto コンパイルと descriptor 走査
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "compile")]
 fn compile_protos(
-    entries: &[Entry],
+    plan: &CompilePlan<'_>,
     out_dir: &Path,
     customize: impl FnOnce(&mut prost_build::Config),
-) -> Result<()> {
-    // 重複 proto を除いた一覧と、include に使う親ディレクトリ集合。
-    let mut protos: Vec<PathBuf> = Vec::new();
-    let mut includes: Vec<PathBuf> = Vec::new();
-    for e in entries {
-        if !protos.contains(&e.proto) {
-            protos.push(e.proto.clone());
-        }
-        if let Some(parent) = e.proto.parent() {
-            let parent = parent.to_path_buf();
-            if !includes.contains(&parent) {
-                includes.push(parent);
-            }
-        }
-    }
+) -> Result<prost_types::FileDescriptorSet> {
+    let (protos, includes) = (&plan.protos, &plan.includes);
 
+    let descriptor_path = out_dir.join("reiny_descriptors.bin");
     let mut config = prost_build::Config::new();
     config
         .out_dir(out_dir)
         // 全パッケージを 1 ファイルに束ね、ネストした pub mod として include できるようにする。
-        .include_file("reiny_protos.rs");
+        .include_file("reiny_protos.rs")
+        // 型 → 指紋(Topic::SCHEMA)と、区画が下流へ渡す FQN 一覧の両方をここから作る。
+        .file_descriptor_set_path(&descriptor_path);
+    // 他のスキーマクレートが持つ型は「参照だけ差し替え、生成はしない」。
+    // これが多クレート分割でリーフ型が二重生成されない仕組み。
+    for (proto_path, rust_path) in &plan.externs {
+        config.extern_path(proto_path.clone(), rust_path.clone());
+    }
     // 生成型は prost-derive 由来で `::prost` を参照するため、利用側 crate は `prost` 依存が要る
     // (prost / tonic と同じ前提)。prost_path はderive 呼び出しだけ変えても展開内の `::prost`
     // は残るので、既定の `::prost` のまま利用側に prost を持たせる。
@@ -596,10 +1056,124 @@ fn compile_protos(
     customize(&mut config);
 
     config
-        .compile_protos(&protos, &includes)
+        .compile_protos(protos, includes)
         .context("prost: compiling protos")?;
 
-    Ok(())
+    let bytes = std::fs::read(&descriptor_path)
+        .with_context(|| format!("reading {}", descriptor_path.display()))?;
+    <prost_types::FileDescriptorSet as prost::Message>::decode(bytes.as_slice())
+        .context("decoding the descriptor set prost just wrote")
+}
+
+/// descriptor set から「自分が定義した FQN 一覧」と「型 → スキーマ指紋」を取り出す。
+#[cfg(feature = "compile")]
+struct DescriptorScan {
+    /// 自分のファイルが定義するメッセージ / enum の FQN(宣言順)。
+    fqns: Vec<String>,
+    /// メッセージ FQN → 指紋。
+    fingerprints: BTreeMap<String, u64>,
+}
+
+/// `own_names` に載ったファイルを「自分のもの」として FQN を集める(空なら全部が自分のもの)。
+/// 指紋は import 由来も含め全メッセージについて計算する —— 引くのは自分の型だけなので害は無く、
+/// 分岐が 1 つ減る。
+#[cfg(feature = "compile")]
+fn scan_descriptors(fds: &prost_types::FileDescriptorSet, own_names: &[String]) -> DescriptorScan {
+    let mut scan = DescriptorScan {
+        fqns: Vec::new(),
+        fingerprints: BTreeMap::new(),
+    };
+    for file in &fds.file {
+        let mine = own_names.is_empty() || own_names.iter().any(|n| n == file.name());
+        let prefix = if file.package().is_empty() {
+            String::new()
+        } else {
+            format!("{}.", file.package())
+        };
+        for msg in &file.message_type {
+            walk_message(msg, &prefix, mine, &mut scan);
+        }
+        for en in &file.enum_type {
+            let fq = format!("{prefix}{}", en.name());
+            if mine {
+                scan.fqns.push(fq);
+            }
+        }
+    }
+    scan
+}
+
+#[cfg(feature = "compile")]
+fn walk_message(
+    msg: &prost_types::DescriptorProto,
+    prefix: &str,
+    mine: bool,
+    scan: &mut DescriptorScan,
+) {
+    let fq = format!("{prefix}{}", msg.name());
+    if mine {
+        scan.fqns.push(fq.clone());
+    }
+    scan.fingerprints.insert(fq.clone(), fingerprint(&fq, msg));
+
+    let nested_prefix = format!("{fq}.");
+    for nested in &msg.nested_type {
+        // map フィールドの合成型(`FooEntry`)は利用側から見えないので数えない。
+        if nested
+            .options
+            .as_ref()
+            .is_some_and(prost_types::MessageOptions::map_entry)
+        {
+            continue;
+        }
+        walk_message(nested, &nested_prefix, mine, scan);
+    }
+    for en in &msg.enum_type {
+        if mine {
+            scan.fqns.push(format!("{nested_prefix}{}", en.name()));
+        }
+    }
+}
+
+/// メッセージ 1 件のスキーマ指紋。
+///
+/// 材料は **そのメッセージ自身が宣言するフィールド** だけ(番号 / 名前 / 型 / ラベル /
+/// 参照先の型名 / oneof 所属)。参照先メッセージの中身までは追わない —— 指紋が守りたいのは
+/// 「同名だが別物の型が同じトピックに乗る」ケースで、それはトップレベルの形だけで判別できる。
+/// 逆にリーフ型の変更まで見たければ、そのリーフ自身がトピック型であるべきである。
+///
+/// ハッシュは FNV-1a 64。`DefaultHasher` は Rust の版で値が変わりうるので使えない
+/// (指紋はビルドを跨いで安定していなければ意味が無い)。
+#[cfg(feature = "compile")]
+fn fingerprint(fq_name: &str, msg: &prost_types::DescriptorProto) -> u64 {
+    let mut fields: Vec<&prost_types::FieldDescriptorProto> = msg.field.iter().collect();
+    fields.sort_by_key(|f| f.number());
+
+    let mut canonical = format!("m {fq_name}\n");
+    for f in fields {
+        writeln!(
+            canonical,
+            "f {} {} {} {} {} {}",
+            f.number(),
+            f.name(),
+            f.r#type() as i32,
+            f.label() as i32,
+            f.type_name(),
+            f.oneof_index.unwrap_or(-1)
+        )
+        .ok();
+    }
+    fnv1a64(canonical.as_bytes())
+}
+
+#[cfg(feature = "compile")]
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 // ---------------------------------------------------------------------------
@@ -609,7 +1183,11 @@ fn compile_protos(
 /// `$OUT_DIR/reiny_generated.rs` の中身を組む。`#[reiny::main]` の `mod __reiny_generated` 内に
 /// include される前提でパスを書く。
 #[cfg(feature = "compile")]
-fn render_generated(entries: &[Entry], config: Option<&toml::Table>) -> Result<String> {
+fn render_generated(
+    entries: &[&Entry],
+    config: Option<&toml::Table>,
+    fingerprints: &BTreeMap<String, u64>,
+) -> Result<String> {
     let mut out = String::new();
     out.push_str("// @generated by reiny-build — do not edit.\n");
 
@@ -622,6 +1200,7 @@ fn render_generated(entries: &[Entry], config: Option<&toml::Table>) -> Result<S
     // モジュール別の再エクスポート。
     let publications: Vec<&Entry> = entries
         .iter()
+        .copied()
         .filter(|e| e.exposure == Exposure::Publications)
         .collect();
     if !publications.is_empty() {
@@ -630,6 +1209,7 @@ fn render_generated(entries: &[Entry], config: Option<&toml::Table>) -> Result<S
 
     let internals: Vec<&Entry> = entries
         .iter()
+        .copied()
         .filter(|e| e.exposure == Exposure::Internals)
         .collect();
     if !internals.is_empty() {
@@ -651,6 +1231,7 @@ fn render_generated(entries: &[Entry], config: Option<&toml::Table>) -> Result<S
         for dep in dep_names {
             let group: Vec<&Entry> = entries
                 .iter()
+                .copied()
                 .filter(|e| e.exposure == Exposure::Dependencies(dep.clone()))
                 .collect();
             // dependencies::<dep> から __pb は super::super::__pb。
@@ -670,17 +1251,25 @@ fn render_generated(entries: &[Entry], config: Option<&toml::Table>) -> Result<S
     }
 
     // 型 → トピックの型セグメント。型ごとに 1 回だけ impl(別名で重複しても型は同一なので dedup)。
+    // SCHEMA は descriptor 由来の指紋(既定 None なので、引けなければ黙って省く)。
     let mut seen = Vec::new();
-    out.push_str("// 型 → トピック(publish: reiny/<id>/<TYPE>、subscribe: reiny/*/<TYPE>)。\n");
+    out.push_str(
+        "// 型 → トピック(publish: reiny/<domain>/<id>/<TYPE>、\
+         subscribe: reiny/<domain>/*/<TYPE>)。\n",
+    );
     for e in entries {
         let path = e.type_path();
         if seen.contains(&path) {
             continue;
         }
         seen.push(path.clone());
+        let schema = match fingerprints.get(&e.fq_name()) {
+            Some(fp) => format!(" const SCHEMA: Option<u64> = Some({fp:#018x});"),
+            None => String::new(),
+        };
         writeln!(
             out,
-            "impl ::reiny::Topic for {path} {{ const TYPE: &'static str = {:?}; }}",
+            "impl ::reiny::Topic for {path} {{ const TYPE: &'static str = {:?};{schema} }}",
             e.ident
         )
         .ok();
@@ -699,16 +1288,17 @@ fn render_generated(entries: &[Entry], config: Option<&toml::Table>) -> Result<S
 /// `internals` をそのまま `crate::internals` として見せるだけ(`Topic`/`Message` impl は
 /// スキーマクレート側に 1 つだけあり、coherence でグローバルに効く)。
 #[cfg(feature = "compile")]
-fn render_consumer(crate_ident: &str) -> String {
+fn render_consumer(crate_idents: &[String]) -> String {
     let mut out = String::new();
     out.push_str("// @generated by reiny-build — schema consumer (no proto recompiled).\n");
-    // スキーマクレートの公開型を internals として再エクスポート。型に紐づく impl Topic /
-    // impl Message はスキーマクレートで定義済みなので、ここでは型を見せるだけでよい。
-    writeln!(
-        out,
-        "pub mod internals {{ pub use ::{crate_ident}::internals::*; }}"
-    )
-    .ok();
+    // スキーマクレート群の公開型を internals として再エクスポート。型に紐づく impl Topic /
+    // impl Message はスキーマクレート側で定義済みなので、ここでは型を見せるだけでよい。
+    // 多クレート分割では全区画の和になる(alias は [internals] のキーなので重複しない)。
+    out.push_str("pub mod internals {\n");
+    for ident in crate_idents {
+        writeln!(out, "    pub use ::{ident}::internals::*;").ok();
+    }
+    out.push_str("}\n");
     out
 }
 
@@ -911,17 +1501,32 @@ fn report_verbose(res: &Resolution) {
         res.mode.label(),
         res.manifest_path.display()
     ));
-    if let Mode::SchemaConsumer { crate_ident } = &res.mode {
+    if let Mode::SchemaConsumer { crate_idents } = &res.mode {
         warn(&format!(
-            "consumes schema crate `{crate_ident}` (no proto recompiled; \
-             {} type(s) re-exported)",
+            "consumes schema crate(s) `{}` (no proto recompiled; {} type(s) re-exported)",
+            crate_idents.join("`, `"),
             res.entries.len()
         ));
     }
+    for part in res.schema_crates() {
+        let label = part.part.as_deref().unwrap_or("(single)");
+        let deps = if part.depends.is_empty() {
+            String::new()
+        } else {
+            format!(" depends on {}", part.depends.join(", "))
+        };
+        warn(&format!("schema [{label}] = {}{deps}", part.crate_name));
+    }
     for t in res.types() {
         warn(&format!(
-            "type {} = {} -> topic reiny/<id>/{} [{}]",
-            t.alias, t.message, t.topic_segment, t.module
+            "type {} = {} -> topic reiny/<domain>/<id>/{} [{}]{}",
+            t.alias,
+            t.message,
+            t.topic_segment,
+            t.module,
+            t.owner
+                .as_deref()
+                .map_or_else(String::new, |o| format!(" owned by [schema.{o}]"))
         ));
     }
     // dedup したコンパイル対象 proto(推移 import は prost が別途引く)。
@@ -984,6 +1589,7 @@ mod tests {
             ident: "Ping".into(),
             exposure: Exposure::Publications,
             proto: PathBuf::from("/x/ping.proto"),
+            owner: None,
         };
         assert_eq!(e.type_path(), "__pb::ping::Ping");
     }
@@ -1040,7 +1646,181 @@ mod tests {
         "#,
         )
         .unwrap();
-        assert_eq!(m.schema.unwrap().crate_name, "myapp-schema");
+        match m.schema.unwrap() {
+            SchemaDecl::Single(s) => assert_eq!(s.crate_name, "myapp-schema"),
+            SchemaDecl::Multi(_) => panic!("単一形として読めていない"),
+        }
+    }
+
+    #[test]
+    fn multi_schema_manifest_parses() {
+        let m: Manifest = toml::from_str(
+            r#"
+            [internals]
+            Pose = { proto = "proto/geometry/geometry.proto", message = "hs.Pose" }
+            [schema.geometry]
+            crate = "myapp-proto-geometry"
+            protos = ["proto/geometry/geometry.proto"]
+            [schema.state]
+            crate = "myapp-proto-state"
+            protos = ["proto/state/state.proto"]
+            depends = ["geometry"]
+        "#,
+        )
+        .unwrap();
+        match m.schema.unwrap() {
+            SchemaDecl::Multi(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts["state"].crate_name, "myapp-proto-state");
+                assert_eq!(parts["state"].depends, vec!["geometry".to_string()]);
+                assert_eq!(parts["geometry"].protos.len(), 1);
+            }
+            SchemaDecl::Single(_) => panic!("多クレート形として読めていない"),
+        }
+    }
+
+    /// テスト用の区画(protos は実ファイルを見ないので空でよい — depends の検証だけを見る)。
+    fn part(name: &str, depends: &[&str]) -> SchemaPart {
+        SchemaPart {
+            name: Some(name.to_string()),
+            crate_name: format!("p-{name}"),
+            protos: Some(Vec::new()),
+            depends: depends.iter().map(|d| (*d).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn depends_must_be_transitively_closed() {
+        // a ← b ← c で c が a を宣言していない: cargo は直接依存にしか DEP_* を渡さないので
+        // これは通せない。名指しで指摘されること。
+        let parts = vec![part("a", &[]), part("b", &["a"]), part("c", &["b"])];
+        let err = validate_depends(&parts).unwrap_err().to_string();
+        assert!(err.contains("`a`"), "got: {err}");
+
+        // 閉じていれば通る。
+        let parts = vec![part("a", &[]), part("b", &["a"]), part("c", &["b", "a"])];
+        assert!(validate_depends(&parts).is_ok());
+    }
+
+    #[test]
+    fn depends_rejects_unknown_and_self_and_cycles() {
+        let err = validate_depends(&[part("a", &["nope"])])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nope"), "got: {err}");
+
+        let err = validate_depends(&[part("a", &["a"])])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("自分自身"), "got: {err}");
+
+        let parts = vec![part("a", &["b"]), part("b", &["a"])];
+        assert!(validate_depends(&parts).is_err());
+    }
+
+    #[test]
+    fn owners_come_from_proto_paths() {
+        let parts = vec![
+            SchemaPart {
+                name: Some("geometry".into()),
+                crate_name: "p-geometry".into(),
+                protos: Some(vec![PathBuf::from("/x/geometry.proto")]),
+                depends: Vec::new(),
+            },
+            SchemaPart {
+                name: Some("state".into()),
+                crate_name: "p-state".into(),
+                protos: Some(vec![PathBuf::from("/x/state.proto")]),
+                depends: vec!["geometry".into()],
+            },
+        ];
+        let mut entries = vec![
+            Entry {
+                alias: "Pose".into(),
+                package: vec!["hs".into()],
+                ident: "Pose".into(),
+                exposure: Exposure::Internals,
+                proto: PathBuf::from("/x/geometry.proto"),
+                owner: None,
+            },
+            Entry {
+                alias: "RobotState".into(),
+                package: vec!["hs".into()],
+                ident: "RobotState".into(),
+                exposure: Exposure::Internals,
+                proto: PathBuf::from("/x/state.proto"),
+                owner: None,
+            },
+        ];
+        assign_owners(&mut entries, &parts, Path::new("/x/Reiny.toml")).unwrap();
+        assert_eq!(entries[0].owner.as_deref(), Some("geometry"));
+        assert_eq!(entries[1].owner.as_deref(), Some("state"));
+
+        // どの区画にも属さない proto は弾く(黙って生成から漏れる方が怖い)。
+        entries[1].proto = PathBuf::from("/x/stray.proto");
+        let err = assign_owners(&mut entries, &parts, Path::new("/x/Reiny.toml"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("stray.proto"), "got: {err}");
+    }
+
+    #[test]
+    #[cfg(feature = "compile")]
+    fn envify_matches_cargo_dep_env_naming() {
+        assert_eq!(envify("myapp-proto-geometry"), "MYAPP_PROTO_GEOMETRY");
+        // ハイフン形とアンダースコア形は同じ env 名になるので、どちらで links を書いてもよい。
+        assert_eq!(envify("myapp_proto_geometry"), "MYAPP_PROTO_GEOMETRY");
+    }
+
+    #[test]
+    #[cfg(feature = "compile")]
+    fn fingerprint_tracks_field_shape_not_order() {
+        use prost_types::{DescriptorProto, FieldDescriptorProto};
+
+        let field = |number: i32, name: &str, ty: i32| FieldDescriptorProto {
+            name: Some(name.to_string()),
+            number: Some(number),
+            r#type: Some(ty),
+            ..Default::default()
+        };
+        let msg = |fields: Vec<FieldDescriptorProto>| DescriptorProto {
+            name: Some("Probe".to_string()),
+            field: fields,
+            ..Default::default()
+        };
+
+        let a = fingerprint("hs.Probe", &msg(vec![field(1, "x", 1), field(2, "y", 1)]));
+        // 宣言順が違うだけなら同じ指紋(番号で並べ替えてから畳む)。
+        let b = fingerprint("hs.Probe", &msg(vec![field(2, "y", 1), field(1, "x", 1)]));
+        assert_eq!(a, b);
+
+        // 型が変われば変わる。
+        let c = fingerprint("hs.Probe", &msg(vec![field(1, "x", 5), field(2, "y", 1)]));
+        assert_ne!(a, c);
+        // 同じ形でも別の型名なら別物(= 同名衝突を弾くための本命)。
+        let d = fingerprint(
+            "other.Probe",
+            &msg(vec![field(1, "x", 1), field(2, "y", 1)]),
+        );
+        assert_ne!(a, d);
+    }
+
+    #[test]
+    #[cfg(feature = "compile")]
+    fn common_ancestor_of_sibling_protos() {
+        let paths = vec![
+            PathBuf::from("/x/proto/geometry/a.proto"),
+            PathBuf::from("/x/proto/geometry/b.proto"),
+        ];
+        assert_eq!(
+            common_ancestor(&paths),
+            Some(PathBuf::from("/x/proto/geometry"))
+        );
+        let paths = vec![
+            PathBuf::from("/x/proto/a/one.proto"),
+            PathBuf::from("/x/proto/b/two.proto"),
+        ];
+        assert_eq!(common_ancestor(&paths), Some(PathBuf::from("/x/proto")));
     }
 
     #[test]
@@ -1080,6 +1860,7 @@ mod tests {
                 ident: "Ping".into(),
                 exposure: Exposure::Internals,
                 proto: PathBuf::from("/x/a.proto"),
+                owner: None,
             },
             Entry {
                 alias: "B".into(),
@@ -1087,6 +1868,7 @@ mod tests {
                 ident: "Ping".into(),
                 exposure: Exposure::Internals,
                 proto: PathBuf::from("/x/b.proto"),
+                owner: None,
             },
         ];
         let err = validate_no_topic_collision(&entries, Path::new("/x/Reiny.toml")).unwrap_err();
@@ -1103,6 +1885,7 @@ mod tests {
                 ident: "Ping".into(),
                 exposure: Exposure::Publications,
                 proto: PathBuf::from("/x/a.proto"),
+                owner: None,
             },
             Entry {
                 alias: "AliasOfA".into(),
@@ -1110,6 +1893,7 @@ mod tests {
                 ident: "Ping".into(),
                 exposure: Exposure::Dependencies("dep".into()),
                 proto: PathBuf::from("/x/a.proto"),
+                owner: None,
             },
         ];
         assert!(validate_no_topic_collision(&entries, Path::new("/x/Reiny.toml")).is_ok());
@@ -1118,7 +1902,7 @@ mod tests {
     #[test]
     #[cfg(feature = "compile")]
     fn consumer_render_reexports_schema_crate() {
-        let out = render_consumer("myapp_schema");
+        let out = render_consumer(&["myapp_schema".to_string()]);
         assert!(out.contains("pub use ::myapp_schema::internals::*"));
     }
 }

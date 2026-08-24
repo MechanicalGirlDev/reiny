@@ -6,8 +6,8 @@ All notable changes to the reiny workspace crates (`reiny`, `reiny-build`,
 
 ## 0.3.0 — unreleased
 
-Escape-hatch pass. Design record: `docs/design/0.3.0.md` (§8 records what shipped
-and where the implementation departed from the design).
+Escape-hatch and schema-scaling pass. Design record: `docs/design/0.3.0.md`
+(§8 records what shipped and where the implementation departed from the design).
 
 **BREAKING (wire):** topic keys gain a namespace segment — `reiny/<domain>/<id>/<TYPE>`
 (publish) and `reiny/<domain>/*/<TYPE>` (subscribe), with `<domain>` defaulting to
@@ -50,6 +50,32 @@ their signatures and their meaning.
   `file_descriptor_set_path` for dynamic decoding, `bytes`, …). `compile()`
   becomes `compile_with(|_| {})`, and `prost_build` is re-exported so build
   scripts name the same version reiny compiled against.
+- **QoS builder.** `Cloudy::publisher::<T>()` takes `.priority()`,
+  `.congestion()` and `.express()`.
+- **Multi-crate `[schema]`.** A workspace `Reiny.toml` may declare several
+  `[schema.<name>]` entries (`crate`, `protos`, `depends`), splitting the shared
+  schema across independently publishable crates. Ownership of an `[internals]`
+  type follows its proto path — nothing extra to declare. Each schema crate
+  compiles only its own protos and publishes its proto include dir plus the FQNs
+  it defines through cargo `links` metadata (`cargo:proto_include=` /
+  `cargo:proto_types=`); dependents read those back as `DEP_<LINKS>_*` and turn
+  them into prost `extern_path` entries, so a leaf type shared by two schema
+  crates is generated exactly once and both sides see the *same* Rust type.
+  Since the metadata travels through `links`, this keeps working for schema
+  crates published to crates.io, where `Reiny.toml` is not available. The 0.2
+  single `[schema] crate = "…"` form keeps working as sugar for one entry.
+  Two rules are enforced with actionable errors: each schema crate needs
+  `links = "<package name>"` in its `Cargo.toml` (reiny cannot write that
+  itself), and `depends` must be transitively closed with a matching Cargo
+  dependency edge (cargo only hands `DEP_*` to *direct* dependents).
+- **`Topic::SCHEMA: Option<u64>`** — a schema fingerprint derived from the proto
+  descriptor, carried in the zenoh attachment on publish and checked on
+  subscribe. On mismatch the sample is dropped and the source is warned about
+  once. `TYPE` is the bare type name, so the topic namespace is flat and two
+  projects can land different types on one topic; protobuf is permissive enough
+  to decode such a sample into silent garbage, and this is the guard against
+  that. It is a defaulted associated const, so hand-written `impl Topic` stays
+  valid unchanged.
 
 ### Changed
 
@@ -70,16 +96,15 @@ their signatures and their meaning.
 - Unknown CLI arguments are still ignored rather than rejected (grain-specific
   flags are none of reiny's business), but are now retrievable through
   `Cloudy::extra_args()`.
-- **No QoS builder.** zenoh keeps the `priority` / `congestion_control` /
-  `express` setters behind its `internal` *and* `unstable` features; opening two
-  feature doors for three setters is not worth it when `Cloudy::session()`
-  already reaches them. See `docs/design/0.3.0.md` §8.
+- The fingerprint covers a message's **own** declared fields (number, name,
+  type, label, referenced type name, oneof membership) and its fully-qualified
+  name — not the contents of the messages it references. It exists to separate
+  same-named types from different projects, which the top-level shape already
+  distinguishes; a leaf type that needs versioning of its own should be a topic
+  type of its own.
 - Deliberately **not** added: typed request/response, `subscribe_raw`, topic
   remapping, QoS in `Reiny.toml`, `[projects.*]` enforcement, and latched history
   beyond the latest value. Rationale in `docs/design/0.3.0.md` §4.
-- Still outstanding from the design: multi-crate `[schema.<name>]` and the
-  `Topic::SCHEMA` fingerprint (design §3.1 / §2.7). Both hang off the same
-  descriptor set and are planned as one follow-up.
 
 ## 0.2.0
 
