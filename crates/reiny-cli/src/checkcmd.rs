@@ -19,8 +19,21 @@ pub(crate) fn check(path: Option<&Path>) -> Result<()> {
 
     println!("reiny check — {}", resolution.manifest_path().display());
     println!("mode: {}", resolution.mode().label());
-    if let Some(schema) = resolution.schema_crate() {
-        println!("schema crate: {schema} (compiles [internals] once; grains share it)");
+    let schema_crates = resolution.schema_crates();
+    if !schema_crates.is_empty() {
+        println!("schema crates ({}):", schema_crates.len());
+        for c in &schema_crates {
+            let part = c
+                .part
+                .as_deref()
+                .map_or_else(|| " (single)".to_string(), |p| format!(" [schema.{p}]"));
+            let deps = if c.depends.is_empty() {
+                String::new()
+            } else {
+                format!(" — depends on {}", c.depends.join(", "))
+            };
+            println!("  {}{part}{deps}", c.crate_name);
+        }
     }
     if resolution.has_config() {
         println!("config: [config] present (typed cloudy.config())");
@@ -46,8 +59,12 @@ pub(crate) fn check(path: Option<&Path>) -> Result<()> {
 
     for t in &types {
         let proto = rel_to(resolution.manifest_path(), &t.proto);
+        let owner = t
+            .owner
+            .as_deref()
+            .map_or_else(String::new, |o| format!("  ({o})"));
         println!(
-            "  {:<w_alias$}  {:<w_msg$}  ->  reiny/<id>/{:<w_topic$}  [{:<w_mod$}]  {}",
+            "  {:<w_alias$}  {:<w_msg$}  ->  reiny/<domain>/<id>/{:<w_topic$}  [{:<w_mod$}]  {}{owner}",
             t.alias,
             t.message,
             t.topic_segment,

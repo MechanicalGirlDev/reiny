@@ -100,6 +100,19 @@ pub trait Topic {
     /// トピックキーの型セグメント(例 `Ping`)。publish は `reiny/<domain>/<id>/<TYPE>`、
     /// subscribe は `reiny/<domain>/*/<TYPE>`。
     const TYPE: &'static str;
+
+    /// スキーマ指紋。`reiny-build` 生成型は proto の descriptor から算出した値が入る。
+    ///
+    /// **なぜ要るか。** `TYPE` は proto パッケージを剥がした素の型名なので、トピックの
+    /// 名前空間は平坦なままで、別プロジェクトの同名型が同じトピックに乗りうる。protobuf は
+    /// 寛容なので、フィールド番号がたまたま噛み合うと **decode が成功して黙って化ける**。
+    /// 指紋はその平坦さに対する唯一の安全弁で、publish 時に zenoh の attachment へ載り、
+    /// subscribe 時に照合される(両側が `Some` で不一致なら、送信元ごとに 1 度だけ警告して
+    /// そのサンプルを捨てる。片方でも `None` なら素通し)。
+    ///
+    /// 既定値付きなので、**手書きの `impl Topic` は無改造で通る** —— 「第三者は自分の型に
+    /// `impl Topic` を書くだけで参加できる」という reiny の売りを壊さないため。
+    const SCHEMA: Option<u64> = None;
 }
 
 /// grain のランタイムハンドル。`#[reiny::main]` が構築して渡す。

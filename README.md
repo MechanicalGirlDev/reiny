@@ -57,7 +57,10 @@ reiny check my-grain       # show the type → topic map (no build)
 See [`examples/`](examples) for runnable demos (each is its own cargo workspace).
 For larger workspaces, [`examples/ping-pong-schema`](examples/ping-pong-schema)
 shows the `[schema]` shared-schema crate that compiles the message catalog once
-instead of per grain.
+instead of per grain, and
+[`examples/ping-pong-schema-split`](examples/ping-pong-schema-split) splits that
+catalog across several independently publishable schema crates without
+generating shared leaf types twice.
 
 ## License
 

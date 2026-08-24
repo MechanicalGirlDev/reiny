@@ -23,6 +23,30 @@ impl Topic for Probe {
     const TYPE: &'static str = "ReinyE2eProbe";
 }
 
+/// 同じ型・同じトピックだが **スキーマ指紋が違う** 2 つ。`reiny-build` が別プロジェクトの
+/// 同名型に別の指紋を振る状況を、手書きで再現している。
+#[derive(Clone, PartialEq, prost::Message)]
+struct StampedV1 {
+    #[prost(uint32, tag = "1")]
+    seq: u32,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct StampedV2 {
+    #[prost(uint32, tag = "1")]
+    seq: u32,
+}
+
+impl Topic for StampedV1 {
+    const TYPE: &'static str = "ReinyE2eStamped";
+    const SCHEMA: Option<u64> = Some(0x1111_1111_1111_1111);
+}
+
+impl Topic for StampedV2 {
+    const TYPE: &'static str = "ReinyE2eStamped";
+    const SCHEMA: Option<u64> = Some(0x2222_2222_2222_2222);
+}
+
 /// 他のテスト実行と衝突しないよう、この 1 本だけが使うループバックポート。
 const ENDPOINT: &str = "tcp/127.0.0.1:37447";
 
@@ -126,4 +150,32 @@ async fn presence_latched_and_domain_isolation() {
     // publisher が消えれば publishers() からも消える。
     let live = beta.publishers::<Probe>().await.expect("publishers()");
     assert!(live.is_empty(), "drop 後も残っている: {live:?}");
+
+    // --- スキーマ指紋: 同じトピックでも形が違えば届かない ---
+    let stamped = alpha
+        .publisher::<StampedV1>()
+        .build()
+        .expect("stamped publisher");
+    let mut same = beta
+        .subscriber::<StampedV1>()
+        .build()
+        .expect("matching subscriber");
+    let mut different = beta
+        .subscriber::<StampedV2>()
+        .build()
+        .expect("mismatching subscriber");
+    tokio::time::sleep(SETTLE).await;
+    stamped.send(StampedV1 { seq: 42 }).await.expect("send");
+
+    let got = timeout(PATIENCE, same.recv())
+        .await
+        .expect("同じ指紋なら届く")
+        .expect("stream should not end");
+    assert_eq!(got.seq, 42);
+    assert!(
+        timeout(Duration::from_millis(800), different.recv())
+            .await
+            .is_err(),
+        "指紋が違うサンプルは捨てられるべき(protobuf は寛容なので decode は通ってしまう)"
+    );
 }

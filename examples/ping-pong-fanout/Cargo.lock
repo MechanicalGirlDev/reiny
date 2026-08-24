@@ -1865,7 +1865,9 @@ name = "reiny-build"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "prost",
  "prost-build",
+ "prost-types",
  "protoc-bin-vendored",
  "serde",
  "toml",

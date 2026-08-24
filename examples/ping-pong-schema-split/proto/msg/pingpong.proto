@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+// [schema.msg] の proto。geometry を import するが、Point の Rust 型は
+// pingpong-geometry のものを extern_path 経由でそのまま使う(二重生成しない)。
+package pingpong;
+
+// 同じ package の別ファイル。include ディレクトリは geometry 区画が
+// cargo の links メタで渡してくるので、相対の平坦なパスで書ける。
+import "geometry.proto";
+
+// Ping: 1 往復ごとに送られる打球。
+message Ping {
+  uint64 seq = 1;
+  string message = 2;
+  int64 sent_unix = 3;
+  // リーフ区画の型。ここが二重生成されていないことが、この example の要点。
+  Point at = 4;
+}
+
+// Pong: 受け取った Ping への返球。
+message Pong {
+  uint64 seq = 1;
+  string message = 2;
+  int64 replied_unix = 3;
+  Point at = 4;
+}

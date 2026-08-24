@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+// リーフのスキーマ区画([schema.geometry])。msg 側からも import されるが、
+// 生成されるのは pingpong-geometry クレートの中だけ。
+package pingpong;
+
+// Point: 打球の位置。Ping / Pong の両方から参照される。
+message Point {
+  double x = 1;
+  double y = 2;
+}

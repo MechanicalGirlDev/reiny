@@ -1,0 +1,53 @@
+# Reiny.toml — スキーマを複数クレートへ割ったワークスペースマニフェスト。
+#
+# ../ping-pong-schema の `[schema] crate = "..."`(単一)に対し、こちらは `[schema.<name>]` を
+# 並べる。どの型がどの区画に属するかは **proto のパス**で決まるので、[internals] 側に所属を
+# 書き足す必要はない。
+#
+# 守るべき約束が 2 つある:
+#   1. 各スキーマクレートの Cargo.toml に `links = "<パッケージ名>"` を書く。
+#      cargo はこれが無いと proto の include パスと型一覧を依存側へ渡してくれない。
+#   2. depends は **推移的に閉じている** こと、かつ同じ辺が Cargo の依存にもあること。
+#      cargo は直接依存にしか DEP_* を渡さないため。
+#
+# `reiny check` で区画・所有・型 → トピックが一覧できる。
+
+[workspace]
+version = "0.3.0"
+description = "スキーマを geometry / msg の 2 クレートへ割った ping-pong。"
+authors = ["nop <noplab90@gmail.com>"]
+license = "MIT"
+
+# 共有メッセージカタログ。所属は proto パスから決まる(Point は geometry、Ping/Pong は msg)。
+# Point 自体もトピック型にしてある — リーフを単独で publish できることの確認を兼ねる。
+[internals]
+Point = { proto = "proto/geometry/geometry.proto", message = "pingpong.Point" }
+Ping = { proto = "proto/msg/pingpong.proto", message = "pingpong.Ping" }
+Pong = { proto = "proto/msg/pingpong.proto", message = "pingpong.Pong" }
+
+# --- スキーマ区画 ---------------------------------------------------------
+
+# リーフ。誰にも依存しない。
+[schema.geometry]
+crate = "pingpong-geometry"
+protos = ["proto/geometry/geometry.proto"]
+
+# Ping/Pong。geometry の Point を参照するので depends に挙げる(Cargo 依存も要る)。
+[schema.msg]
+crate = "pingpong-msg"
+protos = ["proto/msg/pingpong.proto"]
+depends = ["geometry"]
+
+# --- grain ----------------------------------------------------------------
+
+[projects.ping]
+version = "0.3.0"
+description = "Ping を打って Pong を待つ。"
+publications = ["Ping"]
+dependencies = ["Pong"]
+
+[projects.pong]
+version = "0.3.0"
+description = "Ping を受けるたびに Pong を返す。"
+publications = ["Pong"]
+dependencies = ["Ping"]

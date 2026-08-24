@@ -1,0 +1,20 @@
+[package]
+name = "pingpong-geometry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+# ここが多クレート分割の要。cargo は `links` を持つパッケージの build script が出した
+# `cargo:proto_include=` / `cargo:proto_types=` を、**直接依存**の build script へ
+# DEP_PINGPONG_GEOMETRY_PROTO_INCLUDE / _PROTO_TYPES として渡す。reiny-build はそれを
+# prost の include パスと extern_path に変換する。値はパッケージ名に揃えること。
+links = "pingpong-geometry"
+
+[lib]
+
+[dependencies]
+reiny.workspace = true
+prost.workspace = true
+
+[build-dependencies]
+reiny-build.workspace = true
