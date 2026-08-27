@@ -1,0 +1,60 @@
+# reiny 本体ワークスペース(crates/)の CI —— fmt / clippy / test。
+# examples.yml が example ワークスペースを見るのに対し、こちらは SDK 本体そのものを見る。
+# これが無いと、本体の 50 テスト(e2e / bag / 指紋を含む)は CI で一度も走らない。
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/ci.yml"
+
+# 同一 ref の古い実行はキャンセルして CI 時間を節約する。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # toolchain は rust-toolchain.toml(channel = "1.96")が効く。
+      # fmt / clippy コンポーネントだけ明示的に入れておく。
+      - name: Install Rust 1.96 (rustfmt, clippy)
+        run: rustup toolchain install 1.96 --profile minimal --component rustfmt --component clippy
+
+      # protoc は protoc-bin-vendored で同梱されるため別途インストール不要。
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      # ローカルの pre-push と同じゲート。全 feature ではなく --all-targets で回す
+      # (reiny-build の compile/descriptors は既定 feature 経由で入る)。
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # e2e(reiny/src/e2e.rs)と bag e2e(reiny-cli/tests/bag_e2e.rs)は実 zenoh を
+      # ループバック固定ポート(37447 / 37448、マルチキャスト off)で張るので、
+      # ネットワーク隔離された runner でも決定的に走る。
+      - name: test
+        run: cargo test
