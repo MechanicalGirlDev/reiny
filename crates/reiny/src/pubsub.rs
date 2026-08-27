@@ -18,7 +18,7 @@ use zenoh::sample::{Sample, SampleKind};
 use zenoh::time::Timestamp;
 
 use crate::shutdown::Shutdown;
-use crate::{Cloudy, Result, Topic, source_of};
+use crate::{Cloudy, Descriptor, Result, Topic, source_of};
 
 /// 受信メッセージと、reiny が知っている来歴。
 ///
@@ -125,16 +125,45 @@ impl<'a, T> PublisherBuilder<'a, T> {
         } else {
             None
         };
+        let schema = match T::DESCRIPTOR {
+            Some(descriptor) => Some(declare_schema(self.cloudy, &key, descriptor)?),
+            None => None,
+        };
 
         tracing::debug!(key = %key, latched = self.latched, "publisher declared");
         Ok(Publisher {
             publisher,
             _token: token,
             queryable,
+            _schema: schema,
             last,
             _marker: PhantomData,
         })
     }
+}
+
+/// [`Topic::DESCRIPTOR`] を持つ型の publisher が、自分のキーの脇
+/// `<key>/@schema/<message>` で descriptor set を名乗るための queryable。
+///
+/// `@schema` は verbatim チャンク —— `*` / `**` のどちらにもマッチしないので、型のトピックを
+/// 購読・記録している誰にも見えない。拾うのは `reiny bag record` のように
+/// `reiny/<domain>/*/*/@schema/*` と明示して問い合わせる側だけ。
+fn declare_schema(cloudy: &Cloudy, key: &str, descriptor: Descriptor) -> Result<Queryable<()>> {
+    let reply_key = format!("{key}/@schema/{}", descriptor.message);
+    let callback_key = reply_key.clone();
+    cloudy
+        .session()
+        .declare_queryable(reply_key)
+        .callback(move |query: Query| {
+            if let Err(e) = query
+                .reply(callback_key.clone(), descriptor.file_set.to_vec())
+                .wait()
+            {
+                tracing::warn!(key = %callback_key, error = %e, "schema reply failed");
+            }
+        })
+        .wait()
+        .map_err(anyhow::Error::msg)
 }
 
 /// latched publisher の裏側 —— 自分の publish キーに queryable を 1 本立て、
@@ -177,6 +206,8 @@ pub struct Publisher<T> {
     _token: LivelinessToken,
     /// latched のときだけ立つ、直近値を返す queryable(保持するだけ)。
     queryable: Option<Queryable<()>>,
+    /// `T::DESCRIPTOR` があるときだけ立つ、`@schema` で descriptor を名乗る queryable(保持するだけ)。
+    _schema: Option<Queryable<()>>,
     last: Arc<Mutex<Option<Vec<u8>>>>,
     _marker: PhantomData<T>,
 }

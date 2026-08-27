@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 
-use crate::{Cloudy, PresenceEvent, Topic, shutdown::Shutdown};
+use zenoh::Wait;
+
+use crate::{Cloudy, Descriptor, PresenceEvent, Topic, shutdown::Shutdown};
 
 /// このテスト専用の wire 型。`impl Topic` を手書きしているのは、それが
 /// 「第三者が自分の型で参加できる」という reiny の売りそのものだから(回帰も兼ねる)。
@@ -45,6 +47,22 @@ impl Topic for StampedV1 {
 impl Topic for StampedV2 {
     const TYPE: &'static str = "ReinyE2eStamped";
     const SCHEMA: Option<u64> = Some(0x2222_2222_2222_2222);
+}
+
+/// descriptor を名乗る型。中身は本物の descriptor set でなくてよい —— reiny はバイト列を
+/// 解釈せず、`@schema` で**そのまま**返すだけだから(解釈するのは `reiny bag` 側)。
+#[derive(Clone, PartialEq, prost::Message)]
+struct Described {
+    #[prost(uint32, tag = "1")]
+    seq: u32,
+}
+
+impl Topic for Described {
+    const TYPE: &'static str = "ReinyE2eDescribed";
+    const DESCRIPTOR: Option<Descriptor> = Some(Descriptor {
+        message: "e2e.Described",
+        file_set: b"not-a-real-descriptor-set",
+    });
 }
 
 /// 他のテスト実行と衝突しないよう、この 1 本だけが使うループバックポート。
@@ -178,4 +196,45 @@ async fn presence_latched_and_domain_isolation() {
             .is_err(),
         "指紋が違うサンプルは捨てられるべき(protobuf は寛容なので decode は通ってしまう)"
     );
+
+    // --- @schema: DESCRIPTOR を持つ publisher は自分のキーの脇で descriptor を名乗る ---
+    let described = alpha
+        .publisher::<Described>()
+        .build()
+        .expect("described publisher");
+    tokio::time::sleep(SETTLE).await;
+    let replies = beta
+        .session()
+        .get("reiny/lab/*/*/@schema/*")
+        .wait()
+        .expect("schema get");
+    let named: Vec<(String, Vec<u8>)> = replies
+        .iter()
+        .filter_map(|r| {
+            r.result()
+                .ok()
+                .map(|s| (s.key_expr().to_string(), s.payload().to_bytes().to_vec()))
+        })
+        .collect();
+    assert_eq!(
+        named,
+        [(
+            "reiny/lab/alpha/ReinyE2eDescribed/@schema/e2e.Described".to_string(),
+            b"not-a-real-descriptor-set".to_vec()
+        )]
+    );
+    // verbatim: `**` で domain 全体を問い合わせても @schema は混ざらない(latched の
+    // queryable は同じ get に応えるので、これが「見えない」ことの実証になる)。
+    let broad = beta
+        .session()
+        .get("reiny/lab/**")
+        .wait()
+        .expect("broad get");
+    let leaked: Vec<String> = broad
+        .iter()
+        .filter_map(|r| r.result().ok().map(|s| s.key_expr().to_string()))
+        .filter(|k| k.contains("@schema"))
+        .collect();
+    assert!(leaked.is_empty(), "@schema が ** に見えている: {leaked:?}");
+    drop(described);
 }

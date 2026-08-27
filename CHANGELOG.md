@@ -76,6 +76,32 @@ their signatures and their meaning.
   to decode such a sample into silent garbage, and this is the guard against
   that. It is a defaulted associated const, so hand-written `impl Topic` stays
   valid unchanged.
+- **`reiny bag record | play | info`** — record the bus to an
+  [MCAP](https://mcap.dev) file and replay it, `ros2 bag`-style. `record`
+  subscribes to `reiny/<domain>/*/*` with one raw subscriber, captures the
+  pre-start latched values with a single `get()` (snapshot), and writes each
+  key's `(domain, source, type, fingerprint, latched)` into the channel
+  metadata. `play` restores those keys (rewritable with `--domain` / `--as`),
+  re-declares a publisher + liveliness token per channel (so presence and
+  `.from()` see the replay), serves latched channels through a queryable, puts
+  the fingerprint back on the attachment, and sleeps to absolute deadlines so
+  the rate does not drift; replaying into a domain that already has a live
+  publisher of that type is refused unless `--force`. `info` prints per-channel
+  source / type / count / rate / latched / schema. Filtering, merging, splitting
+  and conversion are delegated to the `mcap` CLI, and JSON dumping to
+  `mcap cat --json`. Slicing is available with `--start` / `--duration` /
+  `--rate` / `--loop` / `--type` / `--from`.
+- **`Topic::DESCRIPTOR: Option<Descriptor>`** — a `reiny-build`-generated pointer
+  to the crate's proto `FileDescriptorSet`. A `Some` publisher answers a
+  queryable at `reiny/<domain>/<id>/<TYPE>/@schema/<message>` with that set, so a
+  running grain describes its own types **on the bus**; `reiny bag record` picks
+  them up and embeds a pruned, protobuf-encoded schema per channel, giving a bag
+  that Foxglove and `mcap cat --json` decode with no reiny-specific code. The
+  `@schema` chunk is a zenoh *verbatim* segment — invisible to `reiny/<domain>/**`
+  subscribers and to `record`'s own `*/*` capture. Also a defaulted const;
+  hand-written `impl Topic` opts out by leaving it `None`. `reiny-build` gains a
+  `descriptors` feature (decode + fingerprint of an encoded set, no `protoc`)
+  that `reiny bag` consumes; `compile` builds on top of it.
 
 ### Changed
 

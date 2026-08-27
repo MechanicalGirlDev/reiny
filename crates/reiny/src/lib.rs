@@ -113,6 +113,28 @@ pub trait Topic {
     /// 既定値付きなので、**手書きの `impl Topic` は無改造で通る** —— 「第三者は自分の型に
     /// `impl Topic` を書くだけで参加できる」という reiny の売りを壊さないため。
     const SCHEMA: Option<u64> = None;
+
+    /// proto の descriptor。`reiny-build` 生成型は自クレートの descriptor set を指す。
+    ///
+    /// `Some` の型を publish すると、publisher は自分のキーの脇
+    /// `reiny/<domain>/<id>/<TYPE>/@schema/<message>` に queryable を 1 本立て、問い合わせに
+    /// この descriptor set を返す。走っている grain が自分の型を**バス上で名乗る**ための口で、
+    /// `reiny bag record` はこれを拾って MCAP にスキーマを同梱し、Foxglove がそのまま decode
+    /// できる bag を作る(`docs/design/bag.md` §5)。
+    ///
+    /// `@schema` は zenoh の verbatim チャンクなので、`reiny/<domain>/**` の購読者にも
+    /// `reiny/<domain>/*/*` の記録にも見えない —— 型のトピックは汚れない。
+    const DESCRIPTOR: Option<Descriptor> = None;
+}
+
+/// [`Topic::DESCRIPTOR`] の中身 —— proto の完全メッセージ名と、それを含む
+/// `google.protobuf.FileDescriptorSet` の encode 済みバイト列。
+#[derive(Debug, Clone, Copy)]
+pub struct Descriptor {
+    /// 完全メッセージ名(例 `hs.RobotState`)。MCAP のスキーマ名にそのまま使われる。
+    pub message: &'static str,
+    /// `FileDescriptorSet` の encode 済みバイト列。`message` のファイルと、その推移 import を含む。
+    pub file_set: &'static [u8],
 }
 
 /// grain のランタイムハンドル。`#[reiny::main]` が構築して渡す。
@@ -310,7 +332,7 @@ fn validate_segment(what: &str, value: &str) -> Result<()> {
 
 /// よく使うものをまとめた prelude。`use reiny::prelude::*;`
 pub mod prelude {
-    pub use crate::{Cloudy, Envelope, PresenceEvent, Publisher, Subscriber, Topic};
+    pub use crate::{Cloudy, Descriptor, Envelope, PresenceEvent, Publisher, Subscriber, Topic};
 }
 
 /// `#[reiny::main]` 展開が呼ぶランタイム。利用側が直接触ることは想定しない。
