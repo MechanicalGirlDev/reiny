@@ -4,7 +4,7 @@ All notable changes to the reiny workspace crates (`reiny`, `reiny-build`,
 `reiny-macros`, `reiny-launch`, `reiny-cli`). Versions are kept in lockstep via
 `[workspace.package].version`.
 
-## 0.3.0 — unreleased
+## 0.3.0 — 2026-08-27
 
 Escape-hatch and schema-scaling pass. Design record: `docs/design/0.3.0.md`
 (§8 records what shipped and where the implementation departed from the design).
