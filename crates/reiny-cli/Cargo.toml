@@ -16,8 +16,13 @@ path = "src/main.rs"
 
 [dependencies]
 reiny-launch = { path = "../reiny-launch", version = "0.3.0" }
-# Reiny.toml の解決・型/トピック導出だけ使う(`reiny check`)。prost-build は引かない。
-reiny-build = { path = "../reiny-build", version = "0.3.0", default-features = false }
+# Reiny.toml の解決・型/トピック導出(`reiny check`)と、`@schema` 応答の descriptor 読み取り
+# (`reiny bag record`)。prost-build / protoc は引かない。
+reiny-build = { path = "../reiny-build", version = "0.3.0", default-features = false, features = ["descriptors"] }
+# `reiny bag` が grain と同じ fabric に乗るため(zenoh の再エクスポート + 起動オプション)。
+reiny = { path = "../reiny", version = "0.3.0" }
+mcap = { workspace = true }
+ctrlc = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }

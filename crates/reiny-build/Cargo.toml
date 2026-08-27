@@ -15,7 +15,9 @@ categories = ["development-tools::build-utils"]
 # `default-features = false` にすると Reiny.toml の解決・型/トピック導出だけが残り、
 # prost-build / protoc を引かない(`reiny check` のような内省用途向け)。
 default = ["compile"]
-compile = ["dep:prost-build", "dep:protoc-bin-vendored", "dep:prost", "dep:prost-types"]
+# descriptor set の decode と指紋だけ(`reiny bag` が使う)。protoc は引かない。
+descriptors = ["dep:prost", "dep:prost-types"]
+compile = ["descriptors", "dep:prost-build", "dep:protoc-bin-vendored"]
 
 [dependencies]
 prost-build = { workspace = true, optional = true }

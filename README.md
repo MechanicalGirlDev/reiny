@@ -42,7 +42,7 @@ zenoh major bump is a reiny breaking change.
 | [`reiny-macros`](crates/reiny-macros) | The `#[reiny::main]` proc-macro (used via `reiny`) |
 | [`reiny-build`](crates/reiny-build) | `build.rs` helper: compiles protos from `Reiny.toml` and generates types/topics |
 | [`reiny-launch`](crates/reiny-launch) | Launcher library: spawns grain processes from a launch config's `[grain]` section |
-| [`reiny-cli`](crates/reiny-cli) | The `reiny` command: scaffold (new/init/add), check, build, run, compress |
+| [`reiny-cli`](crates/reiny-cli) | The `reiny` command: scaffold (new/init/add), check, build, run, compress, bag |
 
 ## Getting started
 
@@ -53,6 +53,18 @@ cargo install reiny-cli   # installs the `reiny` command
 reiny new my-grain
 reiny check my-grain       # show the type → topic map (no build)
 ```
+
+Record and replay the bus, `ros2 bag`-style (format is [MCAP](https://mcap.dev),
+so Foxglove and the `mcap` CLI read it directly):
+
+```sh
+reiny bag record --type RobotState --out walk.mcap   # Ctrl+C to stop
+reiny bag info walk.mcap
+reiny bag play walk.mcap --rate 0.5 --loop           # back onto the bus
+```
+
+Design and the split of what reiny records vs. what the `mcap` CLI is left to do:
+[`docs/design/bag.md`](docs/design/bag.md).
 
 See [`examples/`](examples) for runnable demos (each is its own cargo workspace).
 For larger workspaces, [`examples/ping-pong-schema`](examples/ping-pong-schema)

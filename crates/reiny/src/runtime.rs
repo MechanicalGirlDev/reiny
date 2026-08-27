@@ -32,14 +32,14 @@ pub enum ZenohSource {
 }
 
 impl ZenohSource {
-    fn into_config(self) -> Result<zenoh::Config> {
+    fn to_config(&self) -> Result<zenoh::Config> {
         match self {
             Self::Default => Ok(zenoh::Config::default()),
             Self::Env => zenoh::Config::from_env().map_err(anyhow::Error::msg),
-            Self::File(path) => zenoh::Config::from_file(&path)
+            Self::File(path) => zenoh::Config::from_file(path)
                 .map_err(anyhow::Error::msg)
                 .map_err(|e| e.context(format!("loading zenoh config {}", path.display()))),
-            Self::Config(config) => Ok(*config),
+            Self::Config(config) => Ok((**config).clone()),
         }
     }
 }
@@ -148,6 +148,22 @@ impl RuntimeOptions {
         }
         opts
     }
+
+    /// `zenoh` の出どころに `zenoh_overrides` を重ねた zenoh 設定を組む。
+    ///
+    /// [`run_with`] がセッションを開く直前に通るのと同じ経路。grain ではないが grain と同じ
+    /// fabric に乗りたいツール(`reiny bag` など)が、`--zenoh-config` / `--connect` の
+    /// 解釈を写さずに済むための口。
+    pub fn zenoh_config(&self) -> Result<zenoh::Config> {
+        let mut config = self.zenoh.to_config()?;
+        for (key, value) in &self.zenoh_overrides {
+            config
+                .insert_json5(key, value)
+                .map_err(anyhow::Error::msg)
+                .map_err(|e| e.context(format!("applying zenoh override {key}={value}")))?;
+        }
+        Ok(config)
+    }
 }
 
 fn take<I: Iterator<Item = String>>(args: &mut I, slot: &mut String) {
@@ -188,14 +204,9 @@ where
             });
         }
 
-        let mut zconfig = opts.zenoh.into_config()?;
-        for (key, value) in &opts.zenoh_overrides {
-            zconfig
-                .insert_json5(key, value)
-                .map_err(anyhow::Error::msg)
-                .map_err(|e| e.context(format!("applying zenoh override {key}={value}")))?;
-        }
-        let session = zenoh::open(zconfig).await.map_err(anyhow::Error::msg)?;
+        let session = zenoh::open(opts.zenoh_config()?)
+            .await
+            .map_err(anyhow::Error::msg)?;
         tracing::info!(id = %opts.id, domain = %opts.domain, "reiny grain up");
 
         let cloudy = Cloudy::new(

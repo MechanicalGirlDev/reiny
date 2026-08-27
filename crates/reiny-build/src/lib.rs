@@ -20,8 +20,8 @@
 
 use std::collections::BTreeMap;
 use std::env;
-// writeln! を使う生成コードは compile 機能側だけ。
-#[cfg(feature = "compile")]
+// writeln! を使うのは生成コードと指紋(descriptors 機能側)だけ。
+#[cfg(feature = "descriptors")]
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -1144,7 +1144,7 @@ fn walk_message(
 ///
 /// ハッシュは FNV-1a 64。`DefaultHasher` は Rust の版で値が変わりうるので使えない
 /// (指紋はビルドを跨いで安定していなければ意味が無い)。
-#[cfg(feature = "compile")]
+#[cfg(feature = "descriptors")]
 fn fingerprint(fq_name: &str, msg: &prost_types::DescriptorProto) -> u64 {
     let mut fields: Vec<&prost_types::FieldDescriptorProto> = msg.field.iter().collect();
     fields.sort_by_key(|f| f.number());
@@ -1166,7 +1166,7 @@ fn fingerprint(fq_name: &str, msg: &prost_types::DescriptorProto) -> u64 {
     fnv1a64(canonical.as_bytes())
 }
 
-#[cfg(feature = "compile")]
+#[cfg(feature = "descriptors")]
 fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
@@ -1174,6 +1174,90 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+// ---------------------------------------------------------------------------
+// encode 済み descriptor set の読み取り(`reiny bag` が `@schema` 応答に対して使う)
+// ---------------------------------------------------------------------------
+
+/// encode 済み `FileDescriptorSet` から、完全メッセージ名 `message` の指紋を引く。
+/// set に無ければ `Ok(None)`。生成型の `Topic::SCHEMA` と同じ計算なので、バス上の
+/// attachment と突き合わせられる。
+#[cfg(feature = "descriptors")]
+pub fn message_fingerprint(file_set: &[u8], message: &str) -> Result<Option<u64>> {
+    let fds = decode_file_set(file_set)?;
+    Ok(find_message(&fds, message).map(|(_, msg)| fingerprint(message, msg)))
+}
+
+/// `message` を定義するファイルと、その推移 import だけに刈った `FileDescriptorSet`
+/// (encode 済み)。set に無ければ `Ok(None)`。
+///
+/// MCAP のスキーマは型ごとに 1 レコードなので、クレート全体の set をそのまま入れると
+/// 型数 × set サイズが毎 bag に乗る。必要なファイルだけに刈って、それを避ける。
+#[cfg(feature = "descriptors")]
+pub fn descriptor_subset(file_set: &[u8], message: &str) -> Result<Option<Vec<u8>>> {
+    let fds = decode_file_set(file_set)?;
+    let Some((root, _)) = find_message(&fds, message) else {
+        return Ok(None);
+    };
+    // 推移 import を集める。順序は元の set のまま(決定的に)。
+    let mut wanted: Vec<&str> = vec![root.name()];
+    let mut cursor = 0;
+    while cursor < wanted.len() {
+        let name = wanted[cursor];
+        cursor += 1;
+        if let Some(file) = fds.file.iter().find(|f| f.name() == name) {
+            for dep in &file.dependency {
+                if !wanted.contains(&dep.as_str()) {
+                    wanted.push(dep);
+                }
+            }
+        }
+    }
+    let subset = prost_types::FileDescriptorSet {
+        file: fds
+            .file
+            .iter()
+            .filter(|f| wanted.contains(&f.name()))
+            .cloned()
+            .collect(),
+    };
+    Ok(Some(prost::Message::encode_to_vec(&subset)))
+}
+
+#[cfg(feature = "descriptors")]
+fn decode_file_set(bytes: &[u8]) -> Result<prost_types::FileDescriptorSet> {
+    <prost_types::FileDescriptorSet as prost::Message>::decode(bytes)
+        .context("decoding FileDescriptorSet")
+}
+
+/// 完全メッセージ名(`pkg.Outer.Inner`)で descriptor を探す。ネストも辿る。
+#[cfg(feature = "descriptors")]
+fn find_message<'a>(
+    fds: &'a prost_types::FileDescriptorSet,
+    message: &str,
+) -> Option<(
+    &'a prost_types::FileDescriptorProto,
+    &'a prost_types::DescriptorProto,
+)> {
+    for file in &fds.file {
+        let rest = if file.package().is_empty() {
+            message
+        } else {
+            match message.strip_prefix(file.package()) {
+                Some(r) => r.strip_prefix('.')?,
+                None => continue,
+            }
+        };
+        let mut segs = rest.split('.');
+        let first = segs.next()?;
+        let mut cur = file.message_type.iter().find(|m| m.name() == first)?;
+        for seg in segs {
+            cur = cur.nested_type.iter().find(|m| m.name() == seg)?;
+        }
+        return Some((file, cur));
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1250,8 +1334,19 @@ fn render_generated(
         out.push_str("}\n\n");
     }
 
+    // prost が書いた descriptor set。`Topic::DESCRIPTOR` がこれを指し、publisher が `@schema` で
+    // 名乗る(`reiny bag record` が拾って MCAP に同梱する)。
+    out.push_str(
+        "/// この crate の proto の `FileDescriptorSet`(`reiny::Topic::DESCRIPTOR` 用)。\n",
+    );
+    out.push_str("#[doc(hidden)]\n#[allow(dead_code, unreachable_pub)]\n");
+    out.push_str(
+        "pub const REINY_DESCRIPTORS: &[u8] = \
+         include_bytes!(concat!(env!(\"OUT_DIR\"), \"/reiny_descriptors.bin\"));\n\n",
+    );
+
     // 型 → トピックの型セグメント。型ごとに 1 回だけ impl(別名で重複しても型は同一なので dedup)。
-    // SCHEMA は descriptor 由来の指紋(既定 None なので、引けなければ黙って省く)。
+    // SCHEMA / DESCRIPTOR は descriptor 由来(既定 None なので、引けなければ黙って省く)。
     let mut seen = Vec::new();
     out.push_str(
         "// 型 → トピック(publish: reiny/<domain>/<id>/<TYPE>、\
@@ -1263,8 +1358,13 @@ fn render_generated(
             continue;
         }
         seen.push(path.clone());
-        let schema = match fingerprints.get(&e.fq_name()) {
-            Some(fp) => format!(" const SCHEMA: Option<u64> = Some({fp:#018x});"),
+        let fq_name = e.fq_name();
+        let schema = match fingerprints.get(&fq_name) {
+            Some(fp) => format!(
+                " const SCHEMA: Option<u64> = Some({fp:#018x}); \
+                 const DESCRIPTOR: Option<::reiny::Descriptor> = \
+                 Some(::reiny::Descriptor {{ message: {fq_name:?}, file_set: REINY_DESCRIPTORS }});"
+            ),
             None => String::new(),
         };
         writeln!(
@@ -1904,5 +2004,100 @@ mod tests {
     fn consumer_render_reexports_schema_crate() {
         let out = render_consumer(&["myapp_schema".to_string()]);
         assert!(out.contains("pub use ::myapp_schema::internals::*"));
+    }
+
+    /// 2 ファイルの `FileDescriptorSet`(msg.proto が geometry.proto を import)を手で組む。
+    /// protoc を回さずに `descriptor_subset` / `message_fingerprint` を突く。
+    #[cfg(feature = "descriptors")]
+    fn two_file_set() -> Vec<u8> {
+        use prost_types::field_descriptor_proto::{Label, Type};
+        use prost_types::{
+            DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+        };
+
+        let scalar = |name: &str, number: i32, ty: Type| FieldDescriptorProto {
+            name: Some(name.to_string()),
+            number: Some(number),
+            label: Some(Label::Optional as i32),
+            r#type: Some(ty as i32),
+            ..Default::default()
+        };
+        let geometry = FileDescriptorProto {
+            name: Some("geometry.proto".to_string()),
+            package: Some("geo".to_string()),
+            message_type: vec![DescriptorProto {
+                name: Some("Point".to_string()),
+                field: vec![scalar("x", 1, Type::Double), scalar("y", 2, Type::Double)],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let msg = FileDescriptorProto {
+            name: Some("msg.proto".to_string()),
+            package: Some("msg".to_string()),
+            dependency: vec!["geometry.proto".to_string()],
+            message_type: vec![DescriptorProto {
+                name: Some("Ping".to_string()),
+                field: vec![
+                    scalar("seq", 1, Type::Uint32),
+                    FieldDescriptorProto {
+                        name: Some("at".to_string()),
+                        number: Some(4),
+                        label: Some(Label::Optional as i32),
+                        r#type: Some(Type::Message as i32),
+                        type_name: Some(".geo.Point".to_string()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        prost::Message::encode_to_vec(&FileDescriptorSet {
+            file: vec![geometry, msg],
+        })
+    }
+
+    #[test]
+    #[cfg(feature = "descriptors")]
+    fn descriptor_subset_prunes_to_the_file_closure() {
+        let set = two_file_set();
+
+        // Ping を含むファイルと、その推移 import(geometry)まで。
+        let for_ping = descriptor_subset(&set, "msg.Ping").unwrap().unwrap();
+        let decoded: prost_types::FileDescriptorSet = prost::Message::decode(&*for_ping).unwrap();
+        let mut names: Vec<&str> = decoded
+            .file
+            .iter()
+            .map(prost_types::FileDescriptorProto::name)
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["geometry.proto", "msg.proto"]);
+
+        // Point は import しない側なので、自分のファイルだけに刈られる。
+        let for_point = descriptor_subset(&set, "geo.Point").unwrap().unwrap();
+        let decoded: prost_types::FileDescriptorSet = prost::Message::decode(&*for_point).unwrap();
+        let names: Vec<&str> = decoded
+            .file
+            .iter()
+            .map(prost_types::FileDescriptorProto::name)
+            .collect();
+        assert_eq!(names, ["geometry.proto"]);
+
+        // 無い型は None。
+        assert!(descriptor_subset(&set, "msg.Nope").unwrap().is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "descriptors")]
+    fn message_fingerprint_matches_direct_fingerprint() {
+        let set = two_file_set();
+        let decoded: prost_types::FileDescriptorSet = prost::Message::decode(&*set).unwrap();
+        let (_, point) = find_message(&decoded, "geo.Point").unwrap();
+        assert_eq!(
+            message_fingerprint(&set, "geo.Point").unwrap(),
+            Some(fingerprint("geo.Point", point)),
+        );
+        assert_eq!(message_fingerprint(&set, "geo.Missing").unwrap(), None);
     }
 }

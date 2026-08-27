@@ -89,6 +89,9 @@ ctrlc = "3"
 # Zenoh pub/sub
 zenoh = { version = "1.0", default-features = false, features = ["transport_tcp", "transport_udp"] }
 
+# bag の形式(`reiny bag`)。既定 feature の zstd / lz4 は他ツール製の bag を読むのにも要る。
+mcap = "0.25"
+
 # proc-macro 実装(#[reiny::main])
 syn = { version = "2", features = ["full"] }
 quote = "1"

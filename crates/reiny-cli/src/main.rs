@@ -4,6 +4,7 @@
 //! `reiny run <launch.toml>` と同義。さらに自分の実行ファイル名が `reiny` 以外(= `compress
 //! --launcher` でリネームされた配布物)のときは、引数なしで隣の `<basename>.toml` を起動する。
 
+mod bagcmd;
 mod buildcmd;
 mod checkcmd;
 mod compress;
@@ -20,7 +21,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "reiny",
     version,
-    about = "reiny grain CLI: new / init / add / check / build / run / compress"
+    about = "reiny grain CLI: new / init / add / check / build / run / compress / bag"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -95,6 +96,8 @@ enum Command {
         #[arg(long)]
         include_system: bool,
     },
+    /// バスの記録 / 再生 / 要約(rosbag2 相当。形式は MCAP)。
+    Bag(bagcmd::BagArgs),
 }
 
 fn main() -> Result<()> {
@@ -141,6 +144,10 @@ fn main() -> Result<()> {
             launcher,
             include_system,
         } => compress::compress(&config, &out, launcher.as_deref(), include_system),
+        Command::Bag(bag) => {
+            init_tracing("info");
+            bagcmd::run(bag)
+        }
     }
 }
 
@@ -168,8 +175,8 @@ fn renamed_launcher_config() -> Result<Option<PathBuf>> {
 
 /// 後方互換の launch 起動形を検出する。`reiny --config X` / `reiny X`(サブコマンドでない位置引数)。
 fn backward_compat_config(argv: &[String]) -> Option<PathBuf> {
-    const SUBCOMMANDS: [&str; 8] = [
-        "new", "init", "add", "check", "build", "run", "compress", "help",
+    const SUBCOMMANDS: [&str; 9] = [
+        "new", "init", "add", "check", "build", "run", "compress", "bag", "help",
     ];
     let first = argv.get(1)?;
     if first == "--config" {
@@ -223,7 +230,9 @@ mod tests {
 
     #[test]
     fn subcommands_are_not_backward_compat() {
-        for sub in ["new", "init", "add", "check", "build", "run", "compress"] {
+        for sub in [
+            "new", "init", "add", "check", "build", "run", "compress", "bag",
+        ] {
             assert_eq!(backward_compat_config(&args(&[sub])), None, "{sub}");
         }
     }
