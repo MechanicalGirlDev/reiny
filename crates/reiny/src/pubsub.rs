@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use prost::Message;
 use zenoh::Wait;
-use zenoh::handlers::FifoChannelHandler;
+use zenoh::handlers::{FifoChannelHandler, RingChannel, RingChannelHandler};
 use zenoh::liveliness::LivelinessToken;
 use zenoh::pubsub::{Publisher as ZPublisher, Subscriber as ZSubscriber};
 use zenoh::qos::{CongestionControl, Priority};
@@ -241,6 +241,7 @@ pub struct SubscriberBuilder<'a, T> {
     cloudy: &'a Cloudy,
     from: Option<String>,
     latched: bool,
+    latest: Option<usize>,
     _marker: PhantomData<T>,
 }
 
@@ -250,6 +251,7 @@ impl<'a, T> SubscriberBuilder<'a, T> {
             cloudy,
             from: None,
             latched: false,
+            latest: None,
             _marker: PhantomData,
         }
     }
@@ -268,6 +270,17 @@ impl<'a, T> SubscriberBuilder<'a, T> {
         self
     }
 
+    /// 直近 `n` 件だけを保持し、溢れたら**最古を捨てる**(ROS 2 の `KEEP_LAST(n)`)。
+    ///
+    /// 既定(未指定)は zenoh の `FifoChannel`(256 件)で、**満杯になると zenoh の受信スレッドが
+    /// ブロックし、その grain の全購読が詰まる**。高レートの状態量を自分の周期でしか読まない
+    /// 購読(GUI が 100Hz の `RobotState` を描画周期で読む等)は `latest(1)` にする。
+    /// コマンド系は既定のまま —— 黙って落ちる方が制御では危ない。
+    pub fn latest(mut self, n: usize) -> Self {
+        self.latest = Some(n.max(1));
+        self
+    }
+
     /// subscriber を宣言する。
     pub fn build(self) -> Result<Subscriber<T>>
     where
@@ -277,10 +290,21 @@ impl<'a, T> SubscriberBuilder<'a, T> {
             .cloudy
             .key_for(self.from.as_deref().unwrap_or("*"), T::TYPE);
         let session = self.cloudy.session();
-        let subscriber = session
-            .declare_subscriber(key.clone())
-            .wait()
-            .map_err(anyhow::Error::msg)?;
+        let subscriber = match self.latest {
+            Some(n) => Chan::Ring(
+                session
+                    .declare_subscriber(key.clone())
+                    .with(RingChannel::new(n))
+                    .wait()
+                    .map_err(anyhow::Error::msg)?,
+            ),
+            None => Chan::Fifo(
+                session
+                    .declare_subscriber(key.clone())
+                    .wait()
+                    .map_err(anyhow::Error::msg)?,
+            ),
+        };
 
         // 宣言の**後**に撃つ。先に撃つと、応答を待つ間に流れたライブ sample を落とす。
         let latched = if self.latched {
@@ -289,7 +313,7 @@ impl<'a, T> SubscriberBuilder<'a, T> {
             None
         };
 
-        tracing::debug!(key = %key, latched = self.latched, "subscriber declared");
+        tracing::debug!(key = %key, latched = self.latched, latest = ?self.latest, "subscriber declared");
         Ok(Subscriber {
             subscriber,
             latched,
@@ -302,14 +326,48 @@ impl<'a, T> SubscriberBuilder<'a, T> {
     }
 }
 
+/// 受信チャネル。既定は Fifo(満杯でブロック)、[`SubscriberBuilder::latest`] で Ring
+/// (満杯で最古を捨てる)。enum にして `Subscriber<T>` を handler でジェネリックにしない ——
+/// 公開型の形はダウンストリームの構造体フィールドに現れている。
+enum Chan {
+    Fifo(ZSubscriber<FifoChannelHandler<Sample>>),
+    Ring(ZSubscriber<RingChannelHandler<Sample>>),
+}
+
+impl Chan {
+    /// 次の sample。チャネル終端で `None`。どちらの handler も cancel-safe
+    /// (flume の `recv_async` / Ring の `pull` → `not_empty` 待ちのループは、await 地点に
+    /// 取り出し済みの値を抱えない)。
+    async fn recv_async(&self) -> Option<Sample> {
+        match self {
+            Self::Fifo(s) => s.recv_async().await.ok(),
+            Self::Ring(s) => s.recv_async().await.ok(),
+        }
+    }
+}
+
 /// 型付き subscriber。[`Cloudy::subscribe`] / [`SubscriberBuilder::build`] で得る。
 ///
 /// `recv` はシャットダウン(Ctrl+C / SIGTERM / [`Cloudy::shutdown_now`])で `None` を返すので、
 /// `while let Some(m) = sub.recv().await` のループが自然に抜ける。
+///
+/// # cancel-safety
+///
+/// [`Subscriber::recv`] / [`Subscriber::recv_envelope`] は **cancel-safe**: `tokio::select!` や
+/// `tokio::time::timeout` で途中で捨てても、届いていた sample は失われず次の `recv` が返す。
+/// 「一定時間来なければ切断扱い」はこれで書く(reiny に deadline API は無い):
+///
+/// ```ignore
+/// match tokio::time::timeout(Duration::from_secs(1), sub.recv()).await {
+///     Ok(Some(m)) => on_message(m),
+///     Ok(None) => break,       // シャットダウン
+///     Err(_) => on_stale(),    // 居るのに黙っている(居なくなったのは watch_publishers で取る)
+/// }
+/// ```
 pub struct Subscriber<T> {
     // フィールド名が型名と重なるが、内側の zenoh subscriber を素直に指す名前。
     #[allow(clippy::struct_field_names)]
-    subscriber: ZSubscriber<FifoChannelHandler<Sample>>,
+    subscriber: Chan,
     /// latched 問い合わせの応答チャネル(撃った場合のみ)。
     latched: Option<FifoChannelHandler<Reply>>,
     /// 応答チャネルを読み切ったか。latched でなければ最初から true。
@@ -366,7 +424,7 @@ impl<T: Message + Default + Topic> Subscriber<T> {
                     }
                 }
                 sample = subscriber.recv_async() => {
-                    let Ok(sample) = sample else { return None }; // channel closed
+                    let Some(sample) = sample else { return None }; // channel closed
                     let source = source_of(sample.key_expr().as_str()).to_string();
                     if !*latched_done {
                         seen.insert(source.clone());

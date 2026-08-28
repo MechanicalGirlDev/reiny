@@ -237,4 +237,53 @@ async fn presence_latched_and_domain_isolation() {
         .collect();
     assert!(leaked.is_empty(), "@schema が ** に見えている: {leaked:?}");
     drop(described);
+
+    // --- latest(n): 読まずに溜めると最古から落ちる(既定の Fifo なら 5 件とも残る) ---
+    let burst = alpha.publisher::<Probe>().build().expect("burst publisher");
+    let mut ring = beta
+        .subscriber::<Probe>()
+        .latest(2)
+        .build()
+        .expect("ring subscriber");
+    let mut fifo = beta.subscriber::<Probe>().build().expect("fifo subscriber");
+    tokio::time::sleep(SETTLE).await;
+    for seq in 1..=5 {
+        burst.send(Probe { seq }).await.expect("send");
+    }
+    tokio::time::sleep(SETTLE).await;
+    let mut kept = Vec::new();
+    while let Ok(Some(m)) = timeout(Duration::from_millis(300), ring.recv()).await {
+        kept.push(m.seq);
+    }
+    assert_eq!(kept, [4, 5], "latest(2) は最新 2 件だけを順に返す");
+    let mut all = Vec::new();
+    while let Ok(Some(m)) = timeout(Duration::from_millis(300), fifo.recv()).await {
+        all.push(m.seq);
+    }
+    assert_eq!(all, [1, 2, 3, 4, 5], "既定の Fifo は落とさない");
+
+    // --- cancel-safety: timeout で recv を捨て続けても、届いた sample は次の recv が返す ---
+    for sub in [&mut ring, &mut fifo] {
+        for _ in 0..3 {
+            assert!(
+                timeout(Duration::from_millis(50), sub.recv())
+                    .await
+                    .is_err(),
+                "何も流れていないので期限切れのはず"
+            );
+        }
+    }
+    burst.send(Probe { seq: 99 }).await.expect("send");
+    tokio::time::sleep(SETTLE).await;
+    for sub in [&mut ring, &mut fifo] {
+        // 届いた後に、即時期限切れの recv で「取り出しかけて捨てる」を起こしてから読む。
+        let got = match timeout(Duration::ZERO, sub.recv()).await {
+            Ok(v) => v,
+            Err(_) => timeout(PATIENCE, sub.recv())
+                .await
+                .expect("cancel された recv の後でも sample は残っている"),
+        };
+        assert_eq!(got.map(|m| m.seq), Some(99));
+    }
+    drop(burst);
 }
