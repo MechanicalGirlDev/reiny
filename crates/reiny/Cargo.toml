@@ -14,6 +14,8 @@ categories = ["network-programming", "asynchronous"]
 default = ["zenoh"]
 # 既定エンジン。切ると `Engine` trait + `Local` だけになり、他エンジンのクレートはこれに依存する。
 zenoh = ["dep:zenoh"]
+# `engine::conformance` を公開する。他エンジンのクレートが dev-dependency で使う(テスト専用)。
+conformance = []
 
 [dependencies]
 reiny-core = { path = "../reiny-core", version = "0.4.0" }

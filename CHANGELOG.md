@@ -1,7 +1,8 @@
 # Changelog
 
 All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
-`reiny-link`, `reiny-build`, `reiny-macros`, `reiny-launch`, `reiny-cli`).
+`reiny-link`, `reiny-iceoryx2`, `reiny-build`, `reiny-macros`, `reiny-launch`,
+`reiny-cli`).
 Versions are kept in lockstep via `[workspace.package].version`.
 
 ## Unreleased
@@ -68,7 +69,23 @@ piece that does not depend on it.
   scenario — pub/sub with source, cancel-safety, `latest(n)`, presence with
   history and leave, latched, fingerprints, services incl. `reply_err` /
   `NoReply` / `Timeout`, shutdown — against `Local` and against `Zenoh`
-  (loopback port 37453). Adding an engine means adding one test there.
+  (loopback port 37453). It is public behind reiny's `conformance` feature
+  (`reiny::engine::conformance::{cloudy, exercise}`), so an engine crate
+  passes by adding one test that calls it.
+- **`reiny-iceoryx2`** — the `Engine` on
+  [iceoryx2](https://github.com/eclipse-iceoryx/iceoryx2) 0.9: grains on one
+  host over shared memory. One pub-sub service per type (`reiny/<d>/<T>`,
+  the source id in a fixed user header), one request-response service per
+  type for latched / services / `@schema`, presence as a `reiny-alive/<key>`
+  service held open and polled every 200 ms, one engine thread on a
+  `WaitSet`. `Reliability` maps to `BackpressureStrategy`
+  (`RetryUntilDelivered` / `DiscardData`). Passes the same conformance test
+  with two engines (two nodes) in one process. Creates iceoryx2's root
+  directory (`/tmp/iceoryx2/`, `C:\Temp\iceoryx2\`) if missing. **Build note:** iceoryx2
+  needs libclang (bindgen) on Windows / macOS — set `LIBCLANG_PATH`; on
+  Linux it binds libc directly. Because of that the crate is not in the
+  workspace's `default-members`: `cargo test` at the root skips it, CI runs
+  `cargo test --workspace`, and locally it is `cargo test -p reiny-iceoryx2`.
 
 ### Changed
 

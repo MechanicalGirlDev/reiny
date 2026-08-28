@@ -8,6 +8,18 @@ members = [
     "crates/reiny",
     "crates/reiny-build",
     "crates/reiny-link",
+    "crates/reiny-iceoryx2",
+]
+# reiny-iceoryx2 は Windows / macOS で libclang(bindgen)が要るので、素の `cargo build` /
+# `cargo test` からは外す。CI と Linux は `--workspace`、手元は `-p reiny-iceoryx2` で明示。
+default-members = [
+    "crates/reiny-launch",
+    "crates/reiny-cli",
+    "crates/reiny-macros",
+    "crates/reiny-core",
+    "crates/reiny",
+    "crates/reiny-build",
+    "crates/reiny-link",
 ]
 # examples/ は各々が独立した cargo ワークスペース(own Cargo.lock)。ルートのビルド・
 # テストには巻き込まない(各 example は cd して個別にビルドする)。

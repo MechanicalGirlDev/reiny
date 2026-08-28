@@ -51,13 +51,13 @@ jobs:
       # ローカルの pre-push と同じゲート。全 feature ではなく --all-targets で回す
       # (reiny-build の compile/descriptors は既定 feature 経由で入る)。
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # e2e(reiny/src/e2e.rs)と bag e2e(reiny-cli/tests/bag_e2e.rs)は実 zenoh を
       # ループバック固定ポート(37447 / 37448、マルチキャスト off)で張るので、
       # ネットワーク隔離された runner でも決定的に走る。
       - name: test
-        run: cargo test
+        run: cargo test --workspace
 
       # `reiny` は zenoh 抜き(`Engine` trait + `Local` だけ)でも建つ約束 —— 他エンジンの
       # クレートはその形に依存する。既定 feature 経由では検証されないので別に回す。

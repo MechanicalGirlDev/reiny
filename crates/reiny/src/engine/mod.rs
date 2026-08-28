@@ -28,9 +28,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{Qos, Result};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "conformance"))]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
-mod conformance;
+pub mod conformance;
 mod local;
 #[cfg(feature = "zenoh")]
 mod zenoh;

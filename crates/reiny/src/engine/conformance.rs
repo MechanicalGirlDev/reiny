@@ -2,15 +2,16 @@
 //!
 //! 5 操作 + reiny の上のロジック(latest(n) / cancel-safety / latched / service 往復 /
 //! presence / 指紋)が、エンジンを差し替えても同じに見えることを固定する。エンジンを足す人は
-//! この 1 本を通せばよい。`Local` は同一プロセス、`Zenoh` はループバック 37453
-//! (`e2e.rs` の 37447 / `rpc_e2e.rs` の 37449 とは別)。
+//! この 1 本を通せばよい: feature `conformance` で公開されるので、他クレートのテストから
+//! `reiny::engine::conformance::{cloudy, exercise}` を呼ぶ。`Local` は同一プロセス、`Zenoh` は
+//! ループバック 37453(`e2e.rs` の 37447 / `rpc_e2e.rs` の 37449 とは別)。
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::timeout;
 
-use super::{Engine, Key, Local};
+use super::{Engine, Key};
 use crate::{CallError, Cloudy, PresenceEvent, Qos, Service, Topic, shutdown::Shutdown};
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -75,7 +76,8 @@ const DOMAIN: &str = "conf";
 const SETTLE: Duration = Duration::from_millis(600);
 const PATIENCE: Duration = Duration::from_secs(5);
 
-async fn cloudy(engine: Arc<dyn Engine>, id: &str) -> Cloudy {
+/// `engine` の上に grain `id`(domain は `conf`)を組む。
+pub async fn cloudy(engine: Arc<dyn Engine>, id: &str) -> Cloudy {
     Cloudy::new(
         engine,
         id.to_string(),
@@ -88,9 +90,9 @@ async fn cloudy(engine: Arc<dyn Engine>, id: &str) -> Cloudy {
     .expect("cloudy")
 }
 
-/// `a` / `b` は同じバスに乗った別の grain。
+/// 適合テスト本体。`a` / `b` は同じバスに乗った別の grain(id `a` / `b`)。通らなければ panic。
 #[allow(clippy::too_many_lines)] // 1 本で通す(エンジンごとに 1 回)ので長い。
-async fn exercise(a: Cloudy, b: Cloudy) {
+pub async fn exercise(a: Cloudy, b: Cloudy) {
     tokio::time::sleep(SETTLE).await;
 
     // --- grain presence: Cloudy::new が @grain を立てている ---
@@ -256,15 +258,16 @@ async fn exercise(a: Cloudy, b: Cloudy) {
         .expect("server task");
 }
 
+#[cfg(test)]
 #[tokio::test(flavor = "multi_thread")]
 async fn local() {
-    let bus = Local::new();
+    let bus = super::Local::new();
     let a = cloudy(Arc::new(bus.clone()), "a").await;
     let b = cloudy(Arc::new(bus), "b").await;
     exercise(a, b).await;
 }
 
-#[cfg(feature = "zenoh")]
+#[cfg(all(test, feature = "zenoh"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn zenoh() {
     use super::Zenoh;
