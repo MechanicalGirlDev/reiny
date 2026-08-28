@@ -40,7 +40,7 @@ piece that does not depend on it.
 
 ### Notes
 
-- Not yet: `impl Engine for Host` and the `reiny link …` bridge into zenoh —
+- Not yet: `impl Engine for Host` and the `reiny bridge …` CLI into zenoh —
   both wait for the `Engine` trait (`docs/design/0.5.0.md` §1). An
   `embedded-io-async` adapter was left out; `feed` / `drain` is four lines.
 
