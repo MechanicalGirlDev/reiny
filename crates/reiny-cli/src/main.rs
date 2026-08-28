@@ -6,10 +6,14 @@
 
 mod bagcmd;
 mod buildcmd;
+mod bus;
 mod checkcmd;
+mod codec;
 mod compress;
 mod runcmd;
 mod scaffold;
+mod servicecmd;
+mod topiccmd;
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -21,7 +25,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "reiny",
     version,
-    about = "reiny grain CLI: new / init / add / check / build / run / compress / bag"
+    about = "reiny grain CLI: new / init / add / check / build / run / compress / bag / topic / node / service"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -98,6 +102,12 @@ enum Command {
     },
     /// バスの記録 / 再生 / 要約(rosbag2 相当。形式は MCAP)。
     Bag(bagcmd::BagArgs),
+    /// 生きている型の一覧・受信レート・帯域(`ros2 topic` 相当)。
+    Topic(topiccmd::TopicArgs),
+    /// 生きている grain の一覧・詳細(`ros2 node` 相当)。
+    Node(topiccmd::NodeArgs),
+    /// 生きている service の一覧・JSON での呼び出し(`ros2 service` 相当)。
+    Service(servicecmd::ServiceArgs),
 }
 
 fn main() -> Result<()> {
@@ -148,6 +158,18 @@ fn main() -> Result<()> {
             init_tracing("info");
             bagcmd::run(bag)
         }
+        Command::Topic(topic) => {
+            init_tracing("warn");
+            topiccmd::run_topic(topic)
+        }
+        Command::Node(node) => {
+            init_tracing("warn");
+            topiccmd::run_node(node)
+        }
+        Command::Service(service) => {
+            init_tracing("warn");
+            servicecmd::run(service)
+        }
     }
 }
 
@@ -175,8 +197,9 @@ fn renamed_launcher_config() -> Result<Option<PathBuf>> {
 
 /// 後方互換の launch 起動形を検出する。`reiny --config X` / `reiny X`(サブコマンドでない位置引数)。
 fn backward_compat_config(argv: &[String]) -> Option<PathBuf> {
-    const SUBCOMMANDS: [&str; 9] = [
-        "new", "init", "add", "check", "build", "run", "compress", "bag", "help",
+    const SUBCOMMANDS: [&str; 12] = [
+        "new", "init", "add", "check", "build", "run", "compress", "bag", "topic", "node",
+        "service", "help",
     ];
     let first = argv.get(1)?;
     if first == "--config" {
@@ -231,7 +254,8 @@ mod tests {
     #[test]
     fn subcommands_are_not_backward_compat() {
         for sub in [
-            "new", "init", "add", "check", "build", "run", "compress", "bag",
+            "new", "init", "add", "check", "build", "run", "compress", "bag", "topic", "node",
+            "service",
         ] {
             assert_eq!(backward_compat_config(&args(&[sub])), None, "{sub}");
         }

@@ -4,6 +4,73 @@ All notable changes to the reiny workspace crates (`reiny`, `reiny-build`,
 `reiny-macros`, `reiny-launch`, `reiny-cli`). Versions are kept in lockstep via
 `[workspace.package].version`.
 
+## 0.4.0 — Unreleased
+
+Services, subscriber-side QoS and bus introspection. Design record:
+`docs/design/0.4.0.md` (§11 records what shipped and where the implementation
+departed from the design). **No wire break**: 0.3 and 0.4 grains interoperate;
+the only new keys are verbatim chunks (`@service`, `@grain`) that `*` / `**`
+never match.
+
+### Added
+
+- **Typed request/response (services).** The request type is the address:
+  `cloudy.serve::<Req>()` declares a queryable at `reiny/<domain>/<id>/<Req>`
+  (+ a liveliness token at `…/<Req>/@service`), `Server::recv()` yields a
+  `Request<Req>` that is consumed by `.reply(resp)` / `.reply_err(msg)`, and
+  `cloudy.call::<Req>(req)` / `cloudy.caller::<Req>().to(id).timeout(d).build()`
+  return `Req::Response`. `CallError` separates `NoReply` (no server, or the
+  server dropped the request), `Timeout`, `Remote(String)` (`reply_err`),
+  `Schema` (response fingerprint mismatch), `Decode` and `Zenoh`. Fingerprints
+  ride both directions; a request whose fingerprint does not match is answered
+  with `reply_err`, not dropped, so the caller cannot mistake it for an absent
+  server. `servers::<Req>()` / `watch_servers::<Req>()` mirror the publisher
+  presence API. A type may be latched-published *and* served by the same grain:
+  the two queryables tell each other's queries apart by payload presence.
+  `trait Service { type Response; }` is one line to hand-write for third-party
+  types, and `Reiny.toml` gains a `[services]` table
+  (`Name = { request = "Req", response = "Resp" }`, aliases from
+  `[publications]` / `[internals]`, or `<dep>::<Alias>` for per-project
+  dependencies) from which `reiny-build` generates `impl reiny::Service` in the
+  crate that owns the request type. `reiny check` prints a `services:` table.
+  Example: `examples/ping-pong-service`.
+- **`SubscriberBuilder::latest(n)`** — keep only the newest `n` samples and drop
+  the oldest when full (zenoh `RingChannel`; ROS 2 `KEEP_LAST`). The default
+  stays zenoh's `FifoChannel`, which **blocks the zenoh receive thread when
+  full** — a subscriber that reads a 100 Hz state at frame rate should use
+  `latest(1)`. `Subscriber::recv` / `recv_envelope` are documented as
+  cancel-safe and pinned by the e2e, so a receive deadline is
+  `tokio::time::timeout(d, sub.recv())` — no deadline API was added.
+- **Grain presence.** `Cloudy::new` declares a liveliness token at
+  `reiny/<domain>/<id>/@grain`, so `reiny node list` shows grains that publish
+  nothing, and a grain whose id is already live on the bus is warned about at
+  startup (not refused — `bag play --as` is a legitimate impersonation).
+- **`reiny topic list | hz | bw | echo`, `reiny node list | info`,
+  `reiny service list | call`** — `ros2 topic / node / service` equivalents.
+  `list` / `node` / `service list` only query liveliness; `hz` / `bw` use one raw
+  subscriber and report **per source**; `echo` and `service call` decode /
+  encode through the descriptor a running grain serves at `@schema`
+  (`prost-reflect`, confined to `reiny-cli/src/codec.rs`; types without a
+  `DESCRIPTOR` are shown as hex). `service call Req '{json}' [--to id]` puts
+  calibration / reset style services within reach of a shell. The bus
+  vocabulary shared with `bag` moved to `reiny-cli/src/bus.rs`.
+
+### Changed
+
+- A latched publisher's queryable now ignores queries that carry a payload
+  (those are service calls). Invisible to 0.3 subscribers, whose latched `get`
+  carries none.
+- `reiny-cli` depends on `prost`, `prost-reflect 0.14` and `serde_json`.
+
+### Notes
+
+- Deliberately **not** added: a receive deadline API (`tokio::time::timeout`),
+  `.reliability()` (zenoh 1.9 keeps it `unstable` and it does not retransmit),
+  an actions API (service + feedback topic + latched result is the convention),
+  streaming replies, request sender identity (`Query::zid` is unstable),
+  subscriber presence, `reiny topic pub`, `reiny node kill`. Rationale in
+  `docs/design/0.4.0.md` §5.
+
 ## 0.3.0 — 2026-08-27
 
 Escape-hatch and schema-scaling pass. Design record: `docs/design/0.3.0.md`

@@ -9,12 +9,14 @@ use std::sync::{Arc, Mutex};
 
 use prost::Message;
 use zenoh::Wait;
-use zenoh::handlers::FifoChannelHandler;
+use zenoh::bytes::ZBytes;
+use zenoh::handlers::{FifoChannelHandler, RingChannel, RingChannelHandler};
 use zenoh::liveliness::LivelinessToken;
 use zenoh::pubsub::{Publisher as ZPublisher, Subscriber as ZSubscriber};
 use zenoh::qos::{CongestionControl, Priority};
 use zenoh::query::{Query, Queryable, Reply};
 use zenoh::sample::{Sample, SampleKind};
+use zenoh::session::Session;
 use zenoh::time::Timestamp;
 
 use crate::shutdown::Shutdown;
@@ -108,12 +110,6 @@ impl<'a, T> PublisherBuilder<'a, T> {
         }
         let publisher = builder.wait().map_err(anyhow::Error::msg)?;
 
-        let token = session
-            .liveliness()
-            .declare_token(key.clone())
-            .wait()
-            .map_err(anyhow::Error::msg)?;
-
         let last: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
         let queryable = if self.latched {
             Some(declare_latch(
@@ -125,6 +121,15 @@ impl<'a, T> PublisherBuilder<'a, T> {
         } else {
             None
         };
+
+        // トークンは latched queryable の**後**に宣言する。購読側は presence(このトークン)を
+        // 合図に直近値を問い合わせるので、逆順だと「居るのに queryable はまだ届いていない」
+        // 一瞬に問い合わせが飛んで空振りする。同じリンク上の宣言は順序が保たれる。
+        let token = session
+            .liveliness()
+            .declare_token(key.clone())
+            .wait()
+            .map_err(anyhow::Error::msg)?;
         let schema = match T::DESCRIPTOR {
             Some(descriptor) => Some(declare_schema(self.cloudy, &key, descriptor)?),
             None => None,
@@ -148,7 +153,11 @@ impl<'a, T> PublisherBuilder<'a, T> {
 /// `@schema` は verbatim チャンク —— `*` / `**` のどちらにもマッチしないので、型のトピックを
 /// 購読・記録している誰にも見えない。拾うのは `reiny bag record` のように
 /// `reiny/<domain>/*/*/@schema/*` と明示して問い合わせる側だけ。
-fn declare_schema(cloudy: &Cloudy, key: &str, descriptor: Descriptor) -> Result<Queryable<()>> {
+pub(crate) fn declare_schema(
+    cloudy: &Cloudy,
+    key: &str,
+    descriptor: Descriptor,
+) -> Result<Queryable<()>> {
     let reply_key = format!("{key}/@schema/{}", descriptor.message);
     let callback_key = reply_key.clone();
     cloudy
@@ -179,6 +188,11 @@ fn declare_latch(
         .session()
         .declare_queryable(key.to_string())
         .callback(move |query: Query| {
+            // payload 付きの query は service の呼び出し(`service.rs`)。同じ型を latched publish
+            // しつつ serve する grain で、呼び出しに直近値を返してしまわないよう無視する。
+            if query.payload().is_some() {
+                return;
+            }
             // poison しても latched は「最後の値を返すだけ」なので、取れなければ黙って何も返さない。
             let payload = last.lock().ok().and_then(|g| g.clone());
             let Some(bytes) = payload else { return };
@@ -241,6 +255,7 @@ pub struct SubscriberBuilder<'a, T> {
     cloudy: &'a Cloudy,
     from: Option<String>,
     latched: bool,
+    latest: Option<usize>,
     _marker: PhantomData<T>,
 }
 
@@ -250,6 +265,7 @@ impl<'a, T> SubscriberBuilder<'a, T> {
             cloudy,
             from: None,
             latched: false,
+            latest: None,
             _marker: PhantomData,
         }
     }
@@ -261,10 +277,27 @@ impl<'a, T> SubscriberBuilder<'a, T> {
         self
     }
 
-    /// 宣言した直後に latched publisher へ 1 回問い合わせ、直近値を受け取ってから
-    /// ライブ購読に入る。
+    /// latched publisher の直近値を受け取ってからライブ購読に入る。
+    ///
+    /// 問い合わせ(`get`)は**宣言直後ではなく、その型の publisher の presence を見てから**撃つ。
+    /// `get` はその瞬間のルーティング表しか見ないので、宣言直後に撃つと「セッションは開いたが
+    /// publisher が居る peer とのリンクがまだ張れていない」一瞬に空振りし、**publisher が
+    /// 再送しない限り恒久的に黙る**(latched の存在意義そのものが消える)。presence は
+    /// liveliness の**購読**なので、後から張れたリンクの宣言もちゃんと届く —— この非対称性が
+    /// 穴を塞ぐ。publisher が増えるたびに、その id へ 1 回だけ問い合わせ直す。
     pub fn latched(mut self) -> Self {
         self.latched = true;
+        self
+    }
+
+    /// 直近 `n` 件だけを保持し、溢れたら**最古を捨てる**(ROS 2 の `KEEP_LAST(n)`)。
+    ///
+    /// 既定(未指定)は zenoh の `FifoChannel`(256 件)で、**満杯になると zenoh の受信スレッドが
+    /// ブロックし、その grain の全購読が詰まる**。高レートの状態量を自分の周期でしか読まない
+    /// 購読(GUI が 100Hz の `RobotState` を描画周期で読む等)は `latest(1)` にする。
+    /// コマンド系は既定のまま —— 黙って落ちる方が制御では危ない。
+    pub fn latest(mut self, n: usize) -> Self {
+        self.latest = Some(n.max(1));
         self
     }
 
@@ -277,23 +310,40 @@ impl<'a, T> SubscriberBuilder<'a, T> {
             .cloudy
             .key_for(self.from.as_deref().unwrap_or("*"), T::TYPE);
         let session = self.cloudy.session();
-        let subscriber = session
-            .declare_subscriber(key.clone())
-            .wait()
-            .map_err(anyhow::Error::msg)?;
+        let subscriber = match self.latest {
+            Some(n) => Chan::Ring(
+                session
+                    .declare_subscriber(key.clone())
+                    .with(RingChannel::new(n))
+                    .wait()
+                    .map_err(anyhow::Error::msg)?,
+            ),
+            None => Chan::Fifo(
+                session
+                    .declare_subscriber(key.clone())
+                    .wait()
+                    .map_err(anyhow::Error::msg)?,
+            ),
+        };
 
-        // 宣言の**後**に撃つ。先に撃つと、応答を待つ間に流れたライブ sample を落とす。
-        let latched = if self.latched {
-            Some(session.get(&key).wait().map_err(anyhow::Error::msg)?)
+        // latched の問い合わせは presence を待ってから撃つ(`latched()` のコメント参照)。
+        // 購読の**後**に見張り始めるので、応答を待つ間に流れたライブ sample も落とさない。
+        let presence = if self.latched {
+            Some(self.cloudy.watch_key::<T>(key.clone())?)
         } else {
             None
         };
 
-        tracing::debug!(key = %key, latched = self.latched, "subscriber declared");
+        tracing::debug!(key = %key, latched = self.latched, latest = ?self.latest, "subscriber declared");
         Ok(Subscriber {
             subscriber,
-            latched,
-            latched_done: !self.latched,
+            session: session.clone(),
+            key,
+            latched: None,
+            latched_done: true,
+            presence,
+            presence_done: !self.latched,
+            queried: HashSet::new(),
             seen: HashSet::new(),
             warned: HashSet::new(),
             shutdown: self.cloudy.shutdown_handle(),
@@ -302,18 +352,61 @@ impl<'a, T> SubscriberBuilder<'a, T> {
     }
 }
 
+/// 受信チャネル。既定は Fifo(満杯でブロック)、[`SubscriberBuilder::latest`] で Ring
+/// (満杯で最古を捨てる)。enum にして `Subscriber<T>` を handler でジェネリックにしない ——
+/// 公開型の形はダウンストリームの構造体フィールドに現れている。
+enum Chan {
+    Fifo(ZSubscriber<FifoChannelHandler<Sample>>),
+    Ring(ZSubscriber<RingChannelHandler<Sample>>),
+}
+
+impl Chan {
+    /// 次の sample。チャネル終端で `None`。どちらの handler も cancel-safe
+    /// (flume の `recv_async` / Ring の `pull` → `not_empty` 待ちのループは、await 地点に
+    /// 取り出し済みの値を抱えない)。
+    async fn recv_async(&self) -> Option<Sample> {
+        match self {
+            Self::Fifo(s) => s.recv_async().await.ok(),
+            Self::Ring(s) => s.recv_async().await.ok(),
+        }
+    }
+}
+
 /// 型付き subscriber。[`Cloudy::subscribe`] / [`SubscriberBuilder::build`] で得る。
 ///
 /// `recv` はシャットダウン(Ctrl+C / SIGTERM / [`Cloudy::shutdown_now`])で `None` を返すので、
 /// `while let Some(m) = sub.recv().await` のループが自然に抜ける。
+///
+/// # cancel-safety
+///
+/// [`Subscriber::recv`] / [`Subscriber::recv_envelope`] は **cancel-safe**: `tokio::select!` や
+/// `tokio::time::timeout` で途中で捨てても、届いていた sample は失われず次の `recv` が返す。
+/// 「一定時間来なければ切断扱い」はこれで書く(reiny に deadline API は無い):
+///
+/// ```ignore
+/// match tokio::time::timeout(Duration::from_secs(1), sub.recv()).await {
+///     Ok(Some(m)) => on_message(m),
+///     Ok(None) => break,       // シャットダウン
+///     Err(_) => on_stale(),    // 居るのに黙っている(居なくなったのは watch_publishers で取る)
+/// }
+/// ```
 pub struct Subscriber<T> {
     // フィールド名が型名と重なるが、内側の zenoh subscriber を素直に指す名前。
     #[allow(clippy::struct_field_names)]
-    subscriber: ZSubscriber<FifoChannelHandler<Sample>>,
-    /// latched 問い合わせの応答チャネル(撃った場合のみ)。
+    subscriber: Chan,
+    /// latched の問い合わせを撃ち直すための材料(セッションと購読キー)。
+    session: Session,
+    key: String,
+    /// いま飛んでいる latched 問い合わせの応答チャネル(presence を見て撃つ)。
     latched: Option<FifoChannelHandler<Reply>>,
-    /// 応答チャネルを読み切ったか。latched でなければ最初から true。
+    /// 応答チャネルを読み切ったか。撃っていなければ true。
     latched_done: bool,
+    /// latched のとき、publisher の参加 / 離脱を見張るストリーム。
+    presence: Option<Presence<T>>,
+    /// presence ストリームが終端したか。latched でなければ最初から true。
+    presence_done: bool,
+    /// 直近値を既に問い合わせた publisher id(離脱したら忘れ、復帰時に撃ち直す)。
+    queried: HashSet<String>,
     /// ライブ sample を配り終えた送信元。latched 応答がこれより後に届いたら捨てる。
     seen: HashSet<String>,
     /// スキーマ指紋の不一致を既に警告した送信元(送信元ごとに 1 度だけ鳴らす)。
@@ -335,8 +428,13 @@ impl<T: Message + Default + Topic> Subscriber<T> {
     pub async fn recv_envelope(&mut self) -> Option<Envelope<T>> {
         let Self {
             subscriber,
+            session,
+            key,
             latched,
             latched_done,
+            presence,
+            presence_done,
+            queried,
             seen,
             warned,
             shutdown,
@@ -346,6 +444,24 @@ impl<T: Message + Default + Topic> Subscriber<T> {
             tokio::select! {
                 biased;
                 () = shutdown.wait() => return None,
+                // publisher が見えた合図。その id へ 1 回だけ直近値を問い合わせる。
+                event = recv_presence(presence.as_mut()), if !*presence_done => {
+                    match event {
+                        Some(PresenceEvent::Joined(id)) => {
+                            if queried.insert(id) {
+                                match session.get(&*key).wait() {
+                                    Ok(replies) => {
+                                        *latched = Some(replies);
+                                        *latched_done = false;
+                                    }
+                                    Err(e) => tracing::warn!(key = %key, error = %e, "latched get failed"),
+                                }
+                            }
+                        }
+                        Some(PresenceEvent::Left(id)) => { queried.remove(&id); }
+                        None => *presence_done = true,
+                    }
+                }
                 // latched 応答を先に流す(短命なチャネルなので飢餓は起きない)。
                 reply = recv_reply(latched.as_ref()), if !*latched_done => {
                     let Some(reply) = reply else {
@@ -366,9 +482,10 @@ impl<T: Message + Default + Topic> Subscriber<T> {
                     }
                 }
                 sample = subscriber.recv_async() => {
-                    let Ok(sample) = sample else { return None }; // channel closed
+                    let sample = sample?; // channel closed
                     let source = source_of(sample.key_expr().as_str()).to_string();
-                    if !*latched_done {
+                    // latched を見張っている間だけ覚える(遅れて届いた直近値を捨てるため)。
+                    if !*presence_done {
                         seen.insert(source.clone());
                     }
                     if !schema_matches::<T>(&sample, &source, warned) {
@@ -392,20 +509,24 @@ async fn recv_reply(handler: Option<&FifoChannelHandler<Reply>>) -> Option<Reply
     }
 }
 
+/// [`recv_reply`] の presence 版。latched でない購読では `None` = `pending`。
+async fn recv_presence<T>(presence: Option<&mut Presence<T>>) -> Option<PresenceEvent> {
+    match presence {
+        Some(p) => p.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// attachment に載った送信側の指紋を自分の `T::SCHEMA` と突き合わせる。
 ///
 /// 素通しにするのは「照合できないとき」だけ —— どちらかが `None`(手書き `impl Topic` や
 /// 指紋を載せない送信側)、または attachment が既知の形(8 バイト LE)でないとき。不一致
 /// だけを落とし、その送信元については 1 度しか警告しない(毎サンプル鳴らすとログが埋まる)。
 fn schema_matches<T: Topic>(sample: &Sample, source: &str, warned: &mut HashSet<String>) -> bool {
-    let (Some(mine), Some(attachment)) = (T::SCHEMA, sample.attachment()) else {
+    let (Some(mine), Some(theirs)) = (T::SCHEMA, attachment_fingerprint(sample.attachment()))
+    else {
         return true;
     };
-    let bytes = attachment.to_bytes();
-    let Ok(raw) = <[u8; 8]>::try_from(bytes.as_ref()) else {
-        return true; // reiny の指紋ではない attachment。他人のものなので触らない。
-    };
-    let theirs = u64::from_le_bytes(raw);
     if theirs == mine {
         return true;
     }
@@ -419,6 +540,13 @@ fn schema_matches<T: Topic>(sample: &Sample, source: &str, warned: &mut HashSet<
         );
     }
     false
+}
+
+/// attachment に載った reiny の指紋(8 バイト LE)。無い / 形が違う(他人の attachment)なら `None`。
+pub(crate) fn attachment_fingerprint(attachment: Option<&ZBytes>) -> Option<u64> {
+    let bytes = attachment?.to_bytes();
+    let raw = <[u8; 8]>::try_from(bytes.as_ref()).ok()?;
+    Some(u64::from_le_bytes(raw))
 }
 
 fn decode<T: Message + Default + Topic>(sample: &Sample) -> Option<T> {

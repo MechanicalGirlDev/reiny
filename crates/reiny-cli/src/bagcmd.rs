@@ -25,11 +25,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use reiny::zenoh::{self, Wait};
-use reiny::{RuntimeOptions, ZenohSource};
 
-/// キーのプレフィクスと、脇道(`@schema`)のチャンク名。reiny 本体と揃える。
-const KEY_ROOT: &str = "reiny";
-const SCHEMA_CHUNK: &str = "@schema";
+use crate::bus::{BusArgs, KEY_ROOT, KeyParts, attachment_u64, collect_schemas, key_source};
 
 #[derive(Args)]
 pub(crate) struct BagArgs {
@@ -45,57 +42,6 @@ enum BagCommand {
     Play(PlayArgs),
     /// MCAP の中身を要約する。
     Info(InfoArgs),
-}
-
-/// grain と同じ綴りの fabric 引数。3 サブコマンドで共通。
-#[derive(Args, Clone)]
-struct BusArgs {
-    /// 論理名前空間(既定: `--domain` > `REINY_DOMAIN` > "default")。
-    #[arg(long)]
-    domain: Option<String>,
-    /// zenoh 設定ファイル(JSON5 / JSON / YAML)。
-    #[arg(long)]
-    zenoh_config: Option<PathBuf>,
-    /// 接続先エンドポイント(繰り返し可、例 `tcp/127.0.0.1:7447`)。
-    #[arg(long)]
-    connect: Vec<String>,
-    /// zenoh の動作モード(`peer` / `client` / `router`)。
-    #[arg(long)]
-    zenoh_mode: Option<String>,
-}
-
-impl BusArgs {
-    /// fabric 引数から (zenoh 設定, 解決済み domain) を組む。`RuntimeOptions` を経由するので
-    /// 既定値・`REINY_DOMAIN`・`--connect` の json5 化は grain と同じ経路になる。
-    fn open(&self) -> Result<(zenoh::Session, String)> {
-        let mut opts = RuntimeOptions::new("reiny-bag");
-        if let Some(d) = &self.domain {
-            opts.domain.clone_from(d);
-        }
-        if let Some(f) = &self.zenoh_config {
-            opts.zenoh = ZenohSource::File(f.clone());
-        }
-        if !self.connect.is_empty() {
-            let list = self
-                .connect
-                .iter()
-                .map(|e| format!("\"{e}\""))
-                .collect::<Vec<_>>()
-                .join(",");
-            opts.zenoh_overrides
-                .push(("connect/endpoints".to_string(), format!("[{list}]")));
-        }
-        if let Some(m) = &self.zenoh_mode {
-            opts.zenoh_overrides
-                .push(("mode".to_string(), format!("\"{m}\"")));
-        }
-        let config = opts.zenoh_config()?;
-        let session = zenoh::open(config)
-            .wait()
-            .map_err(anyhow::Error::msg)
-            .context("opening zenoh session")?;
-        Ok((session, opts.domain))
-    }
 }
 
 pub(crate) fn run(args: BagArgs) -> Result<()> {
@@ -172,7 +118,7 @@ fn record(args: &RecordArgs) -> Result<()> {
     };
 
     // スキーマ(descriptor)を先に集める。走っている publisher が `@schema` で名乗るものを拾う。
-    collect_schemas(&session, &domain, &mut state.schemas);
+    state.schemas = collect_schemas(&session, &key);
 
     let filter = Filter::new(&args.types, &args.from, &args.exclude_types);
     let mut count: u64 = 0;
@@ -250,40 +196,6 @@ fn snapshot(session: &zenoh::Session, key: &str) -> Vec<(String, Vec<u8>, Option
         }
     }
     out
-}
-
-/// `@schema` を 1 発撃って、走っている publisher が名乗る descriptor set を集める。
-/// キー `<...>/@schema/<fqn>` から fqn を取り、必要ファイルだけに刈って覚える。
-fn collect_schemas(
-    session: &zenoh::Session,
-    domain: &str,
-    schemas: &mut BTreeMap<String, (String, Vec<u8>)>,
-) {
-    let key = format!("{KEY_ROOT}/{domain}/*/*/{SCHEMA_CHUNK}/*");
-    let replies = match session.get(&key).wait() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "schema get failed; recording without schemas");
-            return;
-        }
-    };
-    for reply in &replies {
-        let Ok(sample) = reply.result() else { continue };
-        let full = sample.key_expr().as_str();
-        // reiny/<domain>/<id>/<TYPE>/@schema/<fqn>
-        let Some((base, fqn)) = full.split_once(&format!("/{SCHEMA_CHUNK}/")) else {
-            continue;
-        };
-        let file_set = sample.payload().to_bytes();
-        match reiny_build::descriptor_subset(&file_set, fqn) {
-            Ok(Some(subset)) => {
-                schemas.insert(base.to_string(), (fqn.to_string(), subset));
-            }
-            Ok(None) => tracing::warn!(fqn, "@schema payload lacks the named message"),
-            Err(e) => tracing::warn!(fqn, error = %e, "undecodable @schema payload"),
-        }
-    }
-    tracing::debug!(schemas = schemas.len(), "collected schemas");
 }
 
 /// 1 サンプルを MCAP へ書く。初見キーはチャネル(＋あればスキーマ)を作る。フィルタで落ちれば false。
@@ -735,35 +647,6 @@ struct Row {
 // 共有の小道具
 // ===========================================================================
 
-/// キー `reiny/<domain>/<source>/<TYPE>` の 3 セグメント。`@schema` 付きは弾く(None)。
-struct KeyParts<'a> {
-    domain: &'a str,
-    source: &'a str,
-    ty: &'a str,
-}
-
-impl<'a> KeyParts<'a> {
-    fn parse(key: &'a str) -> Option<Self> {
-        let mut segs = key.split('/');
-        if segs.next()? != KEY_ROOT {
-            return None;
-        }
-        let domain = segs.next()?;
-        let source = segs.next()?;
-        let ty = segs.next()?;
-        // 4 段ちょうど(脇道 `/@schema/...` が付いていたら記録対象ではない)。
-        if segs.next().is_some() {
-            return None;
-        }
-        Some(Self { domain, source, ty })
-    }
-}
-
-/// `reiny/<domain>/<id>/<TYPE>` から `<id>` を取る(presence 判定用)。
-fn key_source(key: &str) -> &str {
-    key.split('/').nth(2).unwrap_or_default()
-}
-
 /// 型 / 送信元 / 除外型のフィルタ。空の許可リストは「全部」。
 struct Filter {
     types: Vec<String>,
@@ -792,14 +675,6 @@ impl Filter {
         }
         true
     }
-}
-
-/// zenoh の attachment を reiny の指紋(8 バイト LE)として読む。形が違えば `None`。
-fn attachment_u64(sample: &zenoh::sample::Sample) -> Option<u64> {
-    let bytes = sample.attachment()?.to_bytes();
-    <[u8; 8]>::try_from(bytes.as_ref())
-        .ok()
-        .map(u64::from_le_bytes)
 }
 
 fn now_unix_nanos() -> u64 {
@@ -850,16 +725,6 @@ fn civil(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn key_parts_parse_and_reject_schema_chunk() {
-        let p = KeyParts::parse("reiny/lab/ctrl/RobotState").unwrap();
-        assert_eq!((p.domain, p.source, p.ty), ("lab", "ctrl", "RobotState"));
-        // 脇道は記録対象ではない。
-        assert!(KeyParts::parse("reiny/lab/ctrl/RobotState/@schema/hs.RobotState").is_none());
-        assert!(KeyParts::parse("reiny/lab/ctrl").is_none());
-        assert!(KeyParts::parse("other/lab/ctrl/T").is_none());
-    }
 
     #[test]
     fn filter_types_from_exclude() {
