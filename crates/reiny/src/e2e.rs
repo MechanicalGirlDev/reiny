@@ -65,23 +65,31 @@ impl Topic for Described {
     });
 }
 
-/// 他のテスト実行と衝突しないよう、この 1 本だけが使うループバックポート。
+/// 他のテスト実行と衝突しないよう、このファイルだけが使うループバックポート
+/// (テストは並行に走るので、テストごとに別ポート)。
 const ENDPOINT: &str = "tcp/127.0.0.1:37447";
+const ISLAND_A: &str = "tcp/127.0.0.1:37451";
+const ISLAND_B: &str = "tcp/127.0.0.1:37452";
 
 /// マルチキャストを切った peer セッション。`listen` 側が 1 本、他は `connect` する。
 async fn session(listen: bool) -> zenoh::Session {
-    let mut config = zenoh::Config::default();
     let key = if listen {
         "listen/endpoints"
     } else {
         "connect/endpoints"
     };
-    for (k, v) in [
-        (key, format!("[\"{ENDPOINT}\"]")),
-        ("scouting/multicast/enabled", "false".to_string()),
-    ] {
+    open_session(&[(key, format!("[\"{ENDPOINT}\"]"))]).await
+}
+
+/// マルチキャストを切った peer セッションを、追加の設定を重ねて開く。
+async fn open_session(entries: &[(&str, String)]) -> zenoh::Session {
+    let mut config = zenoh::Config::default();
+    for (k, v) in [("scouting/multicast/enabled", "false".to_string())]
+        .iter()
+        .chain(entries)
+    {
         config
-            .insert_json5(k, &v)
+            .insert_json5(k, v)
             .unwrap_or_else(|e| panic!("zenoh config {k}: {e}"));
     }
     zenoh::open(config)
@@ -98,6 +106,7 @@ fn cloudy(session: zenoh::Session, id: &str, domain: &str) -> Cloudy {
         None,
         Vec::new(),
     )
+    .expect("cloudy")
 }
 
 const SETTLE: Duration = Duration::from_millis(600);
@@ -286,4 +295,55 @@ async fn presence_latched_and_domain_isolation() {
         assert_eq!(got.map(|m| m.seq), Some(99));
     }
     drop(burst);
+}
+
+/// **リンクが後から張れる**先に latched publisher が居る場合。0.3.0 はここで恒久ハングした:
+/// `get` は撃った瞬間のルーティング表しか見ないので、まだ繋がっていない相手の queryable には
+/// 届かず、publisher は再送しないので二度と値が来なかった(実機では bag レコーダが 4 本目の
+/// peer として入り、physics が先にそちらと繋がって「起動完了」した途端に踏んだ)。
+///
+/// ここでは publisher と購読者を**互いに孤立したまま**立ち上げ(それぞれ listen するだけで
+/// connect しない)、送信も購読宣言も済ませてから、両方へ繋ぐ 3 本目のセッションで初めて
+/// リンクを作る。ライブ経路はもう流れないので、presence を合図に問い合わせ直す経路だけが
+/// 値を運べる。
+#[tokio::test(flavor = "multi_thread")]
+async fn latched_survives_a_link_that_comes_up_late() {
+    // 1) publisher 側: 孤立したまま latched を 1 回だけ送る。
+    let alpha = cloudy(
+        open_session(&[("listen/endpoints", format!("[\"{ISLAND_A}\"]"))]).await,
+        "alpha",
+        "lab",
+    );
+    let publisher = alpha
+        .publisher::<Probe>()
+        .latched()
+        .build()
+        .expect("latched publisher");
+    publisher.send(Probe { seq: 11 }).await.expect("send");
+
+    // 2) 購読側: まだ誰とも繋がっていないので、この時点の問い合わせは必ず空振りする。
+    let beta = cloudy(
+        open_session(&[("listen/endpoints", format!("[\"{ISLAND_B}\"]"))]).await,
+        "beta",
+        "lab",
+    );
+    let mut sub = beta
+        .subscriber::<Probe>()
+        .latched()
+        .build()
+        .expect("latched subscriber");
+
+    // 3) 両方へ繋ぐ 3 本目。ここで初めて alpha の宣言が beta へ届く。
+    let _bridge = open_session(&[(
+        "connect/endpoints",
+        format!("[\"{ISLAND_A}\", \"{ISLAND_B}\"]"),
+    )])
+    .await;
+
+    let envelope = timeout(PATIENCE, sub.recv_envelope())
+        .await
+        .expect("リンクが張れた後に latched 値が届くこと")
+        .expect("stream should not end");
+    assert_eq!(envelope.value.seq, 11);
+    assert_eq!(envelope.source, "alpha");
 }

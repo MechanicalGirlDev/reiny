@@ -104,6 +104,7 @@ fn cloudy(session: zenoh::Session, id: &str) -> Cloudy {
         None,
         Vec::new(),
     )
+    .expect("cloudy")
 }
 
 const SETTLE: Duration = Duration::from_millis(600);

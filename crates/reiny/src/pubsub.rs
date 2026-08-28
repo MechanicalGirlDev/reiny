@@ -16,6 +16,7 @@ use zenoh::pubsub::{Publisher as ZPublisher, Subscriber as ZSubscriber};
 use zenoh::qos::{CongestionControl, Priority};
 use zenoh::query::{Query, Queryable, Reply};
 use zenoh::sample::{Sample, SampleKind};
+use zenoh::session::Session;
 use zenoh::time::Timestamp;
 
 use crate::shutdown::Shutdown;
@@ -109,12 +110,6 @@ impl<'a, T> PublisherBuilder<'a, T> {
         }
         let publisher = builder.wait().map_err(anyhow::Error::msg)?;
 
-        let token = session
-            .liveliness()
-            .declare_token(key.clone())
-            .wait()
-            .map_err(anyhow::Error::msg)?;
-
         let last: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
         let queryable = if self.latched {
             Some(declare_latch(
@@ -126,6 +121,15 @@ impl<'a, T> PublisherBuilder<'a, T> {
         } else {
             None
         };
+
+        // トークンは latched queryable の**後**に宣言する。購読側は presence(このトークン)を
+        // 合図に直近値を問い合わせるので、逆順だと「居るのに queryable はまだ届いていない」
+        // 一瞬に問い合わせが飛んで空振りする。同じリンク上の宣言は順序が保たれる。
+        let token = session
+            .liveliness()
+            .declare_token(key.clone())
+            .wait()
+            .map_err(anyhow::Error::msg)?;
         let schema = match T::DESCRIPTOR {
             Some(descriptor) => Some(declare_schema(self.cloudy, &key, descriptor)?),
             None => None,
@@ -273,8 +277,14 @@ impl<'a, T> SubscriberBuilder<'a, T> {
         self
     }
 
-    /// 宣言した直後に latched publisher へ 1 回問い合わせ、直近値を受け取ってから
-    /// ライブ購読に入る。
+    /// latched publisher の直近値を受け取ってからライブ購読に入る。
+    ///
+    /// 問い合わせ(`get`)は**宣言直後ではなく、その型の publisher の presence を見てから**撃つ。
+    /// `get` はその瞬間のルーティング表しか見ないので、宣言直後に撃つと「セッションは開いたが
+    /// publisher が居る peer とのリンクがまだ張れていない」一瞬に空振りし、**publisher が
+    /// 再送しない限り恒久的に黙る**(latched の存在意義そのものが消える)。presence は
+    /// liveliness の**購読**なので、後から張れたリンクの宣言もちゃんと届く —— この非対称性が
+    /// 穴を塞ぐ。publisher が増えるたびに、その id へ 1 回だけ問い合わせ直す。
     pub fn latched(mut self) -> Self {
         self.latched = true;
         self
@@ -316,9 +326,10 @@ impl<'a, T> SubscriberBuilder<'a, T> {
             ),
         };
 
-        // 宣言の**後**に撃つ。先に撃つと、応答を待つ間に流れたライブ sample を落とす。
-        let latched = if self.latched {
-            Some(session.get(&key).wait().map_err(anyhow::Error::msg)?)
+        // latched の問い合わせは presence を待ってから撃つ(`latched()` のコメント参照)。
+        // 購読の**後**に見張り始めるので、応答を待つ間に流れたライブ sample も落とさない。
+        let presence = if self.latched {
+            Some(self.cloudy.watch_key::<T>(key.clone())?)
         } else {
             None
         };
@@ -326,8 +337,13 @@ impl<'a, T> SubscriberBuilder<'a, T> {
         tracing::debug!(key = %key, latched = self.latched, latest = ?self.latest, "subscriber declared");
         Ok(Subscriber {
             subscriber,
-            latched,
-            latched_done: !self.latched,
+            session: session.clone(),
+            key,
+            latched: None,
+            latched_done: true,
+            presence,
+            presence_done: !self.latched,
+            queried: HashSet::new(),
             seen: HashSet::new(),
             warned: HashSet::new(),
             shutdown: self.cloudy.shutdown_handle(),
@@ -378,10 +394,19 @@ pub struct Subscriber<T> {
     // フィールド名が型名と重なるが、内側の zenoh subscriber を素直に指す名前。
     #[allow(clippy::struct_field_names)]
     subscriber: Chan,
-    /// latched 問い合わせの応答チャネル(撃った場合のみ)。
+    /// latched の問い合わせを撃ち直すための材料(セッションと購読キー)。
+    session: Session,
+    key: String,
+    /// いま飛んでいる latched 問い合わせの応答チャネル(presence を見て撃つ)。
     latched: Option<FifoChannelHandler<Reply>>,
-    /// 応答チャネルを読み切ったか。latched でなければ最初から true。
+    /// 応答チャネルを読み切ったか。撃っていなければ true。
     latched_done: bool,
+    /// latched のとき、publisher の参加 / 離脱を見張るストリーム。
+    presence: Option<Presence<T>>,
+    /// presence ストリームが終端したか。latched でなければ最初から true。
+    presence_done: bool,
+    /// 直近値を既に問い合わせた publisher id(離脱したら忘れ、復帰時に撃ち直す)。
+    queried: HashSet<String>,
     /// ライブ sample を配り終えた送信元。latched 応答がこれより後に届いたら捨てる。
     seen: HashSet<String>,
     /// スキーマ指紋の不一致を既に警告した送信元(送信元ごとに 1 度だけ鳴らす)。
@@ -403,8 +428,13 @@ impl<T: Message + Default + Topic> Subscriber<T> {
     pub async fn recv_envelope(&mut self) -> Option<Envelope<T>> {
         let Self {
             subscriber,
+            session,
+            key,
             latched,
             latched_done,
+            presence,
+            presence_done,
+            queried,
             seen,
             warned,
             shutdown,
@@ -414,6 +444,24 @@ impl<T: Message + Default + Topic> Subscriber<T> {
             tokio::select! {
                 biased;
                 () = shutdown.wait() => return None,
+                // publisher が見えた合図。その id へ 1 回だけ直近値を問い合わせる。
+                event = recv_presence(presence.as_mut()), if !*presence_done => {
+                    match event {
+                        Some(PresenceEvent::Joined(id)) => {
+                            if queried.insert(id) {
+                                match session.get(&*key).wait() {
+                                    Ok(replies) => {
+                                        *latched = Some(replies);
+                                        *latched_done = false;
+                                    }
+                                    Err(e) => tracing::warn!(key = %key, error = %e, "latched get failed"),
+                                }
+                            }
+                        }
+                        Some(PresenceEvent::Left(id)) => { queried.remove(&id); }
+                        None => *presence_done = true,
+                    }
+                }
                 // latched 応答を先に流す(短命なチャネルなので飢餓は起きない)。
                 reply = recv_reply(latched.as_ref()), if !*latched_done => {
                     let Some(reply) = reply else {
@@ -436,7 +484,8 @@ impl<T: Message + Default + Topic> Subscriber<T> {
                 sample = subscriber.recv_async() => {
                     let sample = sample?; // channel closed
                     let source = source_of(sample.key_expr().as_str()).to_string();
-                    if !*latched_done {
+                    // latched を見張っている間だけ覚える(遅れて届いた直近値を捨てるため)。
+                    if !*presence_done {
                         seen.insert(source.clone());
                     }
                     if !schema_matches::<T>(&sample, &source, warned) {
@@ -456,6 +505,14 @@ impl<T: Message + Default + Topic> Subscriber<T> {
 async fn recv_reply(handler: Option<&FifoChannelHandler<Reply>>) -> Option<Reply> {
     match handler {
         Some(h) => h.recv_async().await.ok(),
+        None => std::future::pending().await,
+    }
+}
+
+/// [`recv_reply`] の presence 版。latched でない購読では `None` = `pending`。
+async fn recv_presence<T>(presence: Option<&mut Presence<T>>) -> Option<PresenceEvent> {
+    match presence {
+        Some(p) => p.recv().await,
         None => std::future::pending().await,
     }
 }

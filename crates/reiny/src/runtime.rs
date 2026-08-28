@@ -216,7 +216,7 @@ where
             shutdown,
             config,
             opts.extra_args,
-        );
+        )?;
         user(cloudy).await
     })
 }

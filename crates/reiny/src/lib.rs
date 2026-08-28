@@ -99,6 +99,10 @@ pub const DEFAULT_DOMAIN: &str = "default";
 /// 混ざらないようにするため。`@` 始まりは `*` / `**` のどちらにもマッチしない。
 pub(crate) const SERVICE_CHUNK: &str = "@service";
 
+/// grain そのものの presence トークン(`reiny/<domain>/<id>/@grain`)。publisher を 1 つも
+/// 持たない grain も `reiny node list` に出すため。同じく verbatim。
+pub(crate) const GRAIN_CHUNK: &str = "@grain";
+
 /// 型 → トピックの対応。`reiny-build` が `Reiny.toml` を読んで各メッセージ型に impl する。
 ///
 /// トピックは **型でアドレスする**。型 `Ping` は `reiny/<domain>/<id>/Ping` へ publish され、
@@ -156,6 +160,8 @@ pub struct Cloudy {
     id: String,
     domain: String,
     shutdown: Shutdown,
+    /// grain の presence トークン(保持するだけ。プロセスが落ちれば消える)。
+    _grain: zenoh::liveliness::LivelinessToken,
     /// `--config <path>` で渡された設定ファイルを parse したもの(無ければ `None`)。
     /// `reiny-build` 生成の `config()` 拡張(per-project の `[config]`)が読む。
     config: Option<toml::Table>,
@@ -164,7 +170,8 @@ pub struct Cloudy {
 }
 
 impl Cloudy {
-    /// ランタイム内部から構築する([`run_with`] 用)。
+    /// ランタイム内部から構築する([`run_with`] 用)。`@grain` トークンを立て、同じ id の grain が
+    /// 既に居れば警告する(エラーにはしない —— `bag play --as` のような意図的な成り代わりがある)。
     fn new(
         session: Session,
         id: String,
@@ -172,15 +179,36 @@ impl Cloudy {
         shutdown: Shutdown,
         config: Option<toml::Table>,
         extra_args: Vec<String>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let grain_key = format!("{KEY_ROOT}/{domain}/{id}/{GRAIN_CHUNK}");
+        if let Ok(replies) = session
+            .liveliness()
+            .get(&grain_key)
+            .timeout(std::time::Duration::from_millis(300))
+            .wait()
+            && replies.iter().any(|r| r.result().is_ok())
+        {
+            tracing::warn!(
+                id,
+                domain,
+                "another grain with the same id is already on the bus; \
+                 both will publish under the same keys"
+            );
+        }
+        let grain = session
+            .liveliness()
+            .declare_token(grain_key)
+            .wait()
+            .map_err(anyhow::Error::msg)?;
+        Ok(Self {
             session,
             id,
             domain,
             shutdown,
+            _grain: grain,
             config,
             extra_args,
-        }
+        })
     }
 
     /// 型 `T` の publisher を作る。自分の `reiny/<domain>/<id>/<T::TYPE>` へ発行する。
@@ -248,7 +276,7 @@ impl Cloudy {
     }
 
     /// liveliness キー `key` の参加 / 離脱ストリーム(宣言済みは `Joined` として最初に流れる)。
-    fn watch_key<T>(&self, key: String) -> Result<Presence<T>> {
+    pub(crate) fn watch_key<T>(&self, key: String) -> Result<Presence<T>> {
         let sub = self
             .session
             .liveliness()
