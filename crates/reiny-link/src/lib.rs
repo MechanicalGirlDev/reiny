@@ -51,6 +51,9 @@
 //! }
 //! ```
 //!
+//! feature `engine`(既定)で [`LinkEngine`] が付く: `Host` を reiny の `Engine` にして、
+//! `Cloudy` をリンクの上に置く(`reiny bridge serial …` の中身)。
+//!
 //! 設計と wire 形式の理由は `docs/design/0.5.0.md` §3。
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -61,10 +64,14 @@ pub mod wire;
 pub use link::{Error, Event, Frame, ID_MAX, Link, LinkConfig, RemoteType, Stats};
 pub use reiny_core::{Descriptor, Service, Topic};
 
+#[cfg(feature = "engine")]
+mod engine;
 #[cfg(feature = "std")]
 mod host;
 #[cfg(feature = "std")]
 pub mod transport;
 
+#[cfg(feature = "engine")]
+pub use engine::LinkEngine;
 #[cfg(feature = "std")]
 pub use host::{CallError, Host, HostEvent, HostLink, PeerType};

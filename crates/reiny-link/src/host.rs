@@ -125,10 +125,12 @@ type Pending = Arc<Mutex<HashMap<(u32, u8), oneshot::Sender<Result<Vec<u8>, Stri
 type Peer = Arc<Mutex<Option<(String, Vec<PeerType>)>>>;
 
 /// 1 本のリンクのホスト側。drop するとドライバも止まる。
+///
+/// 全メソッドが `&self` なので `Arc` で共有できる(`recv` の受け手は tokio の mutex で 1 つ)。
 pub struct Host {
     link: Arc<Mutex<HostLink>>,
     wake: Arc<Notify>,
-    events: mpsc::Receiver<HostEvent>,
+    events: tokio::sync::Mutex<mpsc::Receiver<HostEvent>>,
     pending: Pending,
     peer: Peer,
     task: JoinHandle<io::Result<()>>,
@@ -153,21 +155,29 @@ impl Host {
         Self {
             link,
             wake,
-            events,
+            events: tokio::sync::Mutex::new(events),
             pending,
             peer,
             task,
         }
     }
 
-    /// 次の出来事。ドライバが止まったら `None`。
-    pub async fn recv(&mut self) -> Option<HostEvent> {
-        self.events.recv().await
+    /// 次の出来事。ドライバが止まったら `None`。cancel-safe(取り出した出来事を await 地点に
+    /// 抱えない)。
+    pub async fn recv(&self) -> Option<HostEvent> {
+        self.events.lock().await.recv().await
     }
 
     /// 型 `T` を送る。相手が購読していなければ `Ok(false)`。
     pub fn send<T: Topic + Message>(&self, msg: &T) -> Result<bool, Error> {
         let sent = lock(&self.link).send(msg)?;
+        self.wake.notify_one();
+        Ok(sent)
+    }
+
+    /// [`Host::send`] の encode 済み版(型ハッシュ + prost の bytes)。
+    pub fn send_raw(&self, hash: u32, payload: &[u8]) -> Result<bool, Error> {
+        let sent = lock(&self.link).send_raw(hash, payload)?;
         self.wake.notify_one();
         Ok(sent)
     }
@@ -178,13 +188,25 @@ impl Host {
         req: &S,
         timeout: Duration,
     ) -> Result<S::Response, CallError> {
-        let hash = wire::type_hash(S::TYPE);
+        let bytes = self
+            .call_raw(wire::type_hash(S::TYPE), req.encode_to_vec(), timeout)
+            .await?;
+        S::Response::decode(bytes.as_slice()).map_err(CallError::Decode)
+    }
+
+    /// [`Host::call`] の encode 済み版。応答も prost の bytes のまま。
+    pub async fn call_raw(
+        &self,
+        hash: u32,
+        payload: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, CallError> {
         let (tx, rx) = oneshot::channel();
         let seq = {
             // request を積むのと pending に登録するのを同じ lock の中でやる —— 間にドライバが
             // 送って応答まで受け取ると、登録前の応答が捨てられる。
             let mut link = lock(&self.link);
-            let seq = link.request(req).map_err(|e| match e {
+            let seq = link.request_raw(hash, &payload).map_err(|e| match e {
                 Error::NoPeerService => CallError::NoPeerService,
                 e => CallError::Link(e),
             })?;
@@ -193,7 +215,7 @@ impl Host {
         };
         self.wake.notify_one();
         match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(Ok(bytes))) => S::Response::decode(bytes.as_slice()).map_err(CallError::Decode),
+            Ok(Ok(Ok(bytes))) => Ok(bytes),
             Ok(Ok(Err(message))) => Err(CallError::Remote(message)),
             Ok(Err(_)) => Err(CallError::Closed),
             Err(_) => {
@@ -210,9 +232,21 @@ impl Host {
         Ok(())
     }
 
+    /// [`Host::reply`] の encode 済み版。`hash` は request 型のもの。
+    pub fn reply_raw(&self, seq: u8, hash: u32, payload: &[u8]) -> Result<(), Error> {
+        lock(&self.link).reply_raw(seq, hash, payload)?;
+        self.wake.notify_one();
+        Ok(())
+    }
+
     /// [`HostEvent::Request`] にエラーで応答する。
     pub fn reply_err<S: Service>(&self, seq: u8, message: &str) -> Result<(), Error> {
-        lock(&self.link).reply_err::<S>(seq, message)?;
+        self.reply_err_raw(seq, wire::type_hash(S::TYPE), message)
+    }
+
+    /// [`Host::reply_err`] の型ハッシュ版。
+    pub fn reply_err_raw(&self, seq: u8, hash: u32, message: &str) -> Result<(), Error> {
+        lock(&self.link).reply_err_raw(seq, hash, message)?;
         self.wake.notify_one();
         Ok(())
     }

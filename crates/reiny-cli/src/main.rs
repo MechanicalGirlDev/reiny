@@ -5,6 +5,7 @@
 //! --launcher` でリネームされた配布物)のときは、引数なしで隣の `<basename>.toml` を起動する。
 
 mod bagcmd;
+mod bridgecmd;
 mod buildcmd;
 mod bus;
 mod checkcmd;
@@ -25,7 +26,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "reiny",
     version,
-    about = "reiny grain CLI: new / init / add / check / build / run / compress / bag / topic / node / service"
+    about = "reiny grain CLI: new / init / add / check / build / run / compress / bag / topic / node / service / bridge"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -108,6 +109,8 @@ enum Command {
     Node(topiccmd::NodeArgs),
     /// 生きている service の一覧・JSON での呼び出し(`ros2 service` 相当)。
     Service(servicecmd::ServiceArgs),
+    /// zenoh と別エンジン(serial / udp / iceoryx2)の間に raw bridge を立てる。
+    Bridge(bridgecmd::BridgeArgs),
 }
 
 fn main() -> Result<()> {
@@ -170,6 +173,10 @@ fn main() -> Result<()> {
             init_tracing("warn");
             servicecmd::run(service)
         }
+        Command::Bridge(bridge) => {
+            init_tracing("info");
+            bridgecmd::run(bridge)
+        }
     }
 }
 
@@ -197,9 +204,9 @@ fn renamed_launcher_config() -> Result<Option<PathBuf>> {
 
 /// 後方互換の launch 起動形を検出する。`reiny --config X` / `reiny X`(サブコマンドでない位置引数)。
 fn backward_compat_config(argv: &[String]) -> Option<PathBuf> {
-    const SUBCOMMANDS: [&str; 12] = [
+    const SUBCOMMANDS: [&str; 13] = [
         "new", "init", "add", "check", "build", "run", "compress", "bag", "topic", "node",
-        "service", "help",
+        "service", "bridge", "help",
     ];
     let first = argv.get(1)?;
     if first == "--config" {
@@ -255,7 +262,7 @@ mod tests {
     fn subcommands_are_not_backward_compat() {
         for sub in [
             "new", "init", "add", "check", "build", "run", "compress", "bag", "topic", "node",
-            "service",
+            "service", "bridge",
         ] {
             assert_eq!(backward_compat_config(&args(&[sub])), None, "{sub}");
         }

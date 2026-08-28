@@ -197,6 +197,7 @@ impl core::error::Error for Error {}
 ///
 /// 送信バッファは [`wire::encoded_max`]`(FRAME)` 以上、受信バッファは相手の `FRAME` に
 /// 合わせて同じ以上を用意する。
+#[allow(clippy::struct_excessive_bools)] // started / connected / bridge / peer_bridge は直交する旗
 pub struct Link<B, const N: usize, const FRAME: usize = 256> {
     id: IdBuf,
     peer: Option<IdBuf>,
@@ -215,6 +216,10 @@ pub struct Link<B, const N: usize, const FRAME: usize = 256> {
     config: LinkConfig,
     started: bool,
     connected: bool,
+    /// 自分は bridge(相手の宣言を鏡写しにする側。[`wire::HELLO_BRIDGE`])。
+    bridge: bool,
+    /// 相手が bridge と名乗った。
+    peer_bridge: bool,
     data_seq: u8,
     req_seq: u8,
     now_ms: u32,
@@ -246,6 +251,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
             config: LinkConfig::default(),
             started: false,
             connected: false,
+            bridge: false,
+            peer_bridge: false,
             data_seq: 0,
             req_seq: 0,
             now_ms: 0,
@@ -260,6 +267,23 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     pub fn with_config(mut self, config: LinkConfig) -> Self {
         self.config = config;
         self
+    }
+
+    /// **bridge** として振る舞う: 型を名乗らず、相手が publish する型は全部受け、相手が
+    /// subscribe する型は全部送れ、相手が呼ぶ request 型は全部 serve する(相手の宣言の鏡)。
+    /// zenoh への橋(`reiny bridge serial …`)がこれ。宣言と同じく I/O を始める前に。
+    /// bridge は自分の型表を持たないので指紋は照合しない —— 相手の Hello の指紋を、橋の先
+    /// (zenoh の attachment)へそのまま運ぶ。
+    #[must_use]
+    pub fn as_bridge(mut self) -> Self {
+        self.bridge = true;
+        self
+    }
+
+    /// 自分は bridge か。
+    #[must_use]
+    pub fn is_bridge(&self) -> bool {
+        self.bridge
     }
 
     /// 自分の id。
@@ -291,6 +315,12 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     /// request 型 `S` を serve する。
     pub fn serves<S: Service>(&mut self) -> Result<(), Error> {
         self.declare::<S>(flags::SERVE)
+    }
+
+    /// request 型 `S` を呼ぶ、と名乗る。[`Link::request`] に宣言は要らないが、相手が bridge
+    /// (zenoh への橋)のときは、これで型名が伝わって初めて橋の先の service に届く。
+    pub fn calls<S: Service>(&mut self) -> Result<(), Error> {
+        self.declare::<S>(flags::CALLS)
     }
 
     fn declare<T: Topic>(&mut self, flag: u8) -> Result<(), Error> {
@@ -425,6 +455,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
             if since_rx > self.config.timeout_ms {
                 self.connected = false;
                 self.peer = None;
+                self.peer_bridge = false;
                 self.remote = [None; N];
                 return Some(Event::Disconnected);
             }
@@ -497,9 +528,11 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
             Kind::Hello => self.on_hello(frame),
             Kind::Ping => None,
             Kind::Data => {
-                let wanted = self
-                    .local_type(frame.hash)
-                    .is_some_and(|t| t.flags & flags::SUB != 0);
+                // bridge は相手が publish するものを全部受ける(型表を持たないので指紋も見ない)。
+                let wanted = self.bridge
+                    || self
+                        .local_type(frame.hash)
+                        .is_some_and(|t| t.flags & flags::SUB != 0);
                 if !wanted {
                     self.stats.dropped_unwanted = self.stats.dropped_unwanted.wrapping_add(1);
                     return None;
@@ -511,9 +544,10 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
                 Some(Event::Data(frame))
             }
             Kind::Request => {
-                let served = self
-                    .local_type(frame.hash)
-                    .is_some_and(|t| t.flags & flags::SERVE != 0);
+                let served = self.bridge
+                    || self
+                        .local_type(frame.hash)
+                        .is_some_and(|t| t.flags & flags::SERVE != 0);
                 if served {
                     Some(Event::Request(frame))
                 } else {
@@ -529,7 +563,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
 
     /// 相手の Hello: 相手の型表を作り直し、ack でなければ ack を返す。
     fn on_hello(&mut self, frame: Frame) -> Option<Event> {
-        let (peer, remote, overflow, ack) = {
+        let (peer, remote, overflow, ack, bridge) = {
             let payload = &self.rx.as_ref()[HEADER..HEADER + usize::from(frame.len)];
             let hello = wire::hello_parse(payload).ok()?;
             let peer = IdBuf::new(hello.id).ok()?;
@@ -553,9 +587,10 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
                     overflow += 1;
                 }
             }
-            (peer, remote, overflow, hello.ack)
+            (peer, remote, overflow, hello.ack, hello.bridge)
         };
         self.peer = Some(peer);
+        self.peer_bridge = bridge;
         self.remote = remote;
         self.stats.remote_overflow = self.stats.remote_overflow.wrapping_add(overflow);
         let was_connected = self.connected;
@@ -575,32 +610,42 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     /// 型 `T` を送る。相手が `T` を subscribe していなければワイヤに出さず `Ok(false)`。
     pub fn send<T: Topic + Message>(&mut self, msg: &T) -> Result<bool, Error> {
         let hash = wire::type_hash(T::TYPE);
-        if self
-            .local_type(hash)
-            .is_none_or(|t| t.flags & flags::PUB == 0)
-        {
-            return Err(Error::NotDeclared);
-        }
-        if !self.peer_subscribes::<T>() {
+        self.check_publishes(hash)?;
+        if !self.peer_subscribes_hash(hash) {
             return Ok(false);
         }
-        let seq = self.data_seq;
-        self.data_seq = seq.wrapping_add(1);
         let len = self.encode_payload(msg)?;
-        self.emit(Kind::Data, hash, seq, len)?;
-        Ok(true)
+        self.emit_data(hash, len)
+    }
+
+    /// [`Link::send`] の encode 済み版: 型ハッシュと prost の bytes で送る(bridge が zenoh から
+    /// 受けたものをそのまま流す口)。bridge でなければ `publishes` 済みの型に限る。
+    pub fn send_raw(&mut self, hash: u32, payload: &[u8]) -> Result<bool, Error> {
+        self.check_publishes(hash)?;
+        if !self.peer_subscribes_hash(hash) {
+            return Ok(false);
+        }
+        let len = self.copy_payload(payload)?;
+        self.emit_data(hash, len)
     }
 
     /// request 型 `S` を送り、相関 id(`seq`)を返す。応答は [`Event::Reply`] / [`Event::Error`]。
     pub fn request<S: Service>(&mut self, req: &S) -> Result<u8, Error> {
-        if !self.peer_serves::<S>() {
+        let hash = wire::type_hash(S::TYPE);
+        if !self.peer_serves_hash(hash) {
             return Err(Error::NoPeerService);
         }
-        let seq = self.req_seq;
-        self.req_seq = seq.wrapping_add(1);
         let len = self.encode_payload(req)?;
-        self.emit(Kind::Request, wire::type_hash(S::TYPE), seq, len)?;
-        Ok(seq)
+        self.emit_request(hash, len)
+    }
+
+    /// [`Link::request`] の encode 済み版。
+    pub fn request_raw(&mut self, hash: u32, payload: &[u8]) -> Result<u8, Error> {
+        if !self.peer_serves_hash(hash) {
+            return Err(Error::NoPeerService);
+        }
+        let len = self.copy_payload(payload)?;
+        self.emit_request(hash, len)
     }
 
     /// [`Event::Request`] に応答する。`seq` は request フレームのもの。
@@ -609,9 +654,45 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         self.emit(Kind::Reply, wire::type_hash(S::TYPE), seq, len)
     }
 
+    /// [`Link::reply`] の encode 済み版。`hash` は request 型のもの。
+    pub fn reply_raw(&mut self, seq: u8, hash: u32, payload: &[u8]) -> Result<(), Error> {
+        let len = self.copy_payload(payload)?;
+        self.emit(Kind::Reply, hash, seq, len)
+    }
+
     /// [`Event::Request`] にエラーで応答する。
     pub fn reply_err<S: Service>(&mut self, seq: u8, message: &str) -> Result<(), Error> {
         self.emit_error(wire::type_hash(S::TYPE), seq, message)
+    }
+
+    /// [`Link::reply_err`] の型ハッシュ版。
+    pub fn reply_err_raw(&mut self, seq: u8, hash: u32, message: &str) -> Result<(), Error> {
+        self.emit_error(hash, seq, message)
+    }
+
+    fn check_publishes(&self, hash: u32) -> Result<(), Error> {
+        if !self.bridge
+            && self
+                .local_type(hash)
+                .is_none_or(|t| t.flags & flags::PUB == 0)
+        {
+            return Err(Error::NotDeclared);
+        }
+        Ok(())
+    }
+
+    fn emit_data(&mut self, hash: u32, len: usize) -> Result<bool, Error> {
+        let seq = self.data_seq;
+        self.data_seq = seq.wrapping_add(1);
+        self.emit(Kind::Data, hash, seq, len)?;
+        Ok(true)
+    }
+
+    fn emit_request(&mut self, hash: u32, len: usize) -> Result<u8, Error> {
+        let seq = self.req_seq;
+        self.req_seq = seq.wrapping_add(1);
+        self.emit(Kind::Request, hash, seq, len)?;
+        Ok(seq)
     }
 
     fn emit_error(&mut self, hash: u32, seq: u8, message: &str) -> Result<(), Error> {
@@ -630,6 +711,15 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         let mut slot: &mut [u8] = &mut self.scratch[HEADER..HEADER + len];
         msg.encode(&mut slot).map_err(|_| Error::Encode)?;
         Ok(len)
+    }
+
+    /// encode 済みの bytes を `scratch[HEADER..]` に写し、payload 長を返す。
+    fn copy_payload(&mut self, payload: &[u8]) -> Result<usize, Error> {
+        if payload.len() > FRAME.saturating_sub(OVERHEAD) {
+            return Err(Error::TooLarge);
+        }
+        self.scratch[HEADER..HEADER + payload.len()].copy_from_slice(payload);
+        Ok(payload.len())
     }
 
     /// `scratch` の payload を header + CRC で封じ、COBS で包んで送信バッファへ積む。
@@ -659,8 +749,14 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
             schema: t.schema,
             name: t.name,
         });
-        let len = wire::hello_write(&mut self.scratch[HEADER..], ack, self.id.as_str(), entries)
-            .map_err(|_| Error::TooLarge)?;
+        let len = wire::hello_write(
+            &mut self.scratch[HEADER..],
+            ack,
+            self.bridge,
+            self.id.as_str(),
+            entries,
+        )
+        .map_err(|_| Error::TooLarge)?;
         self.emit(Kind::Hello, 0, 0, len)
     }
 
@@ -753,22 +849,42 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         self.remote.iter().flatten()
     }
 
-    /// 相手が型 `T` を subscribe しているか(未接続なら false)。
+    /// 相手は bridge か(未接続なら false)。bridge は何でも subscribe / serve する。
     #[must_use]
-    pub fn peer_subscribes<T: Topic>(&self) -> bool {
-        self.connected
-            && self
-                .remote_type(wire::type_hash(T::TYPE))
-                .is_some_and(|t| t.flags & flags::SUB != 0)
+    pub fn peer_is_bridge(&self) -> bool {
+        self.connected && self.peer_bridge
     }
 
-    /// 相手が request 型 `T` を serve しているか(未接続なら false)。
+    /// 相手が型 `T` を subscribe しているか(未接続なら false、bridge なら true)。
+    #[must_use]
+    pub fn peer_subscribes<T: Topic>(&self) -> bool {
+        self.peer_subscribes_hash(wire::type_hash(T::TYPE))
+    }
+
+    /// [`Link::peer_subscribes`] の型ハッシュ版。
+    #[must_use]
+    pub fn peer_subscribes_hash(&self, hash: u32) -> bool {
+        self.connected
+            && (self.peer_bridge
+                || self
+                    .remote_type(hash)
+                    .is_some_and(|t| t.flags & flags::SUB != 0))
+    }
+
+    /// 相手が request 型 `T` を serve しているか(未接続なら false、bridge なら true)。
     #[must_use]
     pub fn peer_serves<T: Topic>(&self) -> bool {
+        self.peer_serves_hash(wire::type_hash(T::TYPE))
+    }
+
+    /// [`Link::peer_serves`] の型ハッシュ版。
+    #[must_use]
+    pub fn peer_serves_hash(&self, hash: u32) -> bool {
         self.connected
-            && self
-                .remote_type(wire::type_hash(T::TYPE))
-                .is_some_and(|t| t.flags & flags::SERVE != 0)
+            && (self.peer_bridge
+                || self
+                    .remote_type(hash)
+                    .is_some_and(|t| t.flags & flags::SERVE != 0))
     }
 
     /// 捨てたものの数。
@@ -1145,6 +1261,70 @@ mod tests {
         // FRAME = 32 に 40 バイトの payload は入らない。
         let long = "y".repeat(40);
         assert_eq!(small.reply_err::<Add>(0, &long), Err(Error::Full));
+    }
+
+    #[test]
+    fn bridge_mirrors_the_peer_without_declaring_anything() {
+        let mut mcu = link("mcu");
+        mcu.publishes_latched::<Pos>().unwrap();
+        mcu.subscribes::<Cmd>().unwrap();
+        mcu.serves::<Add>().unwrap();
+        let mut bridge = link("bridge").as_bridge();
+        connect(&mut mcu, &mut bridge);
+        assert!(mcu.peer_is_bridge() && !bridge.peer_is_bridge());
+        // bridge は何でも受ける / 送れる / serve する。
+        assert!(mcu.peer_subscribes::<Pos>() && mcu.peer_serves::<Add>());
+        assert!(bridge.peer_subscribes::<Cmd>() && !bridge.peer_subscribes::<Pos>());
+
+        assert_eq!(mcu.send(&Pos { x: 5 }), Ok(true));
+        while pump(&mut mcu, &mut bridge) {}
+        let Some(Event::Data(f)) = bridge.next() else {
+            panic!("bridge should receive undeclared data")
+        };
+        assert_eq!(f.hash, wire::type_hash("Pos"));
+        assert_eq!(bridge.decode::<Pos>(&f), Some(Pos { x: 5 }));
+
+        let cmd = Cmd { v: 3 }.encode_to_vec();
+        assert_eq!(bridge.send_raw(wire::type_hash("Cmd"), &cmd), Ok(true));
+        assert_eq!(bridge.send_raw(wire::type_hash("Pos"), &cmd), Ok(false));
+        while pump(&mut mcu, &mut bridge) {}
+        let Some(Event::Data(f)) = mcu.next() else {
+            panic!("mcu should receive cmd")
+        };
+        assert_eq!(mcu.decode::<Cmd>(&f), Some(Cmd { v: 3 }));
+
+        // bridge → mcu の service 呼び出し(raw)。
+        let req = Add { a: 2, b: 3 }.encode_to_vec();
+        let seq = bridge.request_raw(wire::type_hash("Add"), &req).unwrap();
+        while pump(&mut mcu, &mut bridge) {}
+        let Some(Event::Request(r)) = mcu.next() else {
+            panic!("mcu should receive request")
+        };
+        mcu.reply::<Add>(r.seq, &Sum { s: 5 }).unwrap();
+        while pump(&mut mcu, &mut bridge) {}
+        let Some(Event::Reply(rep)) = bridge.next() else {
+            panic!("bridge should receive reply")
+        };
+        assert_eq!(rep.seq, seq);
+        assert_eq!(Sum::decode(bridge.payload(&rep)), Ok(Sum { s: 5 }));
+
+        // mcu → bridge の service 呼び出し: bridge は serve していない型の request も受ける。
+        let seq = mcu.request(&Add { a: 1, b: 1 }).unwrap();
+        while pump(&mut mcu, &mut bridge) {}
+        let Some(Event::Request(r)) = bridge.next() else {
+            panic!("bridge should receive any request")
+        };
+        assert_eq!(Add::decode(bridge.payload(&r)), Ok(Add { a: 1, b: 1 }));
+        bridge
+            .reply_raw(r.seq, r.hash, &Sum { s: 2 }.encode_to_vec())
+            .unwrap();
+        while pump(&mut mcu, &mut bridge) {}
+        let Some(Event::Reply(rep)) = mcu.next() else {
+            panic!("mcu should receive reply")
+        };
+        assert_eq!(rep.seq, seq);
+        assert_eq!(mcu.decode_reply::<Add>(&rep), Some(Sum { s: 2 }));
+        assert_eq!(bridge.stats().dropped_unwanted, 0);
     }
 
     /// `Pos` と同じ `TYPE`(同じハッシュ・同じ名前)。

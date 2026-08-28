@@ -72,11 +72,11 @@ pub struct Key {
     pub domain: String,
     /// 送信元 grain id。`None` = 全部(`*`)。
     pub source: Option<String>,
-    /// 型セグメント([`Topic::TYPE`](crate::Topic::TYPE))。`None` = 全部(`*`)、ただし
-    /// `chunk` だけのキー(`@grain`)では「無し」。
+    /// 型セグメント([`Topic::TYPE`](crate::Topic::TYPE))。`None` = 全部(`*`)。grain の
+    /// トークンは型の位置に verbatim の `@grain` を置く(`*` にはマッチしない)。
     pub ty: Option<String>,
-    /// verbatim チャンク(`@service` / `@grain` / `@schema/<message>`)。`*` にも `**` にも
-    /// マッチしない —— 型のトピックを汚さないための隔離。
+    /// 型の後ろの verbatim チャンク(`@service` / `@schema/<message>`)。`*` にも `**` にも
+    /// マッチしない —— 型のトピックを汚さないための隔離。パターンでも完全一致。
     pub chunk: Option<String>,
 }
 
@@ -92,15 +92,32 @@ impl Key {
         }
     }
 
-    /// grain の presence トークン `reiny/<domain>/<id>/@grain`。
+    /// grain の presence トークン `reiny/<domain>/<id>/@grain`(`id: None` は全 grain)。
     #[must_use]
     pub fn grain(domain: &str, id: Option<&str>) -> Self {
         Self {
             domain: domain.to_string(),
             source: id.map(str::to_string),
-            ty: None,
-            chunk: Some(GRAIN_CHUNK.to_string()),
+            ty: Some(GRAIN_CHUNK.to_string()),
+            chunk: None,
         }
+    }
+
+    /// 全 source・全型のパターン `reiny/<domain>/*/*`(verbatim は含まない)。
+    #[must_use]
+    pub fn all(domain: &str) -> Self {
+        Self {
+            domain: domain.to_string(),
+            source: None,
+            ty: None,
+            chunk: None,
+        }
+    }
+
+    /// 型の位置が verbatim(`@grain`)か。
+    #[must_use]
+    pub fn is_verbatim_type(&self) -> bool {
+        self.ty.as_deref().is_some_and(|t| t.starts_with('@'))
     }
 
     /// チャンクを付けた複製。
@@ -121,32 +138,31 @@ impl Key {
         }
         let domain = parts.next()?.to_string();
         let source = wildcard_to_none(parts.next()?);
-        let rest: Vec<&str> = parts.collect();
-        let (ty, chunk) = match rest.split_first() {
-            None => return None,
-            Some((first, _)) if first.starts_with('@') => (None, Some(rest.join("/"))),
-            Some((first, tail)) => (
-                wildcard_to_none(first),
-                (!tail.is_empty()).then(|| tail.join("/")),
-            ),
-        };
+        let ty = wildcard_to_none(parts.next()?);
+        let tail: Vec<&str> = parts.collect();
         Some(Self {
             domain,
             source,
             ty,
-            chunk,
+            chunk: (!tail.is_empty()).then(|| tail.join("/")),
         })
     }
 
-    /// `self` をパターンとして `key` がマッチするか(`None` のセグメントは `*`、chunk は完全一致)。
+    /// `self` をパターンとして `key` がマッチするか。`None` のセグメントは `*` で、型の `*` は
+    /// verbatim(`@grain`)にマッチしない。chunk は完全一致。
     #[must_use]
     pub fn matches(&self, key: &Key) -> bool {
+        let ty_ok = match (&self.ty, &key.ty) {
+            (None, Some(t)) => !t.starts_with('@'),
+            (None, None) => true,
+            (Some(p), other) => other.as_ref() == Some(p),
+        };
         self.domain == key.domain
             && self
                 .source
                 .as_ref()
                 .is_none_or(|s| key.source.as_ref() == Some(s))
-            && self.ty.as_ref().is_none_or(|t| key.ty.as_ref() == Some(t))
+            && ty_ok
             && self.chunk == key.chunk
     }
 }
@@ -159,15 +175,11 @@ impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{KEY_ROOT}/{}/{}",
+            "{KEY_ROOT}/{}/{}/{}",
             self.domain,
-            self.source.as_deref().unwrap_or("*")
+            self.source.as_deref().unwrap_or("*"),
+            self.ty.as_deref().unwrap_or("*")
         )?;
-        match (&self.ty, &self.chunk) {
-            (Some(ty), _) => write!(f, "/{ty}")?,
-            (None, None) => write!(f, "/*")?,
-            (None, Some(_)) => {}
-        }
         if let Some(chunk) = &self.chunk {
             write!(f, "/{chunk}")?;
         }
@@ -330,7 +342,14 @@ mod tests {
             Some("ctrl")
         );
         assert_eq!(Key::parse("reiny/lab/*/RobotState").unwrap().source, None);
-        assert_eq!(Key::parse("reiny/lab/ctrl/@grain").unwrap().ty, None);
+        assert_eq!(
+            Key::parse("reiny/lab/ctrl/@grain").unwrap(),
+            Key::grain("lab", Some("ctrl"))
+        );
+        assert_eq!(
+            Key::parse("reiny/lab/*/*/@service").unwrap(),
+            Key::all("lab").with_chunk(SERVICE_CHUNK)
+        );
         for bad in [
             "",
             "reiny",
@@ -350,8 +369,13 @@ mod tests {
         assert!(!any.matches(&Key::topic("other", Some("a"), "T")));
         assert!(!any.matches(&Key::topic("lab", Some("a"), "T").with_chunk(SERVICE_CHUNK)));
         assert!(Key::grain("lab", None).matches(&Key::grain("lab", Some("a"))));
-        let all = Key::parse("reiny/lab/*/*").unwrap();
+        let all = Key::all("lab");
+        assert_eq!(all.to_string(), "reiny/lab/*/*");
         assert!(all.matches(&Key::topic("lab", Some("a"), "T")));
-        assert!(!all.matches(&Key::grain("lab", Some("a"))));
+        assert!(!all.matches(&Key::grain("lab", Some("a"))), "verbatim");
+        assert!(!all.matches(&Key::topic("lab", Some("a"), "T").with_chunk(SERVICE_CHUNK)));
+        let services = all.with_chunk(SERVICE_CHUNK);
+        assert!(services.matches(&Key::topic("lab", Some("a"), "T").with_chunk(SERVICE_CHUNK)));
+        assert!(!services.matches(&Key::topic("lab", Some("a"), "T")));
     }
 }

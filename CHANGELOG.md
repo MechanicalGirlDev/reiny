@@ -87,10 +87,45 @@ piece that does not depend on it.
   workspace's `default-members`: `cargo test` at the root skips it, CI runs
   `cargo test --workspace`, and locally it is `cargo test -p reiny-iceoryx2`.
 
+- **`reiny::bridge::forward(a, b)`** — a raw bridge between two engines
+  held by two `Cloudy`s with the same id / domain (`Cloudy::with_engine`
+  builds the second). It mirrors presence tokens with the *original* source,
+  forwards samples of every type it has seen a token for (attachment =
+  fingerprint included), and relays queries — latched and services alike — by
+  registering a responder per mirrored key and re-issuing each query to the
+  *exact* source on the other side, which is what keeps `*` queries from
+  bouncing. One echo rule: anything seen on a side that came from a source
+  the bridge itself injected there is dropped. Tested `Local` ↔ `Local`.
+- **`reiny-link` bridge mode and `LinkEngine`.** `Link::as_bridge()` sends a
+  Hello with the new `HELLO_BRIDGE` flag: the peer treats a bridge as
+  subscribing to, publishing and serving everything, and the bridge accepts
+  any Data / Request without declaring types. `Link::calls::<S>()` (flag
+  `CALLS`) lets an MCU name the request types it calls, which a bridge needs
+  to route them. Raw (`hash` + bytes) variants `send_raw` / `request_raw` /
+  `reply_raw` / `reply_err_raw` on `Link` and `Host`. `LinkEngine::spawn(host,
+  domain)` (feature `engine`, default on) is the `Engine` over a `Host`: the
+  peer's Hello is the presence, its LATCHED types are cached to answer
+  latched queries, its requests reach the responder of that type, and a
+  request dropped unanswered is turned into an error reply (links have no
+  finalize). `Cloudy::open` with `engine = LinkEngine` puts a grain directly
+  on a serial / UDP link — covered by `tests/engine.rs`.
+- **`reiny bridge serial <port> | udp <bind> | iceoryx2`** — the CLI's only
+  tokio subcommand: a zenoh `Cloudy` plus the other engine, joined by
+  `bridge::forward`, so MCU and iceoryx2 grains show up in `reiny node list`
+  / `topic hz` / `bag record`. `iceoryx2` is behind the CLI feature of the
+  same name (libclang on Windows / macOS).
+
 ### Changed
 
 - `reiny::{Topic, Descriptor, Service}` are now re-exports of `reiny-core`
   (same paths; no source change downstream).
+- `reiny_link::Host::recv` takes `&self` (the receiver sits behind a tokio
+  mutex) so a `Host` can be shared in an `Arc`; `wire::hello_write` gained
+  the `bridge` argument and `wire::Hello` the `bridge` field.
+- `engine::Key` renders a grain token as `ty = "@grain"` (verbatim in the
+  type slot; `Key::grain`, `Key::all`, `Key::is_verbatim_type`), so
+  `reiny/<d>/*/*/@service` and `reiny/<d>/*/*` are expressible patterns and
+  `Key::matches` never lets `*` match a verbatim type.
 - **Breaking:** `Cloudy::session()` returns `Option<&zenoh::Session>` (`None`
   when the engine is not zenoh). `pub use zenoh`, `ZenohSource`,
   `RuntimeOptions::{zenoh, zenoh_overrides, zenoh_config}` and `session()`
@@ -118,10 +153,11 @@ piece that does not depend on it.
 
 ### Notes
 
-- Not yet: `impl Engine for Host`, `Cloudy::with_engine`, `bridge::forward`
-  and the `reiny bridge …` CLI — they arrive together with their consumer
-  (`docs/design/0.5.0.md` §9, stage 5). An `embedded-io-async` adapter was
-  left out; `feed` / `drain` is four lines.
+- Not yet: `reiny-ros2` (`docs/design/0.5.0.md` §9, stage 6). An
+  `embedded-io-async` adapter was left out; `feed` / `drain` is four lines.
+  The bridge subscribes on a side to every type it has seen a token for
+  (all sources), not only the types the other side wants — narrowing that
+  needs an engine-side "who wants this type" query that does not exist yet.
 - Publishers now default to `Reliable` (see *Changed*); a grain that relied on
   zenoh's `Drop` default for high-rate data should say `Qos::SENSOR`.
 

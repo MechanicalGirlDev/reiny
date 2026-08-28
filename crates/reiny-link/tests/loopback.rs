@@ -158,7 +158,7 @@ async fn udp_loopback() {
 #[tokio::test]
 async fn stream_eof_closes_host() {
     let (a, b) = tokio::io::duplex(4096);
-    let mut host = Host::spawn(pc_link(), Stream(a));
+    let host = Host::spawn(pc_link(), Stream(a));
     drop(b);
     // 相手が消えた stream は EOF → ドライバが終わり、recv は None。
     assert_eq!(timeout(WAIT, host.recv()).await.unwrap(), None);

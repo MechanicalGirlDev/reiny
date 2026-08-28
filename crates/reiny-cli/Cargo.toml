@@ -14,8 +14,16 @@ categories = ["command-line-utilities", "development-tools"]
 name = "reiny"
 path = "src/main.rs"
 
+[features]
+# `reiny bridge iceoryx2`。iceoryx2 は Windows / macOS で libclang が要るので opt-in。
+iceoryx2 = ["dep:reiny-iceoryx2"]
+
 [dependencies]
 reiny-launch = { path = "../reiny-launch", version = "0.4.0" }
+# `reiny bridge serial|udp`(LinkEngine)と、その tokio runtime。
+reiny-link = { path = "../reiny-link", version = "0.4.0" }
+reiny-iceoryx2 = { path = "../reiny-iceoryx2", version = "0.4.0", optional = true }
+tokio = { workspace = true }
 # Reiny.toml の解決・型/トピック導出(`reiny check`)と、`@schema` 応答の descriptor 読み取り
 # (`reiny bag record`)。prost-build / protoc は引かない。
 reiny-build = { path = "../reiny-build", version = "0.4.0", default-features = false, features = ["descriptors"] }

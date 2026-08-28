@@ -11,14 +11,20 @@ keywords = ["reiny", "serial", "udp", "no-std", "embedded"]
 categories = ["network-programming", "embedded", "no-std"]
 
 [features]
-default = ["std", "serial"]
+default = ["std", "serial", "engine"]
 # ホスト側: `Transport` trait・`Stream` / `Udp`・tokio で `Link` を回す `Host`。
 std = ["dep:tokio", "prost/std", "cobs/std"]
 # `transport::serial::open`(tokio-serial)。`std` を含む。
 serial = ["std", "dep:tokio-serial"]
+# `LinkEngine`: `Host` を reiny の `Engine` として(`Cloudy` をリンクの上に置く / `reiny bridge`)。
+engine = ["std", "dep:reiny", "dep:tracing", "dep:anyhow"]
 
 [dependencies]
 reiny-core = { path = "../reiny-core", version = "0.4.0" }
+# `Engine` trait だけ(zenoh は引かない)。
+reiny = { path = "../reiny", version = "0.4.0", default-features = false, optional = true }
+tracing = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
 # no_std の prost(alloc は要る)。ワークスペースの `prost` は std 前提なので継承しない。
 prost = { version = "0.13", default-features = false }
 # フレーミング(COBS)と CRC-16/KERMIT。どちらも no_std、依存 0。
@@ -32,6 +38,10 @@ tokio-serial = { version = "5.5", optional = true }
 # テスト用 wire 型を `#[derive(prost::Message)]` で書くため。
 prost = { version = "0.13", features = ["derive"] }
 tokio = { workspace = true }
+
+[[test]]
+name = "engine"
+required-features = ["engine"]
 
 [lints]
 workspace = true

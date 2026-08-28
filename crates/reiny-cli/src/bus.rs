@@ -39,10 +39,11 @@ pub(crate) struct BusArgs {
 }
 
 impl BusArgs {
-    /// fabric 引数から (zenoh セッション, 解決済み domain) を組む。`RuntimeOptions` を経由するので
-    /// 既定値・`REINY_DOMAIN`・`--connect` の json5 化は grain と同じ経路になる。
-    pub(crate) fn open(&self) -> Result<(zenoh::Session, String)> {
-        let mut opts = RuntimeOptions::new("reiny-cli");
+    /// fabric 引数を grain と同じ `RuntimeOptions` に写す(既定値・`REINY_DOMAIN`・`--connect`
+    /// の json5 化が grain と同じ経路になる)。tracing は CLI 側で入れるので off。
+    pub(crate) fn runtime_options(&self, id: &str) -> RuntimeOptions {
+        let mut opts = RuntimeOptions::new(id);
+        opts.install_tracing = false;
         if let Some(d) = &self.domain {
             opts.domain.clone_from(d);
         }
@@ -63,6 +64,12 @@ impl BusArgs {
             opts.zenoh_overrides
                 .push(("mode".to_string(), format!("\"{m}\"")));
         }
+        opts
+    }
+
+    /// fabric 引数から (zenoh セッション, 解決済み domain) を組む。
+    pub(crate) fn open(&self) -> Result<(zenoh::Session, String)> {
+        let opts = self.runtime_options("reiny-cli");
         let config = opts.zenoh_config()?;
         let session = zenoh::open(config)
             .wait()

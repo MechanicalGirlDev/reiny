@@ -2686,9 +2686,12 @@ dependencies = [
  "prost-types",
  "reiny",
  "reiny-build",
+ "reiny-iceoryx2",
  "reiny-launch",
+ "reiny-link",
  "serde",
  "serde_json",
+ "tokio",
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
@@ -2731,12 +2734,15 @@ dependencies = [
 name = "reiny-link"
 version = "0.4.0"
 dependencies = [
+ "anyhow",
  "cobs 0.5.1",
  "crc",
  "prost",
+ "reiny",
  "reiny-core",
  "tokio",
  "tokio-serial",
+ "tracing",
 ]
 
 [[package]]

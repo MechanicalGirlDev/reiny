@@ -187,6 +187,10 @@ pub fn decode_in_place(buf: &mut [u8]) -> Result<usize, WireError> {
 
 /// Hello の先頭バイトのビット: 相手の Hello への応答である(応答に応答しないため)。
 pub const HELLO_ACK: u8 = 0x01;
+/// Hello の先頭バイトのビット: 送り手は **bridge** —— 相手が publish する型は全部 subscribe し、
+/// 相手が subscribe する型は全部 publish でき、相手が呼ぶ request 型は全部 serve する。型を
+/// 名乗らずに相手の宣言を鏡写しにする側(zenoh への橋)のための印。
+pub const HELLO_BRIDGE: u8 = 0x02;
 
 /// Hello の各型エントリのフラグ。
 pub mod flags {
@@ -200,6 +204,8 @@ pub mod flags {
     pub const LATCHED: u8 = 8;
     /// `schema` が有効(`Topic::SCHEMA` が `Some`)。
     pub const SCHEMA: u8 = 16;
+    /// この request 型を呼ぶ(`Link::calls`)。相手が bridge のとき、型名を知らせるためだけの印。
+    pub const CALLS: u8 = 32;
 }
 
 /// Hello に載る型 1 つ分。
@@ -223,11 +229,12 @@ pub struct HelloEntry<'a> {
 pub fn hello_write<'a>(
     out: &mut [u8],
     ack: bool,
+    bridge: bool,
     id: &str,
     entries: impl Iterator<Item = HelloEntry<'a>>,
 ) -> Result<usize, WireError> {
     let mut w = Writer { out, pos: 0 };
-    w.u8(if ack { HELLO_ACK } else { 0 })?;
+    w.u8(if ack { HELLO_ACK } else { 0 } | if bridge { HELLO_BRIDGE } else { 0 })?;
     w.str(id)?;
     let count_at = w.pos;
     w.u8(0)?;
@@ -248,6 +255,8 @@ pub fn hello_write<'a>(
 pub struct Hello<'a> {
     /// 相手の Hello への応答か。
     pub ack: bool,
+    /// 相手は bridge か([`HELLO_BRIDGE`])。
+    pub bridge: bool,
     /// 相手の id。
     pub id: &'a str,
     count: usize,
@@ -307,6 +316,7 @@ pub fn hello_parse(payload: &[u8]) -> Result<Hello<'_>, WireError> {
     let count = r.u8().ok_or(WireError::Malformed)?;
     Ok(Hello {
         ack: flags & HELLO_ACK != 0,
+        bridge: flags & HELLO_BRIDGE != 0,
         id,
         count: usize::from(count),
         entries: &payload[r.pos..],
@@ -477,9 +487,9 @@ mod tests {
             },
         ];
         let mut buf = [0u8; 128];
-        let n = hello_write(&mut buf, true, "motor", entries.iter().copied()).unwrap();
+        let n = hello_write(&mut buf, true, true, "motor", entries.iter().copied()).unwrap();
         let hello = hello_parse(&buf[..n]).unwrap();
-        assert!(hello.ack);
+        assert!(hello.ack && hello.bridge);
         assert_eq!(hello.id, "motor");
         let got: Vec<HelloEntry<'_>> = hello.entries().collect();
         assert_eq!(got, entries);
@@ -490,6 +500,7 @@ mod tests {
         let mut buf = [0u8; 128];
         let n = hello_write(
             &mut buf,
+            false,
             false,
             "x",
             [HelloEntry {

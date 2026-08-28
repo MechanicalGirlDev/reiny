@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // テストは panic で失敗を表現してよい。
+pub mod bridge;
 #[cfg(all(test, feature = "zenoh"))]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod e2e;
@@ -266,6 +267,21 @@ impl Cloudy {
     #[must_use]
     pub fn engine(&self) -> &Arc<dyn Engine> {
         &self.engine
+    }
+
+    /// 同じ id / domain / シャットダウン / 設定で、**別のエンジン**の上に 2 本目を組む。
+    /// bridge(`reiny::bridge::forward`)が「zenoh の `Cloudy`」と「リンクの `Cloudy`」を
+    /// 1 プロセスに持つための口。`@grain` トークンは新しいエンジンにも立つ。
+    pub async fn with_engine(&self, engine: Arc<dyn Engine>) -> Result<Self> {
+        Self::new(
+            engine,
+            self.id.clone(),
+            self.domain.clone(),
+            self.shutdown.clone(),
+            self.config.clone(),
+            self.extra_args.clone(),
+        )
+        .await
     }
 
     /// 内部の zenoh セッション。reiny が包んでいない機能(queryable / スカウティング /
