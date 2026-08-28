@@ -43,10 +43,48 @@ piece that does not depend on it.
   `.latched()` is now spelled `durability: TransientLocal` underneath. The
   engine mapping is documented in `docs/design/0.5.0.md` §2.3.
 
+- **The `Engine` trait** (`reiny::engine`) — the five primitives reiny asks
+  of a bus (publisher / subscribe / liveliness: declare, list, watch /
+  respond + query) as one object-safe trait; `Cloudy` now holds an
+  `Arc<dyn Engine>`. Keys are a struct (`engine::Key`, rendered per engine),
+  samples are `engine::Sample` (bytes + attachment + unix-ns timestamp).
+  Everything above the trait — encode / decode, fingerprint checks, latched
+  ("presence, then query"), latest-wins, presence streams, services with
+  `NoReply` / `Timeout` — is reiny's own code and runs unchanged on every
+  engine; the receive buffers (Fifo 256, Ring for `latest(n)`) are reiny's
+  now too. Design: `docs/design/0.5.0.md` §1.
+- **`engine::Zenoh`** (feature `zenoh`, on by default) — the 0.4 behavior
+  moved behind the trait; the wire (key shape, attachment, verbatim chunks)
+  is unchanged, so 0.4 and 0.5 grains interoperate.
+- **`engine::Local`** — an in-process bus with no network, ports or config.
+  Clone one into several `Cloudy::open` calls and a grain's publish /
+  subscribe / call runs inside a `#[tokio::test]`. It is also the reference
+  implementation the conformance test is written against.
+- **`Cloudy::open(RuntimeOptions)`** — the async entry (no tokio runtime, no
+  signal handling; `run_with` is now runtime + signals + `open`).
+  `RuntimeOptions::engine` picks the engine (`None` = zenoh);
+  `Cloudy::engine()` exposes it, with `as_any()` for downcasts.
+- A conformance test (`crates/reiny/src/engine/conformance.rs`) runs one
+  scenario — pub/sub with source, cancel-safety, `latest(n)`, presence with
+  history and leave, latched, fingerprints, services incl. `reply_err` /
+  `NoReply` / `Timeout`, shutdown — against `Local` and against `Zenoh`
+  (loopback port 37453). Adding an engine means adding one test there.
+
 ### Changed
 
 - `reiny::{Topic, Descriptor, Service}` are now re-exports of `reiny-core`
   (same paths; no source change downstream).
+- **Breaking:** `Cloudy::session()` returns `Option<&zenoh::Session>` (`None`
+  when the engine is not zenoh). `pub use zenoh`, `ZenohSource`,
+  `RuntimeOptions::{zenoh, zenoh_overrides, zenoh_config}` and `session()`
+  itself live behind the `zenoh` feature (default on); with
+  `default-features = false` reiny is the trait + `Local` only.
+- **Breaking:** `Envelope.timestamp` is `Option<u64>` (unix ns) instead of
+  `Option<zenoh::time::Timestamp>`; `CallError::Zenoh` is now
+  `CallError::Engine`.
+- `Publisher::send` / `Request::reply` / `Request::reply_err` keep their
+  `async fn` signatures but no longer await anything: the engine methods are
+  synchronous, because a zenoh 1.x builder's `.await` is `ready(wait())`.
 - **Breaking:** `PublisherBuilder::priority` takes `reiny::Priority` (five
   levels: `RealTime` / `High` / `Normal` / `Low` / `Background`, mapped onto
   zenoh's) instead of `zenoh::qos::Priority`, and `.congestion()` is gone —
@@ -63,9 +101,12 @@ piece that does not depend on it.
 
 ### Notes
 
-- Not yet: `impl Engine for Host` and the `reiny bridge …` CLI into zenoh —
-  both wait for the `Engine` trait (`docs/design/0.5.0.md` §1). An
-  `embedded-io-async` adapter was left out; `feed` / `drain` is four lines.
+- Not yet: `impl Engine for Host`, `Cloudy::with_engine`, `bridge::forward`
+  and the `reiny bridge …` CLI — they arrive together with their consumer
+  (`docs/design/0.5.0.md` §9, stage 5). An `embedded-io-async` adapter was
+  left out; `feed` / `drain` is four lines.
+- Publishers now default to `Reliable` (see *Changed*); a grain that relied on
+  zenoh's `Drop` default for high-rate data should say `Qos::SENSOR`.
 
 ## 0.4.0 — 2026-08-28
 

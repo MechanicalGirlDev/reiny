@@ -59,6 +59,13 @@ jobs:
       - name: test
         run: cargo test
 
+      # `reiny` は zenoh 抜き(`Engine` trait + `Local` だけ)でも建つ約束 —— 他エンジンの
+      # クレートはその形に依存する。既定 feature 経由では検証されないので別に回す。
+      - name: reiny without zenoh
+        run: |
+          cargo clippy -p reiny --no-default-features --all-targets -- -D warnings
+          cargo test -p reiny --no-default-features
+
       # reiny-core / reiny-link は MCU で動く約束(no_std)。ホストの cargo test では std が
       # 入ってしまうので、実際の thumb ターゲットで --no-default-features を建てて固定する。
       - name: no_std (thumbv7em-none-eabihf)

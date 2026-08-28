@@ -18,35 +18,43 @@
 //! }
 //! ```
 //!
+//! # エンジン
+//!
+//! [`Cloudy`] はバスを [`engine::Engine`] 越しに使う。既定は zenoh([`engine::Zenoh`]、
+//! feature `zenoh`)。[`engine::Local`] はプロセス内バスで、ネットワーク無しで grain の
+//! テストが書ける —— [`Cloudy::open`] に `RuntimeOptions::engine` で挿す。
+//!
 //! # 逃げ道
 //!
 //! reiny が包んでいない zenoh 機能は [`Cloudy::session`] から直接触れる。その代わり
 //! **zenoh は reiny の公開依存**であり(`pub use zenoh`)、zenoh のメジャー更新は
 //! reiny の破壊的変更になる —— ここから先は zenoh の semver があなたのものになる。
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use zenoh::Session;
-use zenoh::Wait;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // テストは panic で失敗を表現してよい。
-#[cfg(test)]
+#[cfg(all(test, feature = "zenoh"))]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod e2e;
+pub mod engine;
 mod pubsub;
-#[cfg(test)]
+#[cfg(all(test, feature = "zenoh"))]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod rpc_e2e;
 mod runtime;
 mod service;
 mod shutdown;
 
+use engine::{Engine, Guard, Key, SERVICE_CHUNK};
 use shutdown::Shutdown;
 
 pub use pubsub::{
     Envelope, Presence, PresenceEvent, Publisher, PublisherBuilder, Subscriber, SubscriberBuilder,
 };
-pub use runtime::{DOMAIN_ENV, RuntimeOptions, ZenohSource, run_with};
+#[cfg(feature = "zenoh")]
+pub use runtime::ZenohSource;
+pub use runtime::{DOMAIN_ENV, RuntimeOptions, run_with};
 pub use service::{CallError, Caller, CallerBuilder, Request, Server};
 
 /// 型語彙は `reiny-core`(`no_std`)に住む。zenoh が走らない場所(`reiny-link` の MCU 側)と
@@ -55,6 +63,7 @@ pub use reiny_core::{Descriptor, Durability, History, Priority, Qos, Reliability
 
 /// zenoh そのもの。[`Cloudy::session`] を使うコードが reiny と版ズレを起こさないよう、
 /// reiny がリンクしている zenoh を再エクスポートする。
+#[cfg(feature = "zenoh")]
 pub use zenoh;
 
 /// `#[reiny::main]` — grain のエントリポイント属性。詳細は [`reiny_macros::main`]。
@@ -92,32 +101,25 @@ pub use toml as __toml;
 /// reiny の結果型。失敗は [`anyhow::Error`] にまとめる。
 pub type Result<T> = anyhow::Result<T>;
 
-/// キー先頭の固定プレフィクス。
-const KEY_ROOT: &str = "reiny";
-
 /// 名前空間(ドメイン)を指定しなかったときの既定値。
 pub const DEFAULT_DOMAIN: &str = "default";
 
-/// service の presence トークンが付く verbatim チャンク(`reiny/<domain>/<id>/<Req>/@service`)。
-/// publisher のトークン(型のキーそのもの)と分けるのは、`publishers::<Req>()` に server が
-/// 混ざらないようにするため。`@` 始まりは `*` / `**` のどちらにもマッチしない。
-pub(crate) const SERVICE_CHUNK: &str = "@service";
-
-/// grain そのものの presence トークン(`reiny/<domain>/<id>/@grain`)。publisher を 1 つも
-/// 持たない grain も `reiny node list` に出すため。同じく verbatim。
-pub(crate) const GRAIN_CHUNK: &str = "@grain";
+/// presence の問い合わせ(`publishers()` 等)を諦めるまで。zenoh の `get` の既定と同じ。
+const ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+/// 起動時の「同じ id が居るか」の問い合わせ。起動を遅らせない程度に短く。
+const DUPLICATE_CHECK: Duration = Duration::from_millis(300);
 
 /// grain のランタイムハンドル。`#[reiny::main]` が構築して渡す。
 ///
-/// Zenoh セッションと、自分のインスタンス id・名前空間・協調シャットダウンを束ねる。
+/// エンジン([`engine::Engine`])と、自分のインスタンス id・名前空間・協調シャットダウンを束ねる。
 /// `publish` / `subscribe` は **型を型引数で渡すだけ**。トピックは [`Topic`] から解決される。
 pub struct Cloudy {
-    session: Session,
+    engine: Arc<dyn Engine>,
     id: String,
     domain: String,
     shutdown: Shutdown,
     /// grain の presence トークン(保持するだけ。プロセスが落ちれば消える)。
-    _grain: zenoh::liveliness::LivelinessToken,
+    _grain: Guard,
     /// `--config <path>` で渡された設定ファイルを parse したもの(無ければ `None`)。
     /// `reiny-build` 生成の `config()` 拡張(per-project の `[config]`)が読む。
     config: Option<toml::Table>,
@@ -126,38 +128,38 @@ pub struct Cloudy {
 }
 
 impl Cloudy {
-    /// ランタイム内部から構築する([`run_with`] 用)。`@grain` トークンを立て、同じ id の grain が
-    /// 既に居れば警告する(エラーにはしない —— `bag play --as` のような意図的な成り代わりがある)。
-    fn new(
-        session: Session,
+    /// エンジンの上に構築する。`@grain` トークンを立て、同じ id の grain が既に居れば警告する
+    /// (エラーにはしない —— `bag play --as` のような意図的な成り代わりがある)。
+    async fn new(
+        engine: Arc<dyn Engine>,
         id: String,
         domain: String,
         shutdown: Shutdown,
         config: Option<toml::Table>,
         extra_args: Vec<String>,
     ) -> Result<Self> {
-        let grain_key = format!("{KEY_ROOT}/{domain}/{id}/{GRAIN_CHUNK}");
-        if let Ok(replies) = session
-            .liveliness()
-            .get(&grain_key)
-            .timeout(std::time::Duration::from_millis(300))
-            .wait()
-            && replies.iter().any(|r| r.result().is_ok())
-        {
-            tracing::warn!(
+        let grain_key = Key::grain(&domain, Some(&id));
+        if engine.caps().liveliness {
+            if let Ok(alive) = engine.alive(&grain_key, DUPLICATE_CHECK).await
+                && !alive.is_empty()
+            {
+                tracing::warn!(
+                    id,
+                    domain,
+                    "another grain with the same id is already on the bus; \
+                     both will publish under the same keys"
+                );
+            }
+        } else {
+            tracing::debug!(
                 id,
                 domain,
-                "another grain with the same id is already on the bus; \
-                 both will publish under the same keys"
+                "engine has no liveliness; grain presence is off"
             );
         }
-        let grain = session
-            .liveliness()
-            .declare_token(grain_key)
-            .wait()
-            .map_err(anyhow::Error::msg)?;
+        let grain = engine.declare_alive(&grain_key)?;
         Ok(Self {
-            session,
+            engine,
             id,
             domain,
             shutdown,
@@ -201,46 +203,32 @@ impl Cloudy {
     /// (opt-out は無い —— 持たない publisher を許すとこの戻り値が信用できなくなる)ので、
     /// プロセスが落ちれば即座にここから消える。アプリ層のハートビートは要らない。
     pub async fn publishers<T: Topic>(&self) -> Result<Vec<String>> {
-        self.alive_ids(self.key_for("*", T::TYPE)).await
+        self.alive_ids(self.key_for(None, T::TYPE)).await
     }
 
     /// liveliness キー `key` に生きているトークンの `<id>` 一覧(昇順、重複なし)。
-    async fn alive_ids(&self, key: String) -> Result<Vec<String>> {
-        let replies = self
-            .session
-            .liveliness()
-            .get(key)
-            .await
-            .map_err(anyhow::Error::msg)?;
-        let mut ids: Vec<String> = Vec::new();
-        while let Ok(reply) = replies.recv_async().await {
-            if let Ok(sample) = reply.result() {
-                let id = source_of(sample.key_expr().as_str());
-                if !id.is_empty() && !ids.iter().any(|s| s == id) {
-                    ids.push(id.to_string());
-                }
-            }
-        }
+    async fn alive_ids(&self, key: Key) -> Result<Vec<String>> {
+        let mut ids: Vec<String> = self
+            .engine
+            .alive(&key, ALIVE_TIMEOUT)
+            .await?
+            .into_iter()
+            .filter_map(|k| k.source)
+            .collect();
         ids.sort();
+        ids.dedup();
         Ok(ids)
     }
 
     /// 型 `T` の publisher の参加 / 離脱イベント。宣言時点で生きている publisher は
     /// [`PresenceEvent::Joined`] として最初に流れてくる(history 有効)。
     pub fn watch_publishers<T: Topic>(&self) -> Result<Presence<T>> {
-        self.watch_key(self.key_for("*", T::TYPE))
+        self.watch_key(&self.key_for(None, T::TYPE))
     }
 
     /// liveliness キー `key` の参加 / 離脱ストリーム(宣言済みは `Joined` として最初に流れる)。
-    pub(crate) fn watch_key<T>(&self, key: String) -> Result<Presence<T>> {
-        let sub = self
-            .session
-            .liveliness()
-            .declare_subscriber(key)
-            .history(true)
-            .wait()
-            .map_err(anyhow::Error::msg)?;
-        Ok(Presence::new(sub, self.shutdown.clone()))
+    pub(crate) fn watch_key<T>(&self, key: &Key) -> Result<Presence<T>> {
+        Presence::new(self, key)
     }
 
     /// request 型 `S` の server を立てる。`reiny/<domain>/<id>/<S::TYPE>` に queryable を置き、
@@ -265,23 +253,33 @@ impl Cloudy {
 
     /// いま request 型 `S` を serve している grain id の一覧(自分を含む。id 昇順)。
     pub async fn servers<S: Service>(&self) -> Result<Vec<String>> {
-        self.alive_ids(format!("{}/{SERVICE_CHUNK}", self.key_for("*", S::TYPE)))
+        self.alive_ids(self.key_for(None, S::TYPE).with_chunk(SERVICE_CHUNK))
             .await
     }
 
     /// request 型 `S` の server の参加 / 離脱イベント([`Cloudy::watch_publishers`] の server 版)。
     pub fn watch_servers<S: Service>(&self) -> Result<Presence<S>> {
-        self.watch_key(format!("{}/{SERVICE_CHUNK}", self.key_for("*", S::TYPE)))
+        self.watch_key(&self.key_for(None, S::TYPE).with_chunk(SERVICE_CHUNK))
+    }
+
+    /// 下のエンジン。他エンジン固有の機能へは `engine().as_any().downcast_ref::<E>()`。
+    #[must_use]
+    pub fn engine(&self) -> &Arc<dyn Engine> {
+        &self.engine
     }
 
     /// 内部の zenoh セッション。reiny が包んでいない機能(queryable / スカウティング /
-    /// attachment / 任意キーの pub/sub)へ直接届くための逃げ道。
+    /// attachment / 任意キーの pub/sub)へ直接届くための逃げ道。エンジンが zenoh でなければ `None`。
     ///
     /// これを使うと zenoh の semver が自分のものになる —— reiny が zenoh のメジャーを
     /// 上げたとき、ここを通るコードは道連れになる。
+    #[cfg(feature = "zenoh")]
     #[must_use]
-    pub fn session(&self) -> &Session {
-        &self.session
+    pub fn session(&self) -> Option<&zenoh::Session> {
+        self.engine
+            .as_any()
+            .downcast_ref::<engine::Zenoh>()
+            .map(engine::Zenoh::session)
     }
 
     /// 自分のインスタンス id(`--id` / `--name`、なければ `CARGO_PKG_NAME`)。
@@ -292,7 +290,7 @@ impl Cloudy {
     }
 
     /// 自分の論理名前空間(`--domain` / `REINY_DOMAIN`、既定 [`DEFAULT_DOMAIN`])。
-    /// 同じ zenoh fabric 上でも domain が違う grain とは通信しない。
+    /// 同じバス上でも domain が違う grain とは通信しない。
     #[must_use]
     pub fn domain(&self) -> &str {
         &self.domain
@@ -332,19 +330,14 @@ impl Cloudy {
         self.shutdown.trigger();
     }
 
-    /// `reiny/<domain>/<source>/<ty>` を組む。`source` は自 id か `*`。
-    pub(crate) fn key_for(&self, source: &str, ty: &str) -> String {
-        format!("{KEY_ROOT}/{}/{source}/{ty}", self.domain)
+    /// `reiny/<domain>/<source>/<ty>` を組む。`source` は自 id か `None`(= `*`)。
+    pub(crate) fn key_for(&self, source: Option<&str>, ty: &str) -> Key {
+        Key::topic(&self.domain, source, ty)
     }
 
     pub(crate) fn shutdown_handle(&self) -> Shutdown {
         self.shutdown.clone()
     }
-}
-
-/// キー `reiny/<domain>/<id>/<TYPE>` から `<id>` を取り出す。形が違えば空文字。
-fn source_of(key: &str) -> &str {
-    key.split('/').nth(2).unwrap_or_default()
 }
 
 /// キーの 1 セグメントとして使える名前か検証する。ワイルドカードや区切りが混じると
@@ -393,15 +386,6 @@ pub mod __rt {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn source_is_the_third_segment() {
-        assert_eq!(source_of("reiny/default/pong-2/Ping"), "pong-2");
-        assert_eq!(source_of("reiny/lab/ctrl/RobotState"), "ctrl");
-        // 想定外の形は空文字(呼び出し側で弾く)。
-        assert_eq!(source_of("reiny/default"), "");
-        assert_eq!(source_of(""), "");
-    }
 
     #[test]
     fn segments_reject_wildcards_and_separators() {

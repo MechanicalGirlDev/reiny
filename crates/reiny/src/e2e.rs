@@ -5,12 +5,14 @@
 //! テストのために増やさない)。マルチキャスト探索は切り、ループバック TCP 1 本で
 //! 決定的に繋ぐ —— CI のネットワークに依存させないため。
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::timeout;
 
 use zenoh::Wait;
 
+use crate::engine::Zenoh;
 use crate::{Cloudy, Descriptor, History, PresenceEvent, Qos, Topic, shutdown::Shutdown};
 
 /// このテスト専用の wire 型。`impl Topic` を手書きしているのは、それが
@@ -97,28 +99,46 @@ async fn open_session(entries: &[(&str, String)]) -> zenoh::Session {
         .unwrap_or_else(|e| panic!("opening zenoh session: {e}"))
 }
 
-fn cloudy(session: zenoh::Session, id: &str, domain: &str) -> Cloudy {
+async fn cloudy(session: zenoh::Session, id: &str, domain: &str) -> Cloudy {
     Cloudy::new(
-        session,
+        Arc::new(Zenoh::from_session(session)),
         id.to_string(),
         domain.to_string(),
         Shutdown::new(),
         None,
         Vec::new(),
     )
+    .await
     .expect("cloudy")
 }
 
 const SETTLE: Duration = Duration::from_millis(600);
 const PATIENCE: Duration = Duration::from_secs(5);
 
+/// listen 側のセッションに `peers` 本のリンクが張れるまで待つ。固定の sleep は負荷の高い
+/// 並列実行で足りない —— リンクが無いうちに撃った get / 宣言は相手に届かない。
+pub(crate) async fn wait_peers(session: &zenoh::Session, peers: usize) {
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let linked = session.info().peers_zid().await.count();
+        if linked >= peers {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "only {linked}/{peers} peers linked within patience"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn presence_latched_and_domain_isolation() {
-    let alpha = cloudy(session(true).await, "alpha", "lab");
-    let beta = cloudy(session(false).await, "beta", "lab");
-    let gamma = cloudy(session(false).await, "gamma", "other");
-    // セッション同士が繋がるまでの間。
-    tokio::time::sleep(SETTLE).await;
+    let alpha = cloudy(session(true).await, "alpha", "lab").await;
+    let beta = cloudy(session(false).await, "beta", "lab").await;
+    let gamma = cloudy(session(false).await, "gamma", "other").await;
+    // セッション同士が繋がるまで(beta / gamma が alpha に付くまで)。
+    wait_peers(alpha.session().expect("zenoh engine"), 2).await;
 
     // --- Qos: publisher の KeepLast(n > 1) は build で止まる(黙って 1 に丸めない) ---
     let err = alpha
@@ -226,6 +246,7 @@ async fn presence_latched_and_domain_isolation() {
     tokio::time::sleep(SETTLE).await;
     let replies = beta
         .session()
+        .expect("zenoh engine")
         .get("reiny/lab/*/*/@schema/*")
         .wait()
         .expect("schema get");
@@ -248,6 +269,7 @@ async fn presence_latched_and_domain_isolation() {
     // queryable は同じ get に応えるので、これが「見えない」ことの実証になる)。
     let broad = beta
         .session()
+        .expect("zenoh engine")
         .get("reiny/lab/**")
         .wait()
         .expect("broad get");
@@ -325,7 +347,8 @@ async fn latched_survives_a_link_that_comes_up_late() {
         open_session(&[("listen/endpoints", format!("[\"{ISLAND_A}\"]"))]).await,
         "alpha",
         "lab",
-    );
+    )
+    .await;
     let publisher = alpha
         .publisher::<Probe>()
         .latched()
@@ -338,7 +361,8 @@ async fn latched_survives_a_link_that_comes_up_late() {
         open_session(&[("listen/endpoints", format!("[\"{ISLAND_B}\"]"))]).await,
         "beta",
         "lab",
-    );
+    )
+    .await;
     let mut sub = beta
         .subscriber::<Probe>()
         .latched()

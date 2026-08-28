@@ -95,15 +95,16 @@ async fn session(listen: bool) -> zenoh::Session {
         .unwrap_or_else(|e| panic!("opening zenoh session: {e}"))
 }
 
-fn cloudy(session: zenoh::Session, id: &str) -> Cloudy {
+async fn cloudy(session: zenoh::Session, id: &str) -> Cloudy {
     Cloudy::new(
-        session,
+        std::sync::Arc::new(crate::engine::Zenoh::from_session(session)),
         id.to_string(),
         "lab".to_string(),
         Shutdown::new(),
         None,
         Vec::new(),
     )
+    .await
     .expect("cloudy")
 }
 
@@ -113,10 +114,10 @@ const PATIENCE: Duration = Duration::from_secs(5);
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)] // 1 本で通す(ポートを増やさない)ので長い。
 async fn services_round_trip_presence_and_latched_coexistence() {
-    let server = cloudy(session(true).await, "srv");
-    let client = cloudy(session(false).await, "cli");
-    let other = cloudy(session(false).await, "cli2");
-    tokio::time::sleep(SETTLE).await;
+    let server = cloudy(session(true).await, "srv").await;
+    let client = cloudy(session(false).await, "cli").await;
+    let other = cloudy(session(false).await, "cli2").await;
+    crate::e2e::wait_peers(server.session().expect("zenoh engine"), 2).await;
 
     // --- server: b の値で振る舞いを変える(正常 / reply_err / 返さず drop / 保留) ---
     let mut srv = server.serve::<Add>().expect("serve");
