@@ -39,6 +39,20 @@ pub(crate) fn check(path: Option<&Path>) -> Result<()> {
         println!("config: [config] present (typed cloudy.config())");
     }
 
+    let services = resolution.services();
+    if !services.is_empty() {
+        println!();
+        println!("services ({}):", services.len());
+        let w_name = services.iter().map(|s| s.name.len()).max().unwrap_or(0);
+        let w_req = services.iter().map(|s| s.request.len()).max().unwrap_or(0);
+        for s in &services {
+            println!(
+                "  {:<w_name$}  {:<w_req$} ({})  ->  {} ({})",
+                s.name, s.request, s.request_message, s.response, s.response_message
+            );
+        }
+    }
+
     let types = resolution.types();
     println!();
     println!("types ({}):", types.len());

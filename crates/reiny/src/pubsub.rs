@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use prost::Message;
 use zenoh::Wait;
+use zenoh::bytes::ZBytes;
 use zenoh::handlers::{FifoChannelHandler, RingChannel, RingChannelHandler};
 use zenoh::liveliness::LivelinessToken;
 use zenoh::pubsub::{Publisher as ZPublisher, Subscriber as ZSubscriber};
@@ -148,7 +149,11 @@ impl<'a, T> PublisherBuilder<'a, T> {
 /// `@schema` は verbatim チャンク —— `*` / `**` のどちらにもマッチしないので、型のトピックを
 /// 購読・記録している誰にも見えない。拾うのは `reiny bag record` のように
 /// `reiny/<domain>/*/*/@schema/*` と明示して問い合わせる側だけ。
-fn declare_schema(cloudy: &Cloudy, key: &str, descriptor: Descriptor) -> Result<Queryable<()>> {
+pub(crate) fn declare_schema(
+    cloudy: &Cloudy,
+    key: &str,
+    descriptor: Descriptor,
+) -> Result<Queryable<()>> {
     let reply_key = format!("{key}/@schema/{}", descriptor.message);
     let callback_key = reply_key.clone();
     cloudy
@@ -179,6 +184,11 @@ fn declare_latch(
         .session()
         .declare_queryable(key.to_string())
         .callback(move |query: Query| {
+            // payload 付きの query は service の呼び出し(`service.rs`)。同じ型を latched publish
+            // しつつ serve する grain で、呼び出しに直近値を返してしまわないよう無視する。
+            if query.payload().is_some() {
+                return;
+            }
             // poison しても latched は「最後の値を返すだけ」なので、取れなければ黙って何も返さない。
             let payload = last.lock().ok().and_then(|g| g.clone());
             let Some(bytes) = payload else { return };
@@ -424,7 +434,7 @@ impl<T: Message + Default + Topic> Subscriber<T> {
                     }
                 }
                 sample = subscriber.recv_async() => {
-                    let Some(sample) = sample else { return None }; // channel closed
+                    let sample = sample?; // channel closed
                     let source = source_of(sample.key_expr().as_str()).to_string();
                     if !*latched_done {
                         seen.insert(source.clone());
@@ -456,14 +466,10 @@ async fn recv_reply(handler: Option<&FifoChannelHandler<Reply>>) -> Option<Reply
 /// 指紋を載せない送信側)、または attachment が既知の形(8 バイト LE)でないとき。不一致
 /// だけを落とし、その送信元については 1 度しか警告しない(毎サンプル鳴らすとログが埋まる)。
 fn schema_matches<T: Topic>(sample: &Sample, source: &str, warned: &mut HashSet<String>) -> bool {
-    let (Some(mine), Some(attachment)) = (T::SCHEMA, sample.attachment()) else {
+    let (Some(mine), Some(theirs)) = (T::SCHEMA, attachment_fingerprint(sample.attachment()))
+    else {
         return true;
     };
-    let bytes = attachment.to_bytes();
-    let Ok(raw) = <[u8; 8]>::try_from(bytes.as_ref()) else {
-        return true; // reiny の指紋ではない attachment。他人のものなので触らない。
-    };
-    let theirs = u64::from_le_bytes(raw);
     if theirs == mine {
         return true;
     }
@@ -477,6 +483,13 @@ fn schema_matches<T: Topic>(sample: &Sample, source: &str, warned: &mut HashSet<
         );
     }
     false
+}
+
+/// attachment に載った reiny の指紋(8 バイト LE)。無い / 形が違う(他人の attachment)なら `None`。
+pub(crate) fn attachment_fingerprint(attachment: Option<&ZBytes>) -> Option<u64> {
+    let bytes = attachment?.to_bytes();
+    let raw = <[u8; 8]>::try_from(bytes.as_ref()).ok()?;
+    Some(u64::from_le_bytes(raw))
 }
 
 fn decode<T: Message + Default + Topic>(sample: &Sample) -> Option<T> {

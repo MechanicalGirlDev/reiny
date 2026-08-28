@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+// service の request / response 型。普通のメッセージ型で、[services] が対応を宣言する。
+package calc;
+
+// Add: request。この型がサービスの住所(reiny/<domain>/<id>/Add)。
+message Add {
+  int64 a = 1;
+  int64 b = 2;
+}
+
+// Sum: Add への response。
+message Sum {
+  int64 sum = 1;
+}

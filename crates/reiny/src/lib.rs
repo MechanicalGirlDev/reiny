@@ -34,7 +34,11 @@ use zenoh::Wait;
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod e2e;
 mod pubsub;
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+mod rpc_e2e;
 mod runtime;
+mod service;
 mod shutdown;
 
 use shutdown::Shutdown;
@@ -43,6 +47,7 @@ pub use pubsub::{
     Envelope, Presence, PresenceEvent, Publisher, PublisherBuilder, Subscriber, SubscriberBuilder,
 };
 pub use runtime::{DOMAIN_ENV, RuntimeOptions, ZenohSource, run_with};
+pub use service::{CallError, Caller, CallerBuilder, Request, Server, Service};
 
 /// zenoh そのもの。[`Cloudy::session`] を使うコードが reiny と版ズレを起こさないよう、
 /// reiny がリンクしている zenoh を再エクスポートする。
@@ -88,6 +93,11 @@ const KEY_ROOT: &str = "reiny";
 
 /// 名前空間(ドメイン)を指定しなかったときの既定値。
 pub const DEFAULT_DOMAIN: &str = "default";
+
+/// service の presence トークンが付く verbatim チャンク(`reiny/<domain>/<id>/<Req>/@service`)。
+/// publisher のトークン(型のキーそのもの)と分けるのは、`publishers::<Req>()` に server が
+/// 混ざらないようにするため。`@` 始まりは `*` / `**` のどちらにもマッチしない。
+pub(crate) const SERVICE_CHUNK: &str = "@service";
 
 /// 型 → トピックの対応。`reiny-build` が `Reiny.toml` を読んで各メッセージ型に impl する。
 ///
@@ -207,10 +217,15 @@ impl Cloudy {
     /// (opt-out は無い —— 持たない publisher を許すとこの戻り値が信用できなくなる)ので、
     /// プロセスが落ちれば即座にここから消える。アプリ層のハートビートは要らない。
     pub async fn publishers<T: Topic>(&self) -> Result<Vec<String>> {
+        self.alive_ids(self.key_for("*", T::TYPE)).await
+    }
+
+    /// liveliness キー `key` に生きているトークンの `<id>` 一覧(昇順、重複なし)。
+    async fn alive_ids(&self, key: String) -> Result<Vec<String>> {
         let replies = self
             .session
             .liveliness()
-            .get(self.key_for("*", T::TYPE))
+            .get(key)
             .await
             .map_err(anyhow::Error::msg)?;
         let mut ids: Vec<String> = Vec::new();
@@ -229,14 +244,50 @@ impl Cloudy {
     /// 型 `T` の publisher の参加 / 離脱イベント。宣言時点で生きている publisher は
     /// [`PresenceEvent::Joined`] として最初に流れてくる(history 有効)。
     pub fn watch_publishers<T: Topic>(&self) -> Result<Presence<T>> {
+        self.watch_key(self.key_for("*", T::TYPE))
+    }
+
+    /// liveliness キー `key` の参加 / 離脱ストリーム(宣言済みは `Joined` として最初に流れる)。
+    fn watch_key<T>(&self, key: String) -> Result<Presence<T>> {
         let sub = self
             .session
             .liveliness()
-            .declare_subscriber(self.key_for("*", T::TYPE))
+            .declare_subscriber(key)
             .history(true)
             .wait()
             .map_err(anyhow::Error::msg)?;
         Ok(Presence::new(sub, self.shutdown.clone()))
+    }
+
+    /// request 型 `S` の server を立てる。`reiny/<domain>/<id>/<S::TYPE>` に queryable を置き、
+    /// [`Server::recv`] で request を受けて [`Request::reply`] で返す。
+    pub fn serve<S: Service>(&self) -> Result<Server<S>> {
+        Server::declare(self)
+    }
+
+    /// request 型 `S` の caller builder。`.to(id)` / `.timeout(d)` を重ねて `.build()`。
+    pub fn caller<S: Service>(&self) -> CallerBuilder<'_, S> {
+        CallerBuilder::new(self)
+    }
+
+    /// `S` を 1 発呼ぶ(同 domain の任意の server、既定タイムアウト)。
+    /// [`Cloudy::caller`] の糖衣。
+    pub async fn call<S: Service>(
+        &self,
+        request: S,
+    ) -> std::result::Result<S::Response, CallError> {
+        self.caller::<S>().build().call(request).await
+    }
+
+    /// いま request 型 `S` を serve している grain id の一覧(自分を含む。id 昇順)。
+    pub async fn servers<S: Service>(&self) -> Result<Vec<String>> {
+        self.alive_ids(format!("{}/{SERVICE_CHUNK}", self.key_for("*", S::TYPE)))
+            .await
+    }
+
+    /// request 型 `S` の server の参加 / 離脱イベント([`Cloudy::watch_publishers`] の server 版)。
+    pub fn watch_servers<S: Service>(&self) -> Result<Presence<S>> {
+        self.watch_key(format!("{}/{SERVICE_CHUNK}", self.key_for("*", S::TYPE)))
     }
 
     /// 内部の zenoh セッション。reiny が包んでいない機能(queryable / スカウティング /
@@ -298,11 +349,11 @@ impl Cloudy {
     }
 
     /// `reiny/<domain>/<source>/<ty>` を組む。`source` は自 id か `*`。
-    fn key_for(&self, source: &str, ty: &str) -> String {
+    pub(crate) fn key_for(&self, source: &str, ty: &str) -> String {
         format!("{KEY_ROOT}/{}/{source}/{ty}", self.domain)
     }
 
-    fn shutdown_handle(&self) -> Shutdown {
+    pub(crate) fn shutdown_handle(&self) -> Shutdown {
         self.shutdown.clone()
     }
 }
@@ -332,7 +383,10 @@ fn validate_segment(what: &str, value: &str) -> Result<()> {
 
 /// よく使うものをまとめた prelude。`use reiny::prelude::*;`
 pub mod prelude {
-    pub use crate::{Cloudy, Descriptor, Envelope, PresenceEvent, Publisher, Subscriber, Topic};
+    pub use crate::{
+        CallError, Caller, Cloudy, Descriptor, Envelope, PresenceEvent, Publisher, Request, Server,
+        Service, Subscriber, Topic,
+    };
 }
 
 /// `#[reiny::main]` 展開が呼ぶランタイム。利用側が直接触ることは想定しない。

@@ -1,0 +1,33 @@
+# Reiny.toml — ワークスペース共有の reiny マニフェスト(../ping-pong-workspace と同じ配置)に
+# `[services]` を足したもの。
+#
+# service は **request 型がサービスの住所**: `Add` を serve する grain は
+# `reiny/<domain>/<id>/Add` に queryable を置き、`call::<Add>(…)` は `reiny/<domain>/*/Add` へ
+# 撃って `Sum` を受け取る。`[services]` は「どの request 型にどの response 型が対応するか」
+# (= `impl reiny::Service for Add { type Response = Sum; }`)を生成させるだけで、トピックは
+# 相変わらず型から決まる。
+
+[workspace]
+version = "0.1.0"
+description = "型付き request/response(service)で組む calc / asker。"
+authors = ["nop <noplab90@gmail.com>"]
+license = "MIT"
+
+[internals]
+Add = { proto = "proto/calc.proto", message = "calc.Add" }
+Sum = { proto = "proto/calc.proto", message = "calc.Sum" }
+
+# request 型 → response 型。キーは表示名(`reiny check` に出る)で、生成コードには出ない。
+[services]
+Adder = { request = "Add", response = "Sum" }
+
+[projects.calc]
+version = "0.1.0"
+description = "Add を受けて Sum を返す server。"
+# serve する型も publications に挙げておく(表示用メタ。publish と同じく強制はしない)。
+publications = ["Add", "Sum"]
+
+[projects.asker]
+version = "0.1.0"
+description = "1 秒ごとに Add を call して Sum を受け取る client。"
+dependencies = ["Add", "Sum"]
