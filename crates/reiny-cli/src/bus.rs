@@ -132,15 +132,35 @@ pub(crate) fn alive_keys(session: &zenoh::Session, key: &str) -> Result<Vec<Stri
     Ok(keys)
 }
 
-/// `@schema` を 1 発撃って、走っている publisher / server が名乗る descriptor set を集める。
-/// 返りは `<base key>` → `(fqn, その message に刈った FileDescriptorSet)`。
-///
-/// `pattern` は `reiny/<domain>/*/*`(全型)や `reiny/<domain>/*/<TYPE>`(1 型)。
+/// [`collect_schemas_all`] のうち、各キーの **型そのもの**の descriptor だけ(fqn の短い名前が
+/// キーの型セグメントに一致するもの。無ければ最初の 1 件)。pub/sub の型はこれで足りる。
 pub(crate) fn collect_schemas(
     session: &zenoh::Session,
     pattern: &str,
 ) -> BTreeMap<String, (String, Vec<u8>)> {
-    let mut schemas = BTreeMap::new();
+    collect_schemas_all(session, pattern)
+        .into_iter()
+        .filter_map(|(base, named)| {
+            let ty = KeyParts::parse(&base).map(|p| p.ty.to_string());
+            let own = named
+                .iter()
+                .position(|(fqn, _)| fqn.rsplit('.').next() == ty.as_deref())
+                .unwrap_or(0);
+            named.into_iter().nth(own).map(|n| (base, n))
+        })
+        .collect()
+}
+
+/// `@schema` を 1 発撃って、走っている publisher / server が名乗る descriptor set を集める。
+/// 返りは `<base key>` → `[(fqn, その message に刈った FileDescriptorSet)]`(service の
+/// キーは request / response の 2 件を名乗る)。
+///
+/// `pattern` は `reiny/<domain>/*/*`(全型)や `reiny/<domain>/*/<TYPE>`(1 型)。
+pub(crate) fn collect_schemas_all(
+    session: &zenoh::Session,
+    pattern: &str,
+) -> BTreeMap<String, Vec<(String, Vec<u8>)>> {
+    let mut schemas: BTreeMap<String, Vec<(String, Vec<u8>)>> = BTreeMap::new();
     let key = format!("{pattern}/{SCHEMA_CHUNK}/*");
     let replies = match session.get(&key).wait() {
         Ok(r) => r,
@@ -159,7 +179,10 @@ pub(crate) fn collect_schemas(
         let file_set = sample.payload().to_bytes();
         match reiny_build::descriptor_subset(&file_set, fqn) {
             Ok(Some(subset)) => {
-                schemas.insert(base.to_string(), (fqn.to_string(), subset));
+                schemas
+                    .entry(base.to_string())
+                    .or_default()
+                    .push((fqn.to_string(), subset));
             }
             Ok(None) => tracing::warn!(fqn, "@schema payload lacks the named message"),
             Err(e) => tracing::warn!(fqn, error = %e, "undecodable @schema payload"),

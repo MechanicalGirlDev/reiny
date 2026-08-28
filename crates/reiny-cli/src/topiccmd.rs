@@ -16,7 +16,11 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use reiny::zenoh::{self, Wait};
 
-use crate::bus::{BusArgs, GRAIN_CHUNK, KEY_ROOT, KeyParts, SERVICE_CHUNK, alive_keys, key_source};
+use crate::bus::{
+    BusArgs, GRAIN_CHUNK, KEY_ROOT, KeyParts, SERVICE_CHUNK, alive_keys, attachment_u64,
+    collect_schemas, key_source,
+};
+use crate::codec::{Codec, hex};
 
 // ===========================================================================
 // reiny topic
@@ -36,6 +40,28 @@ enum TopicCommand {
     Hz(RateArgs),
     /// 1 型の受信帯域(送信元ごと)。Ctrl+C か `--duration` で終了。
     Bw(RateArgs),
+    /// 1 型の中身を JSON で流す(publisher が `@schema` で名乗る descriptor で decode)。
+    Echo(EchoArgs),
+}
+
+#[derive(Args)]
+struct EchoArgs {
+    /// 型名(キーの型セグメント。例 `RobotState`)。
+    ty: String,
+    /// この grain id からのものだけ。
+    #[arg(long)]
+    from: Option<String>,
+    /// この件数で終了する。
+    #[arg(long)]
+    count: Option<usize>,
+    /// この秒数で終了する。
+    #[arg(long)]
+    duration: Option<f64>,
+    /// decode せず payload を hex で出す。
+    #[arg(long)]
+    raw: bool,
+    #[command(flatten)]
+    bus: BusArgs,
 }
 
 #[derive(Args)]
@@ -66,7 +92,102 @@ pub(crate) fn run_topic(args: TopicArgs) -> Result<()> {
         TopicCommand::List(a) => list(&a),
         TopicCommand::Hz(a) => rate(&a, Mode::Hz),
         TopicCommand::Bw(a) => rate(&a, Mode::Bw),
+        TopicCommand::Echo(a) => echo(&a),
     }
+}
+
+fn echo(args: &EchoArgs) -> Result<()> {
+    let (session, domain) = args.bus.open()?;
+    let pattern = format!(
+        "{KEY_ROOT}/{domain}/{}/{}",
+        args.from.as_deref().unwrap_or("*"),
+        args.ty
+    );
+    let subscriber = session
+        .declare_subscriber(&pattern)
+        .wait()
+        .map_err(anyhow::Error::msg)
+        .with_context(|| format!("declaring subscriber {pattern}"))?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = Arc::clone(&stop);
+        ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst))
+            .context("installing Ctrl+C handler")?;
+    }
+    let deadline = args
+        .duration
+        .map(|s| Instant::now() + Duration::from_secs_f64(s));
+
+    // キー → decoder。descriptor を名乗らない publisher は None(hex で出し、1 度だけ案内する)。
+    // 途中参加の publisher は初見のキーで @schema を撃ち直す。
+    let mut codecs: BTreeMap<String, Option<Codec>> = BTreeMap::new();
+    let fetch = |key: &str, codecs: &mut BTreeMap<String, Option<Codec>>| {
+        if !args.raw && !codecs.contains_key(key) {
+            let found = collect_schemas(&session, key)
+                .remove(key)
+                .and_then(|(fqn, set)| match Codec::from_file_set(&set, &fqn) {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        tracing::warn!(key, error = %e, "unusable @schema; showing hex");
+                        None
+                    }
+                });
+            if found.is_none() {
+                eprintln!(
+                    "{key}: publisher does not describe its type on the bus (no DESCRIPTOR); showing hex"
+                );
+            }
+            codecs.insert(key.to_string(), found);
+        }
+    };
+    let mut warned_fp: BTreeSet<String> = BTreeSet::new();
+    let mut shown = 0usize;
+    while !stop.load(Ordering::SeqCst) {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            break;
+        }
+        if args.count.is_some_and(|n| shown >= n) {
+            break;
+        }
+        match subscriber.recv_timeout(Duration::from_millis(100)) {
+            Ok(Some(sample)) => {
+                if sample.kind() != zenoh::sample::SampleKind::Put {
+                    continue;
+                }
+                let key = sample.key_expr().as_str().to_string();
+                let source = key_source(&key).to_string();
+                let payload = sample.payload().to_bytes();
+                fetch(&key, &mut codecs);
+                let text = match codecs.get(&key).and_then(Option::as_ref) {
+                    Some(codec) => {
+                        if let (Some(mine), Some(theirs)) =
+                            (codec.fingerprint, attachment_u64(&sample))
+                            && mine != theirs
+                            && warned_fp.insert(source.clone())
+                        {
+                            tracing::warn!(
+                                source,
+                                expected = format!("{mine:016x}"),
+                                received = format!("{theirs:016x}"),
+                                "schema fingerprint differs from the @schema descriptor; a typed subscriber would drop this"
+                            );
+                        }
+                        codec.decode_json(&payload).unwrap_or_else(|e| {
+                            tracing::warn!(source, error = %e, "undecodable payload; showing hex");
+                            hex(&payload)
+                        })
+                    }
+                    None => hex(&payload),
+                };
+                println!("{source}  {text}");
+                shown += 1;
+            }
+            Ok(None) => {}
+            Err(_) => break,
+        }
+    }
+    Ok(())
 }
 
 fn list(args: &ListArgs) -> Result<()> {
