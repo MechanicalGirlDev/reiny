@@ -1,0 +1,18 @@
+[package]
+name = "reiny-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "reiny's type vocabulary (Topic / Service / Descriptor) — no_std, shared by the SDK and by MCU-side links"
+keywords = ["reiny", "pubsub", "no-std", "embedded"]
+categories = ["network-programming", "no-std", "embedded"]
+
+[dependencies]
+# no_std の prost(alloc は要る)。ワークスペースの `prost` は std 前提なので継承しない。
+prost = { version = "0.13", default-features = false }
+
+[lints]
+workspace = true

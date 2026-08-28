@@ -1,8 +1,48 @@
 # Changelog
 
-All notable changes to the reiny workspace crates (`reiny`, `reiny-build`,
-`reiny-macros`, `reiny-launch`, `reiny-cli`). Versions are kept in lockstep via
-`[workspace.package].version`.
+All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
+`reiny-link`, `reiny-build`, `reiny-macros`, `reiny-launch`, `reiny-cli`).
+Versions are kept in lockstep via `[workspace.package].version`.
+
+## Unreleased
+
+First slice of 0.5.0 (design record: `docs/design/0.5.0.md`, §11 records what
+shipped). The `Engine` abstraction itself is not in yet; what landed is the
+piece that does not depend on it.
+
+### Added
+
+- **`reiny-core`** — the type vocabulary (`Topic`, `Descriptor`, `Service`) as a
+  `#![no_std]` crate (needs `alloc` through `prost`). `reiny` re-exports it, so
+  downstream paths are unchanged. MCU firmware depends on it directly under the
+  alias `reiny = { package = "reiny-core" }`, which makes the
+  `impl ::reiny::Topic` that `reiny-build` generates resolve with no codegen
+  change.
+- **`reiny-link`** — reiny over **anything that moves bytes**. The core is a
+  `#![no_std]` sans-I/O state machine, `Link`: `feed` it received bytes,
+  `drain` / `drain_frame` what it wants sent, `tick` it with a millisecond
+  clock; publish / subscribe / request by `Topic` / `Service` type, with the
+  type name carried on the wire as a 32-bit FNV-1a hash and exchanged by name
+  once in a `Hello`. Wire = COBS-framed
+  `[kind][hash][seq][payload][crc16]`. With the default `std` feature it adds
+  the host side: a `Transport` trait ("send bytes / receive bytes"),
+  `Stream<T>` for any `AsyncRead + AsyncWrite` (serial ports via
+  `transport::serial::open`, TCP, pty, `tokio::io::duplex`), `Udp`
+  (point-to-point; learns the peer from the first datagram), and `Host`, which
+  drives a `Link` on tokio and offers `send` / `call` / `recv`. CI builds
+  `reiny-core` / `reiny-link` for `thumbv7em-none-eabihf` with
+  `--no-default-features`.
+
+### Changed
+
+- `reiny::{Topic, Descriptor, Service}` are now re-exports of `reiny-core`
+  (same paths; no source change downstream).
+
+### Notes
+
+- Not yet: `impl Engine for Host` and the `reiny link …` bridge into zenoh —
+  both wait for the `Engine` trait (`docs/design/0.5.0.md` §1). An
+  `embedded-io-async` adapter was left out; `feed` / `drain` is four lines.
 
 ## 0.4.0 — 2026-08-28
 

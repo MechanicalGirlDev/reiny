@@ -11,6 +11,7 @@ keywords = ["zenoh", "pubsub", "distributed", "actor", "grain"]
 categories = ["network-programming", "asynchronous"]
 
 [dependencies]
+reiny-core = { path = "../reiny-core", version = "0.4.0" }
 reiny-macros = { path = "../reiny-macros", version = "0.4.0" }
 prost = { workspace = true }
 zenoh = { workspace = true }

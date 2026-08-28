@@ -47,7 +47,11 @@ pub use pubsub::{
     Envelope, Presence, PresenceEvent, Publisher, PublisherBuilder, Subscriber, SubscriberBuilder,
 };
 pub use runtime::{DOMAIN_ENV, RuntimeOptions, ZenohSource, run_with};
-pub use service::{CallError, Caller, CallerBuilder, Request, Server, Service};
+pub use service::{CallError, Caller, CallerBuilder, Request, Server};
+
+/// 型語彙は `reiny-core`(`no_std`)に住む。zenoh が走らない場所(`reiny-link` の MCU 側)と
+/// 同じ trait を共有するためで、利用側から見えるパスは 0.4 と同じ `reiny::Topic` のまま。
+pub use reiny_core::{Descriptor, Service, Topic};
 
 /// zenoh そのもの。[`Cloudy::session`] を使うコードが reiny と版ズレを起こさないよう、
 /// reiny がリンクしている zenoh を再エクスポートする。
@@ -102,54 +106,6 @@ pub(crate) const SERVICE_CHUNK: &str = "@service";
 /// grain そのものの presence トークン(`reiny/<domain>/<id>/@grain`)。publisher を 1 つも
 /// 持たない grain も `reiny node list` に出すため。同じく verbatim。
 pub(crate) const GRAIN_CHUNK: &str = "@grain";
-
-/// 型 → トピックの対応。`reiny-build` が `Reiny.toml` を読んで各メッセージ型に impl する。
-///
-/// トピックは **型でアドレスする**。型 `Ping` は `reiny/<domain>/<id>/Ping` へ publish され、
-/// `reiny/<domain>/*/Ping`(同じ domain の全 publisher の同じ型)で subscribe される。
-/// `<id>` は実行時のインスタンス id([`Cloudy::id`])、`<domain>` は論理名前空間
-/// ([`Cloudy::domain`])、`TYPE` がキーの型セグメント(例 `Ping`)。
-/// 発行側・購読側のどちらの crate でも同じ型は同じ `TYPE` になる。
-pub trait Topic {
-    /// トピックキーの型セグメント(例 `Ping`)。publish は `reiny/<domain>/<id>/<TYPE>`、
-    /// subscribe は `reiny/<domain>/*/<TYPE>`。
-    const TYPE: &'static str;
-
-    /// スキーマ指紋。`reiny-build` 生成型は proto の descriptor から算出した値が入る。
-    ///
-    /// **なぜ要るか。** `TYPE` は proto パッケージを剥がした素の型名なので、トピックの
-    /// 名前空間は平坦なままで、別プロジェクトの同名型が同じトピックに乗りうる。protobuf は
-    /// 寛容なので、フィールド番号がたまたま噛み合うと **decode が成功して黙って化ける**。
-    /// 指紋はその平坦さに対する唯一の安全弁で、publish 時に zenoh の attachment へ載り、
-    /// subscribe 時に照合される(両側が `Some` で不一致なら、送信元ごとに 1 度だけ警告して
-    /// そのサンプルを捨てる。片方でも `None` なら素通し)。
-    ///
-    /// 既定値付きなので、**手書きの `impl Topic` は無改造で通る** —— 「第三者は自分の型に
-    /// `impl Topic` を書くだけで参加できる」という reiny の売りを壊さないため。
-    const SCHEMA: Option<u64> = None;
-
-    /// proto の descriptor。`reiny-build` 生成型は自クレートの descriptor set を指す。
-    ///
-    /// `Some` の型を publish すると、publisher は自分のキーの脇
-    /// `reiny/<domain>/<id>/<TYPE>/@schema/<message>` に queryable を 1 本立て、問い合わせに
-    /// この descriptor set を返す。走っている grain が自分の型を**バス上で名乗る**ための口で、
-    /// `reiny bag record` はこれを拾って MCAP にスキーマを同梱し、Foxglove がそのまま decode
-    /// できる bag を作る(`docs/design/bag.md` §5)。
-    ///
-    /// `@schema` は zenoh の verbatim チャンクなので、`reiny/<domain>/**` の購読者にも
-    /// `reiny/<domain>/*/*` の記録にも見えない —— 型のトピックは汚れない。
-    const DESCRIPTOR: Option<Descriptor> = None;
-}
-
-/// [`Topic::DESCRIPTOR`] の中身 —— proto の完全メッセージ名と、それを含む
-/// `google.protobuf.FileDescriptorSet` の encode 済みバイト列。
-#[derive(Debug, Clone, Copy)]
-pub struct Descriptor {
-    /// 完全メッセージ名(例 `hs.RobotState`)。MCAP のスキーマ名にそのまま使われる。
-    pub message: &'static str,
-    /// `FileDescriptorSet` の encode 済みバイト列。`message` のファイルと、その推移 import を含む。
-    pub file_set: &'static [u8],
-}
 
 /// grain のランタイムハンドル。`#[reiny::main]` が構築して渡す。
 ///

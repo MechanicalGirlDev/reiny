@@ -4,8 +4,10 @@ members = [
     "crates/reiny-launch",
     "crates/reiny-cli",
     "crates/reiny-macros",
+    "crates/reiny-core",
     "crates/reiny",
     "crates/reiny-build",
+    "crates/reiny-link",
 ]
 # examples/ は各々が独立した cargo ワークスペース(own Cargo.lock)。ルートのビルド・
 # テストには巻き込まない(各 example は cd して個別にビルドする)。

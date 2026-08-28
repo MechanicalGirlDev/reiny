@@ -58,3 +58,10 @@ jobs:
       # ネットワーク隔離された runner でも決定的に走る。
       - name: test
         run: cargo test
+
+      # reiny-core / reiny-link は MCU で動く約束(no_std)。ホストの cargo test では std が
+      # 入ってしまうので、実際の thumb ターゲットで --no-default-features を建てて固定する。
+      - name: no_std (thumbv7em-none-eabihf)
+        run: |
+          rustup target add thumbv7em-none-eabihf
+          cargo build -p reiny-core -p reiny-link --no-default-features --target thumbv7em-none-eabihf

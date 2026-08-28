@@ -1,0 +1,37 @@
+[package]
+name = "reiny-link"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "reiny over any byte carrier: a sans-I/O framed point-to-point link (no_std) with serial and UDP transports"
+keywords = ["reiny", "serial", "udp", "no-std", "embedded"]
+categories = ["network-programming", "embedded", "no-std"]
+
+[features]
+default = ["std", "serial"]
+# ホスト側: `Transport` trait・`Stream` / `Udp`・tokio で `Link` を回す `Host`。
+std = ["dep:tokio", "prost/std", "cobs/std"]
+# `transport::serial::open`(tokio-serial)。`std` を含む。
+serial = ["std", "dep:tokio-serial"]
+
+[dependencies]
+reiny-core = { path = "../reiny-core", version = "0.4.0" }
+# no_std の prost(alloc は要る)。ワークスペースの `prost` は std 前提なので継承しない。
+prost = { version = "0.13", default-features = false }
+# フレーミング(COBS)と CRC-16/KERMIT。どちらも no_std、依存 0。
+cobs = { version = "0.5", default-features = false }
+crc = "3"
+tokio = { workspace = true, optional = true }
+# 既定 feature 空 + serialport を default-features = false で引くので libudev は要らない。
+tokio-serial = { version = "5.5", optional = true }
+
+[dev-dependencies]
+# テスト用 wire 型を `#[derive(prost::Message)]` で書くため。
+prost = { version = "0.13", features = ["derive"] }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

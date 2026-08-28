@@ -26,26 +26,12 @@ use zenoh::query::{ConsolidationMode, Query, Queryable};
 
 use crate::pubsub::{attachment_fingerprint, declare_schema};
 use crate::shutdown::Shutdown;
-use crate::{Cloudy, Result, SERVICE_CHUNK, Topic};
+use crate::{Cloudy, Result, SERVICE_CHUNK, Service, Topic};
 
 /// zenoh の `get` の既定と同じ。
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// zenoh 側の query 期限を自分の期限よりこれだけ後ろに置く(先に自分の timer が切れるように)。
 const ZENOH_TIMEOUT_MARGIN: Duration = Duration::from_secs(1);
-
-/// request 型 → response 型。request 型の [`Topic::TYPE`] がそのままキーの型セグメントになる。
-///
-/// `reiny-build` は `Reiny.toml` の `[services]` から impl を生成する。手書きも 1 行:
-///
-/// ```ignore
-/// impl reiny::Service for Add { type Response = Sum; }
-/// ```
-///
-/// `Response: Topic` を要求するのは、応答にも `SCHEMA` 指紋を載せるため。
-pub trait Service: Topic + Message + Default {
-    /// 応答の型。
-    type Response: Topic + Message + Default;
-}
 
 // ---------------------------------------------------------------------------
 // server

@@ -29,6 +29,14 @@ The cross-cutting flow to understand before touching any of these three:
 
 Because the key is the Rust type, two crates sharing a type resolve to the same topic regardless of which "owns" it.
 
+## `reiny-core` and `reiny-link` — reiny where zenoh does not run
+
+- **`Topic` / `Descriptor` / `Service` live in `reiny-core` (`#![no_std]`)**; `reiny` re-exports them, so `reiny::Topic` is still the downstream path. The split exists only so an MCU can share type = topic. MCU crates alias it — `reiny = { package = "reiny-core" }` — which is why `reiny-build`'s generated `impl ::reiny::Topic` needs no `crate_path` option. `[config]` generation references `Cloudy`, so it cannot be used in such a crate.
+- **`reiny-link` is sans-I/O.** `Link` never touches I/O or a clock: `feed` bytes in, `drain` (stream) / `drain_frame` (datagram) bytes out, `tick(now_ms)` for Ping / timeout / Hello re-send. The same `Link` runs on the MCU and on the host; `Host` (feature `std`) is just tokio driving it over a `Transport` (`Stream<T: AsyncRead + AsyncWrite>`, `Udp`, `transport::serial::open`). Wire: COBS + `[kind][fnv1a32(TYPE)][seq][payload][crc16]`; type *names* and `SCHEMA` fingerprints travel only in `Hello`, and fingerprint mismatch is decided once per connection, not per frame. Design + wire rationale: `docs/design/0.5.0.md` §3.
+- Facts that bite: `Frame` is a `Copy` handle valid only until the next `next()` / `feed()` (generation-checked; stale reads return empty). Declarations (`publishes` / `subscribes` / `serves`) must precede the first I/O (`Error::Started`). `Reply` frames carry the *request* type's hash — decode them with `decode_reply::<S>`, not `decode::<S::Response>`. `Host::call` registers the pending reply under the same lock as the request so the driver cannot race it. `Udp::recv` swallows `ConnectionReset` (Windows reports a closed peer port via ICMP as a recv error).
+- **Keep `link.rs` / `wire.rs` free of `std`** — CI builds `reiny-core` and `reiny-link` with `--no-default-features --target thumbv7em-none-eabihf`. std-only code goes under `#[cfg(feature = "std")]` (`host.rs`, `transport.rs`). `tokio-serial` is pulled with its default features off so no libudev is needed on Linux runners.
+- Not yet wired into `Cloudy`: that needs the `Engine` trait planned in `docs/design/0.5.0.md` §1.
+
 ## Three manifest files (don't conflate)
 
 - **`Cargo.toml`** — Rust build.
