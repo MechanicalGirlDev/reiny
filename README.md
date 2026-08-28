@@ -29,6 +29,16 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
 }
 ```
 
+Request/response rides the same model — the **request type is the address**:
+
+```rust,ignore
+let mut adds = cloudy.serve::<Add>()?;                 // reiny/<domain>/<id>/Add
+while let Some(req) = adds.recv().await {
+    req.reply(Sum { sum: req.value.a + req.value.b }).await?;   // or req.reply_err("…")
+}
+let sum = cloudy.call::<Add>(Add { a: 1, b: 2 }).await?;         // Sum
+```
+
 Anything reiny does not wrap is reachable through `cloudy.session()`, which hands
 you the zenoh `Session` directly. reiny re-exports zenoh (`pub use zenoh`) so you
 never link two versions — the trade is that **zenoh's semver becomes yours**: a
@@ -42,7 +52,7 @@ zenoh major bump is a reiny breaking change.
 | [`reiny-macros`](crates/reiny-macros) | The `#[reiny::main]` proc-macro (used via `reiny`) |
 | [`reiny-build`](crates/reiny-build) | `build.rs` helper: compiles protos from `Reiny.toml` and generates types/topics |
 | [`reiny-launch`](crates/reiny-launch) | Launcher library: spawns grain processes from a launch config's `[grain]` section |
-| [`reiny-cli`](crates/reiny-cli) | The `reiny` command: scaffold (new/init/add), check, build, run, compress, bag |
+| [`reiny-cli`](crates/reiny-cli) | The `reiny` command: scaffold (new/init/add), check, build, run, compress, bag, topic / node / service introspection |
 
 ## Getting started
 
@@ -66,6 +76,16 @@ reiny bag play walk.mcap --rate 0.5 --loop           # back onto the bus
 Design and the split of what reiny records vs. what the `mcap` CLI is left to do:
 [`docs/design/bag.md`](docs/design/bag.md).
 
+Look at a live bus, `ros2 topic / node / service`-style:
+
+```sh
+reiny node list                       # live grain ids
+reiny topic list                      # type → publishers / servers
+reiny topic hz RobotState             # rate per source (Ctrl+C to stop)
+reiny topic echo RobotState --count 3 # JSON, decoded from the schema the grain serves
+reiny service call CalibrationCommand '{"start":{}}' --to hs-control
+```
+
 See [`examples/`](examples) for runnable demos (each is its own cargo workspace).
 For larger workspaces, [`examples/ping-pong-schema`](examples/ping-pong-schema)
 shows the `[schema]` shared-schema crate that compiles the message catalog once
@@ -73,6 +93,8 @@ instead of per grain, and
 [`examples/ping-pong-schema-split`](examples/ping-pong-schema-split) splits that
 catalog across several independently publishable schema crates without
 generating shared leaf types twice.
+[`examples/ping-pong-service`](examples/ping-pong-service) is the request/response
+sample (`[services]` in `Reiny.toml`).
 
 ## License
 
