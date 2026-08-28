@@ -4,7 +4,7 @@ All notable changes to the reiny workspace crates (`reiny`, `reiny-build`,
 `reiny-macros`, `reiny-launch`, `reiny-cli`). Versions are kept in lockstep via
 `[workspace.package].version`.
 
-## 0.4.0 — Unreleased
+## 0.4.0 — 2026-08-28
 
 Services, subscriber-side QoS and bus introspection. Design record:
 `docs/design/0.4.0.md` (§11 records what shipped and where the implementation
