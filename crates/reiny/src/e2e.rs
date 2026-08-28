@@ -11,7 +11,7 @@ use tokio::time::timeout;
 
 use zenoh::Wait;
 
-use crate::{Cloudy, Descriptor, PresenceEvent, Topic, shutdown::Shutdown};
+use crate::{Cloudy, Descriptor, History, PresenceEvent, Qos, Topic, shutdown::Shutdown};
 
 /// このテスト専用の wire 型。`impl Topic` を手書きしているのは、それが
 /// 「第三者が自分の型で参加できる」という reiny の売りそのものだから(回帰も兼ねる)。
@@ -120,10 +120,22 @@ async fn presence_latched_and_domain_isolation() {
     // セッション同士が繋がるまでの間。
     tokio::time::sleep(SETTLE).await;
 
-    // --- latched: 先に 1 回だけ送っておく(定期再送はしない) ---
+    // --- Qos: publisher の KeepLast(n > 1) は build で止まる(黙って 1 に丸めない) ---
+    let err = alpha
+        .publisher::<Probe>()
+        .qos(Qos {
+            history: History::KeepLast(3),
+            ..Qos::DEFAULT
+        })
+        .build()
+        .err()
+        .expect("KeepLast(3) must be rejected");
+    assert!(err.to_string().contains("KeepLast(3)"), "{err}");
+
+    // --- latched(= `Qos::STATE`): 先に 1 回だけ送っておく(定期再送はしない) ---
     let publisher = alpha
         .publisher::<Probe>()
-        .latched()
+        .qos(Qos::STATE)
         .build()
         .expect("latched publisher");
     publisher.send(Probe { seq: 7 }).await.expect("send");

@@ -33,10 +33,33 @@ piece that does not depend on it.
   `reiny-core` / `reiny-link` for `thumbv7em-none-eabihf` with
   `--no-default-features`.
 
+- **QoS in reiny's own vocabulary** — `Qos { reliability, priority, history,
+  durability, express }` with the enums `Reliability` / `Priority` / `History`
+  / `Durability` live in `reiny-core` and are re-exported by `reiny` (and its
+  prelude). `PublisherBuilder::qos(Qos)` takes a whole profile —
+  `Qos::SENSOR` (best-effort, keep-last 1), `Qos::COMMAND` (the default:
+  reliable, keep-all) or `Qos::STATE` (reliable, keep-last 1,
+  transient-local = latched) — and `.reliability()` joins the per-field sugar.
+  `.latched()` is now spelled `durability: TransientLocal` underneath. The
+  engine mapping is documented in `docs/design/0.5.0.md` §2.3.
+
 ### Changed
 
 - `reiny::{Topic, Descriptor, Service}` are now re-exports of `reiny-core`
   (same paths; no source change downstream).
+- **Breaking:** `PublisherBuilder::priority` takes `reiny::Priority` (five
+  levels: `RealTime` / `High` / `Normal` / `Low` / `Background`, mapped onto
+  zenoh's) instead of `zenoh::qos::Priority`, and `.congestion()` is gone —
+  `.reliability(Reliability::BestEffort)` is the `CongestionControl::Drop` it
+  used to set. zenoh's own `reliability()` is still not used (it does not
+  retransmit and is `unstable` in 1.10).
+- **Behavior change:** publishers now default to `Reliability::Reliable`,
+  i.e. zenoh `congestion_control(Block)` — a full link makes `send` wait
+  instead of dropping. 0.4 left zenoh's default (`Drop`); use `Qos::SENSOR` or
+  `.reliability(Reliability::BestEffort)` for that behavior.
+- A publisher built with `history: KeepLast(n > 1)` is rejected at `build()`
+  (a publisher keeps at most the one latched value; rings belong to the
+  subscriber's `.latest(n)`).
 
 ### Notes
 

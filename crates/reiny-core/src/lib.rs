@@ -1,8 +1,8 @@
 //! reiny の型語彙 —— `#![no_std]`。
 //!
 //! reiny の組織原理は **type = topic**: grain は型を渡すだけで publish / subscribe する。
-//! その「型」を名乗るための trait([`Topic`] / [`Service`])と descriptor([`Descriptor`])
-//! だけをここに置く。`reiny` 本体(tokio / zenoh)は std 前提なので、zenoh が走らない場所
+//! その「型」を名乗るための trait([`Topic`] / [`Service`])と descriptor([`Descriptor`])、
+//! それに `QoS` の語彙([`Qos`])だけをここに置く。`reiny` 本体(tokio / zenoh)は std 前提なので、zenoh が走らない場所
 //! (MCU 上の `reiny-link`)でも型 = トピックを共有できるよう、語彙を下に切り出した。
 //!
 //! 通常は `reiny` が再エクスポートするものを使う。このクレートを直接引くのは MCU 側だけで、
@@ -13,6 +13,10 @@
 // ponytail: alloc 必須。alloc-free は micropb + heapless に乗り換える段で trait を切る。
 
 #![no_std]
+
+mod qos;
+
+pub use qos::{Durability, History, Priority, Qos, Reliability};
 
 use prost::Message;
 

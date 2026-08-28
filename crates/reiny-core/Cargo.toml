@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
-description = "reiny's type vocabulary (Topic / Service / Descriptor) — no_std, shared by the SDK and by MCU-side links"
+description = "reiny's type vocabulary (Topic / Service / Descriptor / Qos) — no_std, shared by the SDK and by MCU-side links"
 keywords = ["reiny", "pubsub", "no-std", "embedded"]
 categories = ["network-programming", "no-std", "embedded"]
 

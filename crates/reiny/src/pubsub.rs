@@ -13,14 +13,16 @@ use zenoh::bytes::ZBytes;
 use zenoh::handlers::{FifoChannelHandler, RingChannel, RingChannelHandler};
 use zenoh::liveliness::LivelinessToken;
 use zenoh::pubsub::{Publisher as ZPublisher, Subscriber as ZSubscriber};
-use zenoh::qos::{CongestionControl, Priority};
+use zenoh::qos::{CongestionControl, Priority as ZPriority};
 use zenoh::query::{Query, Queryable, Reply};
 use zenoh::sample::{Sample, SampleKind};
 use zenoh::session::Session;
 use zenoh::time::Timestamp;
 
 use crate::shutdown::Shutdown;
-use crate::{Cloudy, Descriptor, Result, Topic, source_of};
+use crate::{
+    Cloudy, Descriptor, Durability, History, Priority, Qos, Reliability, Result, Topic, source_of,
+};
 
 /// 受信メッセージと、reiny が知っている来歴。
 ///
@@ -43,10 +45,7 @@ pub struct Envelope<T> {
 #[must_use = "builder は .build() するまで何もしない"]
 pub struct PublisherBuilder<'a, T> {
     cloudy: &'a Cloudy,
-    latched: bool,
-    priority: Option<Priority>,
-    congestion: Option<CongestionControl>,
-    express: Option<bool>,
+    qos: Qos,
     _marker: PhantomData<T>,
 }
 
@@ -54,64 +53,78 @@ impl<'a, T> PublisherBuilder<'a, T> {
     pub(crate) fn new(cloudy: &'a Cloudy) -> Self {
         Self {
             cloudy,
-            latched: false,
-            priority: None,
-            congestion: None,
-            express: None,
+            qos: Qos::DEFAULT,
             _marker: PhantomData,
         }
     }
 
+    /// `QoS` をまとめて指定する —— [`Qos::SENSOR`] / [`Qos::COMMAND`] / [`Qos::STATE`] の
+    /// プロファイルか、自前の [`Qos`]。後から呼ぶ糖衣(`.latched()` 等)はこの上に重なる。
+    pub fn qos(mut self, qos: Qos) -> Self {
+        self.qos = qos;
+        self
+    }
+
     /// 直近 1 件を保持し、遅れて来た購読者の問い合わせに答える(latched)。
     /// 「起動時に 1 回配れば済む設定」を定期再送し続けるタスクの代わり。履歴は 1 件だけ。
+    /// = `durability: TransientLocal`。
     pub fn latched(mut self) -> Self {
-        self.latched = true;
+        self.qos.durability = Durability::TransientLocal;
         self
     }
 
-    /// zenoh の送信優先度。
+    /// 輻輳時に捨てるか待つか。= `Qos.reliability`。
+    pub fn reliability(mut self, reliability: Reliability) -> Self {
+        self.qos.reliability = reliability;
+        self
+    }
+
+    /// 送信優先度。= `Qos.priority`。
     pub fn priority(mut self, priority: Priority) -> Self {
-        self.priority = Some(priority);
+        self.qos.priority = priority;
         self
     }
 
-    /// 輻輳時に捨てるか待つか。
-    pub fn congestion(mut self, congestion: CongestionControl) -> Self {
-        self.congestion = Some(congestion);
-        self
-    }
-
-    /// バッチングを飛ばして即時送信する(低レイテンシ・低スループット)。
+    /// バッチングを飛ばして即時送信する(低レイテンシ・低スループット)。= `Qos.express`。
     pub fn express(mut self, express: bool) -> Self {
-        self.express = Some(express);
+        self.qos.express = express;
         self
     }
 
     /// publisher を宣言する。同じキーの liveliness トークンも必ず同伴する
     /// ([`Cloudy::publishers`] の土台。opt-out は無い)。
+    ///
+    /// `history: KeepLast(n > 1)` はエラー —— publisher が持つのは latched の 1 件までで、
+    /// n 件のリングは購読側 `.latest(n)` の仕事(黙って 1 に丸めない)。
     pub fn build(self) -> Result<Publisher<T>>
     where
         T: Message + Topic,
     {
+        if let History::KeepLast(n) = self.qos.history
+            && n != 1
+        {
+            anyhow::bail!(
+                "publisher of {}: history KeepLast({n}) is not supported — a publisher keeps at \
+                 most 1 (latched); use the subscriber's `.latest({n})` for a ring",
+                T::TYPE
+            );
+        }
+        let latched = self.qos.durability == Durability::TransientLocal;
         let key = self.cloudy.key_for(self.cloudy.id(), T::TYPE);
         let session = self.cloudy.session();
 
         // QoS setter は zenoh 側で `#[internal_trait]` により固有メソッドとしても生えているので、
         // `QoSBuilderTrait` を import せず(= `internal` feature を開けず)に呼べる。
-        let mut builder = session.declare_publisher(key.clone());
-        if let Some(p) = self.priority {
-            builder = builder.priority(p);
-        }
-        if let Some(c) = self.congestion {
-            builder = builder.congestion_control(c);
-        }
-        if let Some(e) = self.express {
-            builder = builder.express(e);
-        }
-        let publisher = builder.wait().map_err(anyhow::Error::msg)?;
+        let publisher = session
+            .declare_publisher(key.clone())
+            .priority(zenoh_priority(self.qos.priority))
+            .congestion_control(zenoh_congestion(self.qos.reliability))
+            .express(self.qos.express)
+            .wait()
+            .map_err(anyhow::Error::msg)?;
 
         let last: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
-        let queryable = if self.latched {
+        let queryable = if latched {
             Some(declare_latch(
                 self.cloudy,
                 &key,
@@ -135,7 +148,7 @@ impl<'a, T> PublisherBuilder<'a, T> {
             None => None,
         };
 
-        tracing::debug!(key = %key, latched = self.latched, "publisher declared");
+        tracing::debug!(key = %key, latched, "publisher declared");
         Ok(Publisher {
             publisher,
             _token: token,
@@ -144,6 +157,45 @@ impl<'a, T> PublisherBuilder<'a, T> {
             last,
             _marker: PhantomData,
         })
+    }
+}
+
+/// reiny の 5 段階を zenoh の 7 段階へ。`Normal` = zenoh の既定(`Data`)。
+fn zenoh_priority(priority: Priority) -> ZPriority {
+    match priority {
+        Priority::RealTime => ZPriority::RealTime,
+        Priority::High => ZPriority::InteractiveHigh,
+        Priority::Normal => ZPriority::Data,
+        Priority::Low => ZPriority::DataLow,
+        Priority::Background => ZPriority::Background,
+    }
+}
+
+/// `Reliability` は zenoh の `congestion_control` に落とす —— 輻輳で「捨てる / 待つ」が、
+/// 実際に効く唯一のノブだから。zenoh 自身の `reliability()` は再送をしない marker で、
+/// 1.10 でも `unstable`(`docs/design/0.5.0.md` §2.3)。
+fn zenoh_congestion(reliability: Reliability) -> CongestionControl {
+    match reliability {
+        Reliability::BestEffort => CongestionControl::Drop,
+        Reliability::Reliable => CongestionControl::Block,
+    }
+}
+
+#[cfg(test)]
+mod qos_tests {
+    use super::*;
+
+    #[test]
+    fn normal_is_zenoh_default_and_reliable_blocks() {
+        assert_eq!(zenoh_priority(Priority::Normal), ZPriority::DEFAULT);
+        assert_eq!(
+            zenoh_congestion(Reliability::Reliable),
+            CongestionControl::Block
+        );
+        assert_eq!(
+            zenoh_congestion(Reliability::BestEffort),
+            CongestionControl::Drop
+        );
     }
 }
 

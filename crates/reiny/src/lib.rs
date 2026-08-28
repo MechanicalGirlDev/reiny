@@ -51,7 +51,7 @@ pub use service::{CallError, Caller, CallerBuilder, Request, Server};
 
 /// 型語彙は `reiny-core`(`no_std`)に住む。zenoh が走らない場所(`reiny-link` の MCU 側)と
 /// 同じ trait を共有するためで、利用側から見えるパスは 0.4 と同じ `reiny::Topic` のまま。
-pub use reiny_core::{Descriptor, Service, Topic};
+pub use reiny_core::{Descriptor, Durability, History, Priority, Qos, Reliability, Service, Topic};
 
 /// zenoh そのもの。[`Cloudy::session`] を使うコードが reiny と版ズレを起こさないよう、
 /// reiny がリンクしている zenoh を再エクスポートする。
@@ -368,8 +368,8 @@ fn validate_segment(what: &str, value: &str) -> Result<()> {
 /// よく使うものをまとめた prelude。`use reiny::prelude::*;`
 pub mod prelude {
     pub use crate::{
-        CallError, Caller, Cloudy, Descriptor, Envelope, PresenceEvent, Publisher, Request, Server,
-        Service, Subscriber, Topic,
+        CallError, Caller, Cloudy, Descriptor, Envelope, PresenceEvent, Priority, Publisher, Qos,
+        Reliability, Request, Server, Service, Subscriber, Topic,
     };
 }
 
