@@ -1,26 +1,26 @@
-//! reiny の build 補助。各 launch の `build.rs` から [`compile`] を呼ぶ。
+//! reiny's build helper. Each launch's `build.rs` calls [`compile`].
 //!
-//! `Reiny.toml` を読み、必要な proto を prost でコンパイルし、`$OUT_DIR/reiny_generated.rs` に
+//! It reads `Reiny.toml`, compiles the protos it needs with prost, and writes `$OUT_DIR/reiny_generated.rs`:
 //!
-//! - `publications` / `dependencies::<project>` / `internals` の各モジュール(生成型の再エクスポート)
-//! - 各メッセージ型への `impl ::reiny::Topic`(型 → トピックの埋め込み)
+//! - the `publications` / `dependencies::<project>` / `internals` modules (re-exports of the generated types)
+//! - one `impl ::reiny::Topic` per message type (the type → topic mapping, embedded)
 //!
-//! を書き出す。このファイルは `#[reiny::main]` が crate ルートへ取り込むので、利用側は
-//! `use crate::publications::Ping;` のように型を参照できる。
+//! `#[reiny::main]` includes that file into the crate root, which is why user code names types as
+//! `use crate::publications::Ping;`.
 //!
-//! 2 つの配置を扱う:
-//! - **per-project**(`[project]` を持つ Reiny.toml): 自分の `[publications]` と、`[dependencies]`
-//!   先プロジェクトの公開型を解決する。型 → トピックは「その型を公開するプロジェクト」。
-//! - **workspace 共有**(`[internals]` / `[projects.*]` を持つ Reiny.toml): 共有カタログ
-//!   `[internals]` を全部コンパイルし `internals::*` として公開する。
+//! Two layouts are handled:
+//! - **per-project** (a Reiny.toml with `[project]`): resolves its own `[publications]` plus the public
+//!   types of every `[dependencies]` project. The type → topic owner is "the project that publishes it".
+//! - **workspace shared** (a Reiny.toml with `[internals]` / `[projects.*]`): compiles the whole shared
+//!   catalog `[internals]` and exposes it as `internals::*`.
 
-// build スクリプトから呼ばれる補助 crate なので、設定不備は context 付き panic で
-// 即座に build を止めるのが正しい。unwrap/expect/panic 系の制限は本 crate では外す。
+// This is a helper crate called from build scripts, so the right response to a misconfiguration is to
+// stop the build at once with a context-carrying panic. The unwrap/expect/panic lints are lifted here.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
 use std::env;
-// writeln! を使うのは生成コードと指紋(descriptors 機能側)だけ。
+// writeln! is used only by the codegen and by the fingerprint (the descriptors feature).
 #[cfg(feature = "descriptors")]
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -29,52 +29,52 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
-// Reiny.toml のスキーマ
+// The Reiny.toml schema
 // ---------------------------------------------------------------------------
 
-/// Reiny.toml 全体(per-project / workspace どちらの形も受ける)。
+/// The whole Reiny.toml (it accepts the per-project shape and the workspace shape alike).
 #[derive(Debug, Deserialize)]
 struct Manifest {
-    /// per-project の身元。これがあれば per-project モード。
+    /// The per-project identity. Its presence is what selects per-project mode.
     project: Option<Project>,
-    /// per-project の公開型。
+    /// The per-project public types.
     #[serde(default)]
     publications: BTreeMap<String, TypeDef>,
-    /// per-project の依存プロジェクト。
+    /// The per-project dependency projects.
     #[serde(default)]
     dependencies: BTreeMap<String, Dependency>,
-    /// workspace 共有カタログ。
+    /// The workspace's shared catalog.
     #[serde(default)]
     internals: BTreeMap<String, TypeDef>,
-    /// workspace 各プロジェクトの公開/購読宣言。
+    /// Each workspace project's publish / subscribe declarations.
     #[serde(default)]
     projects: BTreeMap<String, ProjectDecl>,
-    /// workspace 共有スキーマクレート(あれば、型を 1 度だけ生成して共有する)。
+    /// The workspace's shared schema crates (with them, a type is generated once and shared).
     schema: Option<SchemaDecl>,
-    /// per-project の型付き設定スキーマ + 既定値(`cloudy.config()` で読む)。
+    /// The per-project typed config schema + defaults (read through `cloudy.config()`).
     config: Option<toml::Table>,
-    /// `[services]`: request 型 → response 型(`impl reiny::Service` を生成する)。
+    /// `[services]`: request type → response type (generates `impl reiny::Service`).
     #[serde(default)]
     services: BTreeMap<String, ServiceDef>,
 }
 
-/// `Name = { request = "Req", response = "Resp" }`。値はカタログの別名
-/// (`[publications]` / `[internals]` のキー。per-project の依存型は `<dep>::<Alias>`)。
+/// `Name = { request = "Req", response = "Resp" }`. The values are catalog aliases
+/// (`[publications]` / `[internals]` keys; a per-project dependency type is `<dep>::<Alias>`).
 #[derive(Debug, Deserialize)]
 struct ServiceDef {
     request: String,
     response: String,
 }
 
-/// `[schema]` の 2 形。`crate` はキーワードなので rename で受ける。
+/// The two shapes of `[schema]`. `crate` is a keyword, so it is taken through a rename.
 ///
-/// - **単一形**(0.2)`[schema] crate = "myapp-schema"` —— `[internals]` 全部を 1 クレートが
-///   prost コンパイル + `impl Topic` し、launch は Cargo 依存として再エクスポートする。
-/// - **多クレート形**(0.3)`[schema.<name>] crate/protos/depends` —— スキーマを独立に公開可能な
-///   複数クレートへ割る。所属は proto パスから決まり、リーフ型は `extern_path` で 1 度しか
-///   生成されない。
+/// - **single** (0.2) `[schema] crate = "myapp-schema"` — one crate prost-compiles all of
+///   `[internals]` and writes the `impl Topic`s; launches re-export it as a Cargo dependency.
+/// - **multi-crate** (0.3) `[schema.<name>] crate/protos/depends` — the schema is split across
+///   several independently publishable crates. Ownership follows the proto path, and a leaf type is
+///   generated exactly once.
 ///
-/// untagged なので単一形を先に試す(`crate` キーが文字列なら単一形、そうでなければ区画表)。
+/// Untagged, so the single shape is tried first (a string `crate` key = single, otherwise a part table).
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum SchemaDecl {
@@ -88,72 +88,72 @@ struct SchemaSingle {
     crate_name: String,
 }
 
-/// `[schema.<name>]` の 1 区画。
+/// One part of `[schema.<name>]`.
 #[derive(Debug, Deserialize)]
 struct SchemaPartDef {
     #[serde(rename = "crate")]
     crate_name: String,
-    /// この区画が所有する proto(Reiny.toml のあるディレクトリ基準)。
+    /// The protos this part owns (relative to the directory holding Reiny.toml).
     protos: Vec<String>,
-    /// 依存する区画名。**推移的に閉じている**必要があり、同じ辺が Cargo の依存にも要る。
+    /// The part names it depends on. Must be **transitively closed**, and each edge needs a Cargo dep too.
     #[serde(default)]
     depends: Vec<String>,
 }
 
-/// 正規化した 1 スキーマクレート。単一形は `name: None` / `protos: None`
-/// (= `[internals]` 全部を持つ)として畳む。
+/// One normalized schema crate. The single shape folds in as `name: None` / `protos: None`
+/// (= it owns all of `[internals]`).
 #[derive(Debug, Clone)]
 struct SchemaPart {
-    /// `[schema.<name>]` の区画名。単一形は `None`。
+    /// The part name from `[schema.<name>]`. `None` for the single shape.
     name: Option<String>,
     crate_name: String,
-    /// 所有 proto の絶対パス。単一形は `None`。
+    /// The absolute paths of the owned protos. `None` for the single shape.
     protos: Option<Vec<PathBuf>>,
     depends: Vec<String>,
 }
 
 impl SchemaPart {
-    /// extern crate 名(`myapp-proto-geometry` → `myapp_proto_geometry`)。
+    /// The extern crate name (`myapp-proto-geometry` → `myapp_proto_geometry`).
     fn crate_ident(&self) -> String {
         self.crate_name.replace('-', "_")
     }
 }
 
-/// スキーマクレート 1 件の内省ビュー(`reiny check` 用)。
+/// An introspection view of one schema crate (for `reiny check`).
 #[derive(Debug, Clone)]
 pub struct SchemaCrateInfo {
-    /// `[schema.<name>]` の区画名。単一 `[schema]` なら `None`。
+    /// The part name from `[schema.<name>]`. `None` for a single `[schema]`.
     pub part: Option<String>,
-    /// Cargo パッケージ名。
+    /// The Cargo package name.
     pub crate_name: String,
-    /// 依存する区画名。
+    /// The part names it depends on.
     pub depends: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct Project {
-    /// プロジェクト名。実行時インスタンス id はランチャ/`--id` が決め、トピックは型から
-    /// 決まるので、ここでは [project] モード判定と宣言の自己記述のためだけに保持する。
+    /// The project name. The runtime instance id is decided by the launcher / `--id` and topics follow
+    /// from types, so this is kept only for [project] mode detection and self-description.
     name: String,
 }
 
-/// `Type = { proto = "...", message = "pkg.Type" }`。
+/// `Type = { proto = "...", message = "pkg.Type" }`.
 #[derive(Debug, Deserialize)]
 struct TypeDef {
     proto: String,
     message: String,
 }
 
-/// `dep = { version = "0.1", path = "../dep" }`。version は今は検証に使わない。
+/// `dep = { version = "0.1", path = "../dep" }`. `version` is not used for validation yet.
 #[derive(Debug, Deserialize)]
 struct Dependency {
     path: PathBuf,
 }
 
-/// `[projects.<name>]` の publications / dependencies(カタログのキー名を参照)。
-/// 存在確認のほか、[`Resolution::projects`] で内省ビューとして公開する
-/// (`reiny run` がトピックの流れ図を組むのに使う)。
+/// The publications / dependencies of `[projects.<name>]` (naming catalog keys).
+/// Besides the existence check, they are exposed as an introspection view through
+/// [`Resolution::projects`] (`reiny run` builds its topic flow diagram from it).
 #[derive(Debug, Default, Deserialize)]
 struct ProjectDecl {
     #[serde(default)]
@@ -163,10 +163,10 @@ struct ProjectDecl {
 }
 
 // ---------------------------------------------------------------------------
-// 中間表現
+// The intermediate representation
 // ---------------------------------------------------------------------------
 
-/// どの生成モジュールへ型を出すか。
+/// Which generated module a type is emitted into.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Exposure {
     Publications,
@@ -174,7 +174,7 @@ enum Exposure {
     Dependencies(String),
 }
 
-/// 解決済みの 1 サービス。`request` / `response` は `Resolution::entries` の添字。
+/// One resolved service. `request` / `response` index into `Resolution::entries`.
 #[derive(Debug, Clone)]
 struct ServiceEntry {
     name: String,
@@ -182,32 +182,32 @@ struct ServiceEntry {
     response: usize,
 }
 
-/// 解決済みの 1 メッセージ型。
+/// One resolved message type.
 #[derive(Debug, Clone)]
 struct Entry {
-    /// 生成モジュールでの公開名(Reiny.toml のキー、例 `Ping`)。
+    /// The public name in the generated module (the Reiny.toml key, e.g. `Ping`).
     alias: String,
-    /// proto package のセグメント列(例 `["ping"]`)。
+    /// The proto package's segments (e.g. `["ping"]`).
     package: Vec<String>,
-    /// Rust 型名(例 `Ping`)。これがトピックの型セグメント(`reiny/<id>/Ping`)になる。
+    /// The Rust type name (e.g. `Ping`). This becomes the topic's type segment (`reiny/<id>/Ping`).
     ident: String,
-    /// どのモジュールへ出すか。
+    /// Which module it is emitted into.
     exposure: Exposure,
-    /// コンパイルすべき proto の絶対パス。
+    /// The absolute path of the proto to compile.
     proto: PathBuf,
-    /// この型を所有するスキーマ区画名(多クレート形のみ)。proto パスから決まる。
+    /// The schema part owning this type (multi-crate shape only). Follows the proto path.
     owner: Option<String>,
 }
 
 impl Entry {
-    /// proto の完全メッセージ名(例 `hs.Vector3`)。descriptor 由来の指紋を引く鍵。
+    /// The proto's fully qualified message name (e.g. `hs.Vector3`). The key to the descriptor fingerprint.
     fn fq_name(&self) -> String {
         let mut segs = self.package.clone();
         segs.push(self.ident.clone());
         segs.join(".")
     }
 
-    /// `__reiny_generated` から見た型パス(例 `__pb::ping::Ping`)。
+    /// The type path as seen from `__reiny_generated` (e.g. `__pb::ping::Ping`).
     fn type_path(&self) -> String {
         let mut segs = vec!["__pb".to_string()];
         segs.extend(self.package.iter().cloned());
@@ -217,35 +217,35 @@ impl Entry {
 }
 
 // ---------------------------------------------------------------------------
-// 解決モードと結果(CLI からの内省にも使う公開 API)
+// Resolution modes and results (public API; also used for introspection from the CLI)
 // ---------------------------------------------------------------------------
 
-/// Reiny.toml をどの配置として解決したか。
+/// Which layout the Reiny.toml was resolved as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
-    /// per-project(`[project]`)。自分の publications + 依存先の公開型を生成する。
+    /// per-project (`[project]`). Generates its own publications plus the dependencies' public types.
     PerProject,
-    /// workspace 共有(`[internals]`/`[projects]`、`[schema]` 無し)。各 launch が
-    /// `[internals]` を自前で prost コンパイルする(従来どおり)。
+    /// Workspace shared (`[internals]`/`[projects]`, no `[schema]`). Every launch prost-compiles
+    /// `[internals]` for itself (as it always did).
     Workspace,
-    /// workspace + `[schema]`。自分が **スキーマクレート本体**で、担当分を prost コンパイル +
-    /// `impl Topic` する。launch はこれを Cargo 依存として共有する。
+    /// Workspace + `[schema]`, and we are the **schema crate itself**: prost-compile our share and
+    /// write the `impl Topic`s. Launches share it as a Cargo dependency.
     Schema {
-        /// 多クレート形(`[schema.<name>]`)での担当区画名。単一 `[schema]` なら `None`
-        /// (= `[internals]` 全部を持つ)。
+        /// The part we are responsible for in the multi-crate shape (`[schema.<name>]`). `None` for a
+        /// single `[schema]` (= it owns all of `[internals]`).
         part: Option<String>,
     },
-    /// workspace + `[schema]`。自分はスキーマを **消費する launch**。proto は再コンパイルせず、
-    /// スキーマクレート群の型を `internals` として再エクスポートするだけ。
+    /// Workspace + `[schema]`, and we are a launch **consuming** the schema. No proto is recompiled;
+    /// the schema crates' types are merely re-exported as `internals`.
     SchemaConsumer {
-        /// 依存するスキーマクレートの extern ident(`myapp-schema` → `myapp_schema`)。
-        /// 多クレート形では全区画が並ぶ(`internals` はその和集合)。
+        /// The extern idents of the schema crates depended on (`myapp-schema` → `myapp_schema`).
+        /// In the multi-crate shape every part is listed (`internals` is their union).
         crate_idents: Vec<String>,
     },
 }
 
 impl Mode {
-    /// 人が読むラベル(`reiny check` 用)。
+    /// A human-readable label (for `reiny check`).
     #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
@@ -258,85 +258,85 @@ impl Mode {
     }
 }
 
-/// 解決済みのメッセージ型 1 件の内省ビュー(`reiny check` 用に [`Entry`] を公開化したもの)。
+/// An introspection view of one resolved message type ([`Entry`] made public for `reiny check`).
 #[derive(Debug, Clone)]
 pub struct TypeInfo {
-    /// 生成モジュールでの公開名(Reiny.toml のキー)。
+    /// The public name in the generated module (the Reiny.toml key).
     pub alias: String,
-    /// proto の完全メッセージ名(例 `ping.Ping`)。
+    /// The proto's fully qualified message name (e.g. `ping.Ping`).
     pub message: String,
-    /// 型 → トピックの型セグメント(`reiny/<id>/<segment>`)。
+    /// The type → topic type segment (`reiny/<id>/<segment>`).
     pub topic_segment: String,
-    /// どの生成モジュールへ出るか(`publications` / `internals` / `dependencies::<dep>`)。
+    /// Which generated module it appears in (`publications` / `internals` / `dependencies::<dep>`).
     pub module: String,
-    /// コンパイル対象 proto の絶対パス。
+    /// The absolute path of the proto to compile.
     pub proto: PathBuf,
-    /// 所有するスキーマ区画名(多クレート形のみ)。
+    /// The schema part that owns it (multi-crate shape only).
     pub owner: Option<String>,
 }
 
-/// Reiny.toml を解決した結果。proto コンパイル前の純粋な情報なので、`compile` 機能(prost)無しでも
-/// 得られる。`reiny check` はこれを表示し、[`compile`] はこれを使って生成物を書き出す。
+/// The result of resolving a Reiny.toml. Pure information from before any proto is compiled, so it is
+/// available without the `compile` feature. `reiny check` prints it; [`compile`] writes its output from it.
 pub struct Resolution {
     mode: Mode,
     entries: Vec<Entry>,
     config: Option<toml::Table>,
     manifest_path: PathBuf,
-    /// 正規化した `[schema]` 区画群(無ければ空)。
+    /// The normalized `[schema]` parts (empty when there are none).
     schema_parts: Vec<SchemaPart>,
-    /// `[services]`(無ければ空)。
+    /// `[services]` (empty when there are none).
     services: Vec<ServiceEntry>,
-    /// `[projects.*]` の宣言(workspace 配置のみ。per-project では空)。
+    /// The `[projects.*]` declarations (workspace layout only; empty for per-project).
     projects: Vec<ProjectInfo>,
 }
 
-/// `[projects.<name>]` 1 件の内省ビュー。publications / dependencies は
-/// `[internals]` のキー(別名)をそのまま持つ([`Resolution::types`] の `alias` で引ける)。
+/// An introspection view of one `[projects.<name>]`. publications / dependencies hold the
+/// `[internals]` keys (aliases) verbatim (look them up through [`Resolution::types`]'s `alias`).
 #[derive(Debug, Clone)]
 pub struct ProjectInfo {
-    /// `[projects.<name>]` のキー(= パッケージ / 既定 bin 名)。
+    /// The `[projects.<name>]` key (= the package / default bin name).
     pub name: String,
-    /// 公開する型の別名。
+    /// The aliases of the types it publishes.
     pub publications: Vec<String>,
-    /// 購読する型の別名。
+    /// The aliases of the types it subscribes to.
     pub dependencies: Vec<String>,
 }
 
-/// `[services]` 1 件の内省ビュー(`reiny check` 用)。
+/// An introspection view of one `[services]` entry (for `reiny check`).
 #[derive(Debug, Clone)]
 pub struct ServiceInfo {
-    /// `[services]` のキー(表示名。生成コードには出ない)。
+    /// The `[services]` key (a display name; it does not appear in the generated code).
     pub name: String,
-    /// request 型の別名(Reiny.toml で書いたまま)。
+    /// The request type's alias (exactly as written in Reiny.toml).
     pub request: String,
-    /// request 型の完全メッセージ名(例 `calc.Add`)。
+    /// The request type's fully qualified message name (e.g. `calc.Add`).
     pub request_message: String,
-    /// response 型の別名。
+    /// The response type's alias.
     pub response: String,
-    /// response 型の完全メッセージ名。
+    /// The response type's fully qualified message name.
     pub response_message: String,
 }
 
 impl Resolution {
-    /// どの配置で解決したか。
+    /// Which layout it was resolved as.
     #[must_use]
     pub fn mode(&self) -> &Mode {
         &self.mode
     }
 
-    /// 採用した Reiny.toml の絶対パス。
+    /// The absolute path of the Reiny.toml that was used.
     #[must_use]
     pub fn manifest_path(&self) -> &Path {
         &self.manifest_path
     }
 
-    /// `[config]` を持つか(per-project の型付き設定)。
+    /// Whether it has a `[config]` (the per-project typed configuration).
     #[must_use]
     pub fn has_config(&self) -> bool {
         self.config.is_some()
     }
 
-    /// `[schema]` が宣言するスキーマクレート群(無ければ空)。単一形は 1 件で `part` が `None`。
+    /// The schema crates `[schema]` declares (empty when none). The single shape is one entry with `part` = `None`.
     #[must_use]
     pub fn schema_crates(&self) -> Vec<SchemaCrateInfo> {
         self.schema_parts
@@ -349,7 +349,7 @@ impl Resolution {
             .collect()
     }
 
-    /// `[services]` の一覧(request 型 → response 型)。
+    /// The list of `[services]` (request type → response type).
     #[must_use]
     pub fn services(&self) -> Vec<ServiceInfo> {
         self.services
@@ -368,13 +368,13 @@ impl Resolution {
             .collect()
     }
 
-    /// `[projects.*]` の宣言一覧(workspace 配置のみ。per-project では空)。
+    /// The list of `[projects.*]` declarations (workspace layout only; empty for per-project).
     #[must_use]
     pub fn projects(&self) -> &[ProjectInfo] {
         &self.projects
     }
 
-    /// 解決済みの型一覧(トピック・モジュール付き)。
+    /// The resolved types, with their topics and modules.
     #[must_use]
     pub fn types(&self) -> Vec<TypeInfo> {
         self.entries
@@ -400,28 +400,28 @@ impl Resolution {
 }
 
 // ---------------------------------------------------------------------------
-// エントリポイント
+// Entry points
 // ---------------------------------------------------------------------------
 
-/// prost-build そのもの。[`compile_with`] のクロージャが受け取る `Config` の型を
-/// 利用側 `build.rs` が名指しできるよう再エクスポートする(版ズレ防止)。
+/// prost-build itself. Re-exported so a downstream `build.rs` can name the `Config` type that
+/// [`compile_with`]'s closure receives (which keeps the two versions from drifting apart).
 #[cfg(feature = "compile")]
 pub use prost_build;
 
-/// `build.rs` から呼ぶ。Reiny.toml を読み、proto をコンパイルして生成物を `$OUT_DIR` に出す。
+/// Called from `build.rs`. Reads Reiny.toml, compiles the protos and puts the output in `$OUT_DIR`.
 ///
-/// `compile` 機能(既定 on)が要る。`reiny check` のように prost を引きたくない内省用途では
-/// [`resolve`] を直接使う。
+/// Needs the `compile` feature (on by default). For introspection that does not want prost pulled in —
+/// as in `reiny check` — use [`describe`] directly.
 #[cfg(feature = "compile")]
 pub fn compile() -> Result<()> {
     compile_with(|_| {})
 }
 
-/// [`compile`] と同じだが、prost へ渡す直前の `prost_build::Config` を触れる。
+/// The same as [`compile`], but with access to the `prost_build::Config` just before prost gets it.
 ///
-/// reiny が prost のノブを塞がないための逃げ道。`type_attribute` で wire 型に serde を
-/// derive する、`file_descriptor_set_path` を出して `prost-reflect` で動的デコードする、
-/// `bytes()` / `btree_map` / `boxed` …… いずれも reiny 側に専用 API を足さずに済む。
+/// An escape hatch so reiny does not block off prost's knobs: `type_attribute` to derive serde on wire
+/// types, `file_descriptor_set_path` for dynamic decoding through `prost-reflect`, `bytes()` /
+/// `btree_map` / `boxed` … none of which needs a dedicated API on reiny's side.
 ///
 /// ```ignore
 /// // build.rs
@@ -431,8 +431,8 @@ pub fn compile() -> Result<()> {
 /// .expect("reiny codegen");
 /// ```
 ///
-/// `out_dir` / `include_file` は reiny が生成物を組み立てるのに使うので、
-/// クロージャで上書きしても reiny の生成物とは噛み合わなくなる(触らないこと)。
+/// `out_dir` / `include_file` are what reiny assembles its output with, so overriding them from the
+/// closure only breaks the fit with that output (leave them alone).
 #[cfg(feature = "compile")]
 pub fn compile_with(customize: impl FnOnce(&mut prost_build::Config)) -> Result<()> {
     let manifest_dir =
@@ -443,8 +443,8 @@ pub fn compile_with(customize: impl FnOnce(&mut prost_build::Config)) -> Result<
     let resolution = resolve_for(&manifest_dir, &pkg_name)?;
     report_verbose(&resolution);
 
-    // スキーマ消費 launch は proto を再コンパイルせず、スキーマクレート群を再エクスポートするだけ。
-    // それ以外は担当分の proto をコンパイルして完全な生成物を出す。
+    // A schema-consuming launch recompiles no protos and merely re-exports the schema crates.
+    // Everything else compiles its share of the protos and emits the full output.
     let generated = if let Mode::SchemaConsumer { crate_idents } = &resolution.mode {
         render_consumer(crate_idents)
     } else {
@@ -469,10 +469,10 @@ pub fn compile_with(customize: impl FnOnce(&mut prost_build::Config)) -> Result<
     Ok(())
 }
 
-/// `reiny check` 向けの内省。特定パッケージの視点ではなく、Reiny.toml が表す **カタログ全体**を
-/// 解決する(workspace では `[internals]` を全部、per-project では自分の publications + 依存)。
-/// proto はコンパイルしないので `compile` 機能無しでも使える。検証(識別子・トピック衝突)は
-/// 通すので、配置ミスはここで分かる。
+/// Introspection for `reiny check`. It resolves the **whole catalog** the Reiny.toml describes rather
+/// than one package's view of it (in a workspace, all of `[internals]`; per-project, own publications
+/// plus dependencies). No proto is compiled, so it works without the `compile` feature. Validation
+/// (identifiers, topic collisions) still runs, so a misconfigured layout surfaces here.
 pub fn describe(dir: &Path) -> Result<Resolution> {
     let (manifest_path, manifest) = find_manifest(dir)
         .with_context(|| format!("locating Reiny.toml from {}", dir.display()))?;
@@ -489,7 +489,7 @@ pub fn describe(dir: &Path) -> Result<Resolution> {
             resolve_per_project(&manifest, &manifest_root)?,
         )
     } else if !manifest.internals.is_empty() || !manifest.projects.is_empty() {
-        // カタログ視点: どの 1 パッケージにも束縛しない。[schema] があればその旨を示す。
+        // The catalog view: bound to no single package. Say so when there is a [schema].
         let mut entries = internals_entries(&manifest, &manifest_root)?;
         assign_owners(&mut entries, &schema_parts, &manifest_path)?;
         let mode = if schema_parts.is_empty() {
@@ -519,8 +519,8 @@ pub fn describe(dir: &Path) -> Result<Resolution> {
     })
 }
 
-/// Reiny.toml を探索 → モード判定 → 検証して [`Resolution`] を組む(proto はまだ触らない)。
-/// build.rs(`compile`)から、パッケージ視点で呼ぶ。
+/// Find the Reiny.toml → decide the mode → validate → build a [`Resolution`] (no proto touched yet).
+/// Called from build.rs (`compile`), from one package's point of view.
 #[cfg(feature = "compile")]
 fn resolve_for(manifest_dir: &Path, pkg_name: &str) -> Result<Resolution> {
     let (manifest_path, manifest) = find_manifest(manifest_dir)
@@ -567,7 +567,7 @@ fn resolve_for(manifest_dir: &Path, pkg_name: &str) -> Result<Resolution> {
     })
 }
 
-/// `[projects.*]` を内省ビューへ写す。
+/// Copy `[projects.*]` into the introspection view.
 fn project_infos(manifest: &Manifest) -> Vec<ProjectInfo> {
     manifest
         .projects
@@ -581,10 +581,10 @@ fn project_infos(manifest: &Manifest) -> Vec<ProjectInfo> {
 }
 
 // ---------------------------------------------------------------------------
-// Reiny.toml の探索と解決
+// Finding and resolving the Reiny.toml
 // ---------------------------------------------------------------------------
 
-/// `start` から上方向へ `Reiny.toml` を探す(最も近いものを採用)。
+/// Search upward from `start` for a `Reiny.toml` (the nearest one wins).
 fn find_manifest(start: &Path) -> Result<(PathBuf, Manifest)> {
     let mut dir = Some(start.to_path_buf());
     while let Some(d) = dir {
@@ -607,20 +607,20 @@ fn parse_manifest(path: &Path) -> Result<Manifest> {
     toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
-/// per-project: 自分の publications + 各依存先プロジェクトの公開型。
+/// per-project: own publications plus each dependency project's public types.
 fn resolve_per_project(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
     let _project = manifest.project.as_ref().expect("project present");
     let mut entries = Vec::new();
 
-    // 自分の公開型。
+    // Our own public types.
     for (alias, td) in &manifest.publications {
         ensure_rust_ident(alias, "publication alias", "[publications]")?;
         entries.push(make_entry(alias, td, root, Exposure::Publications)?);
     }
 
-    // 依存先プロジェクトの公開型(dependencies::<dep>::* として再エクスポート)。
+    // The dependency projects' public types (re-exported as dependencies::<dep>::*).
     for (dep_name, dep) in &manifest.dependencies {
-        // dep 名は生成コードで `pub mod <dep>` になるので Rust 識別子必須(ハイフン不可)。
+        // A dep name becomes `pub mod <dep>` in the generated code, so it must be a Rust identifier.
         ensure_rust_ident(dep_name, "dependency key", "[dependencies]")?;
         let dep_dir = resolve_relative(root, &dep.path);
         let dep_manifest_path = dep_dir.join("Reiny.toml");
@@ -653,9 +653,9 @@ fn resolve_per_project(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
     Ok(entries)
 }
 
-/// workspace 共有: [internals] を全部 `internals::*` へ。トピックは型名から決まるので、
-/// どのプロジェクトが公開するかには依らない。`[schema]` があれば、自分がスキーマクレート本体か
-/// 消費 launch かでモードが分かれる。build.rs(`compile`)からパッケージ視点で呼ぶ。
+/// Workspace shared: all of [internals] into `internals::*`. A topic follows the type name, so it does
+/// not depend on which project publishes it. With a `[schema]`, the mode splits on whether we are the
+/// schema crate itself or a consuming launch. Called from build.rs (`compile`) per package.
 #[cfg(feature = "compile")]
 fn resolve_workspace(
     manifest: &Manifest,
@@ -664,7 +664,7 @@ fn resolve_workspace(
     manifest_path: &Path,
     parts: &[SchemaPart],
 ) -> Result<(Mode, Vec<Entry>)> {
-    // [schema] の有無と、自分がスキーマクレート本体かでモードを決める。
+    // The mode follows from whether there is a [schema] and whether we are the schema crate itself.
     let in_projects = manifest.projects.contains_key(pkg_name);
     let mode = if parts.is_empty() {
         if in_projects {
@@ -681,7 +681,7 @@ fn resolve_workspace(
             part: mine.name.clone(),
         }
     } else if in_projects {
-        // 消費 launch は [projects.<pkg>] に居る必要がある。internals は全区画の和。
+        // A consuming launch has to appear in [projects.<pkg>]. internals is the union of all parts.
         Mode::SchemaConsumer {
             crate_idents: parts.iter().map(SchemaPart::crate_ident).collect(),
         }
@@ -695,15 +695,15 @@ fn resolve_workspace(
         );
     };
 
-    // entries は全モードで [internals] を解決しておく(消費モードでは内省・診断にのみ使い、
-    // proto はコンパイルしない)。所有区画は proto パスから決まる。
+    // entries resolves [internals] in every mode (in consumer mode it only feeds introspection and
+    // diagnostics; no proto is compiled). The owning part follows from the proto path.
     let mut entries = internals_entries(manifest, root)?;
     assign_owners(&mut entries, parts, manifest_path)?;
 
     Ok((mode, entries))
 }
 
-/// `[internals]` を `Exposure::Internals` の Entry 群にする(所有区画はまだ空)。
+/// Turn `[internals]` into `Exposure::Internals` entries (the owning part is still empty).
 fn internals_entries(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     for (alias, td) in &manifest.internals {
@@ -714,17 +714,17 @@ fn internals_entries(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
 }
 
 // ---------------------------------------------------------------------------
-// [schema] の正規化と所有割り当て
+// Normalizing [schema] and assigning ownership
 // ---------------------------------------------------------------------------
 
-/// パス比較用の正準形。`[internals].proto` と `[schema.*].protos` が同じファイルを別表記
-/// (`./x.proto` と `x.proto` など)で指しても同一と判定できるようにする。
+/// The canonical form for comparing paths, so that `[internals].proto` and `[schema.*].protos`
+/// naming the same file in different spellings (`./x.proto` vs `x.proto`) still compare equal.
 fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// `[schema]` を区画の並びへ正規化し、識別子・依存の健全性を検証する。
-/// `[schema]` が無ければ空。
+/// Normalize `[schema]` into a list of parts and validate the identifiers and the dependencies.
+/// Empty when there is no `[schema]`.
 fn normalize_schema(manifest: &Manifest, root: &Path) -> Result<Vec<SchemaPart>> {
     let Some(decl) = &manifest.schema else {
         return Ok(Vec::new());
@@ -778,12 +778,12 @@ fn normalize_schema(manifest: &Manifest, root: &Path) -> Result<Vec<SchemaPart>>
     Ok(parts)
 }
 
-/// `depends` が実在の区画を指し、循環が無く、**推移的に閉じている**ことを確かめる。
+/// Check that `depends` names real parts, has no cycles, and is **transitively closed**.
 ///
-/// 閉じている必要があるのは protoc の都合である: `c` の proto が `b` の proto を import し、
-/// その `b` が `a` を import していると、`a` の型も `c` の descriptor set に入ってくる。
-/// `c` が `a` を extern しないと `a` の型が `c` にも生成され、同じ型が 2 つできてしまう。
-/// cargo は **直接依存** にしか `DEP_*` を渡さないので、reiny 側で閉包を要求するしかない。
+/// The closure is required because of protoc: if `c`'s proto imports `b`'s and that `b` imports `a`'s,
+/// then `a`'s types land in `c`'s descriptor set as well. Unless `c` externs `a`, `a`'s types are
+/// generated into `c` too and the same type exists twice.
+/// cargo hands `DEP_*` only to **direct** dependents, so reiny has to demand the closure itself.
 fn validate_depends(parts: &[SchemaPart]) -> Result<()> {
     let by_name: BTreeMap<&str, &SchemaPart> = parts
         .iter()
@@ -802,7 +802,7 @@ fn validate_depends(parts: &[SchemaPart]) -> Result<()> {
                 bail!("[schema.{me}] の depends にある `{dep}` という区画がありません");
             }
         }
-        // 推移閉包を辿り、宣言漏れがあれば名指しで指摘する(循環もここで検出)。
+        // Walk the transitive closure and name what was left undeclared (this catches cycles too).
         let mut stack: Vec<&str> = p.depends.iter().map(String::as_str).collect();
         let mut seen: Vec<&str> = Vec::new();
         while let Some(cur) = stack.pop() {
@@ -831,10 +831,10 @@ fn validate_depends(parts: &[SchemaPart]) -> Result<()> {
     Ok(())
 }
 
-/// 各 `[internals]` 型の所有区画を proto パスから決める。多クレート形でのみ意味を持つ。
-/// どの区画にも属さない proto、2 区画が取り合う proto はここで弾く。
+/// Decide each `[internals]` type's owning part from its proto path. Only meaningful in the multi-crate shape.
+/// A proto belonging to no part, or one two parts fight over, is rejected here.
 fn assign_owners(entries: &mut [Entry], parts: &[SchemaPart], manifest_path: &Path) -> Result<()> {
-    // 単一形(protos = None)は全部を持つので割り当て不要。
+    // The single shape (protos = None) owns everything, so nothing needs assigning.
     if parts.iter().all(|p| p.protos.is_none()) {
         return Ok(());
     }
@@ -872,7 +872,7 @@ fn assign_owners(entries: &mut [Entry], parts: &[SchemaPart], manifest_path: &Pa
     Ok(())
 }
 
-/// `TypeDef` から `Entry` を組む。proto パスは `base` 基準で絶対化する。
+/// Build an `Entry` from a `TypeDef`. The proto path is made absolute against `base`.
 fn make_entry(alias: &str, td: &TypeDef, base: &Path, exposure: Exposure) -> Result<Entry> {
     let (package, ident) = split_message(&td.message)
         .with_context(|| format!("invalid message path '{}'", td.message))?;
@@ -891,7 +891,7 @@ fn make_entry(alias: &str, td: &TypeDef, base: &Path, exposure: Exposure) -> Res
     })
 }
 
-/// `"ping.Ping"` → (`["ping"]`, `"Ping"`)。`"Ping"` → (`[]`, `"Ping"`)。
+/// `"ping.Ping"` → (`["ping"]`, `"Ping"`). `"Ping"` → (`[]`, `"Ping"`).
 fn split_message(message: &str) -> Result<(Vec<String>, String)> {
     let parts: Vec<&str> = message.split('.').filter(|s| !s.is_empty()).collect();
     let (ident, package) = parts.split_last().context("empty message path")?;
@@ -902,30 +902,30 @@ fn split_message(message: &str) -> Result<(Vec<String>, String)> {
 }
 
 // ---------------------------------------------------------------------------
-// コンパイル計画(compile 機能でのみビルド。CLI 内省では使わない)
+// The compile plan (built only with the compile feature; CLI introspection does not use it)
 // ---------------------------------------------------------------------------
 
-/// 「このパッケージが何をコンパイルし、何を外部参照にするか」を 1 つにまとめたもの。
-/// 単一 `[schema]` / workspace / per-project では素直に全部を持ち、`[schema.<name>]` の
-/// 1 区画をビルドしているときだけ、自分の担当分に絞られて `externs` が埋まる。
+/// "What this package compiles and what it merely references", gathered into one place.
+/// For a single `[schema]` / workspace / per-project it simply holds everything; only while building
+/// one `[schema.<name>]` part is it narrowed to our share, with `externs` filled in.
 #[cfg(feature = "compile")]
 struct CompilePlan<'a> {
-    /// 生成物へ出す型(区画ビルドでは自分が所有するものだけ)。
+    /// The types to emit (when building a part, only the ones we own).
     entries: Vec<&'a Entry>,
-    /// prost に渡す proto。
+    /// The protos handed to prost.
     protos: Vec<PathBuf>,
-    /// protoc の include ディレクトリ。
+    /// protoc's include directories.
     includes: Vec<PathBuf>,
-    /// `(".hs.Vector3", "::myapp_proto_geometry::__pb::hs::Vector3")`。
-    /// これがあると prost は当該型を **生成せず** 参照だけを差し替える。
+    /// `(".hs.Vector3", "::myapp_proto_geometry::__pb::hs::Vector3")`.
+    /// With these, prost **does not generate** the type and only rewrites the reference.
     externs: Vec<(String, String)>,
-    /// descriptor 上での自分のファイル名。空なら「全部自分のもの」とみなす。
+    /// Our own file names as they appear in the descriptor. Empty means "all of it is ours".
     own_names: Vec<String>,
-    /// `links` メタを出す(= 他のスキーマクレートから参照されうる)なら Some。
+    /// `Some` when `links` metadata is emitted (= other schema crates may reference us).
     emit_meta: Option<PartMeta>,
 }
 
-/// スキーマ区画が下流へ渡すもの。
+/// What a schema part hands downstream.
 #[cfg(feature = "compile")]
 struct PartMeta {
     crate_name: String,
@@ -940,7 +940,7 @@ fn compile_plan(resolution: &Resolution) -> Result<CompilePlan<'_>> {
     };
 
     let Some(part_name) = part_name else {
-        // 単一 [schema] / workspace / per-project: 従来どおり全部を自分でコンパイルする。
+        // Single [schema] / workspace / per-project: compile all of it ourselves, as ever.
         let mut protos: Vec<PathBuf> = Vec::new();
         let mut includes: Vec<PathBuf> = Vec::new();
         for e in &resolution.entries {
@@ -973,8 +973,8 @@ fn compile_plan(resolution: &Resolution) -> Result<CompilePlan<'_>> {
         .clone()
         .with_context(|| format!("[schema.{part_name}] に protos がありません"))?;
 
-    // 自分の proto 群の共通祖先を 1 本の include にする。descriptor 上のファイル名も
-    // ここからの相対で決まるので、下流に渡す include と必ず同じものを使う。
+    // Make the common ancestor of our protos the single include. The file names in the descriptor
+    // follow from it too, so it must be the very include handed downstream.
     let root = common_ancestor(&protos)
         .with_context(|| format!("[schema.{part_name}] の protos に共通の親がありません"))?;
     let own_names = protos
@@ -1025,7 +1025,7 @@ fn compile_plan(resolution: &Resolution) -> Result<CompilePlan<'_>> {
     })
 }
 
-/// 与えられたファイル群の共通の親ディレクトリ。
+/// The common parent directory of the given files.
 #[cfg(feature = "compile")]
 fn common_ancestor(paths: &[PathBuf]) -> Option<PathBuf> {
     let mut iter = paths.iter().map(|p| p.parent().map(Path::to_path_buf));
@@ -1039,7 +1039,7 @@ fn common_ancestor(paths: &[PathBuf]) -> Option<PathBuf> {
     Some(acc)
 }
 
-/// cargo が `DEP_<LINKS>_<KEY>` を作るときの名前変換(大文字化 + 非英数を `_` に)。
+/// The name mangling cargo uses for `DEP_<LINKS>_<KEY>` (upcase, non-alphanumerics to `_`).
 #[cfg(feature = "compile")]
 fn envify(name: &str) -> String {
     name.chars()
@@ -1053,10 +1053,10 @@ fn envify(name: &str) -> String {
         .collect()
 }
 
-/// 依存スキーマクレートが `links` 経由で渡した include ディレクトリと FQN 一覧を読む。
+/// Read the include directory and FQN list a dependency schema crate handed over through `links`.
 ///
-/// cargo は **直接依存** の build script が出したメタしか渡さないので、ここが取れないのは
-/// たいてい「Cargo の依存に入っていない」か「相手が `links` を宣言していない」のどちらか。
+/// cargo only passes on metadata emitted by a **direct** dependency's build script, so not getting it
+/// here usually means either "it is not a Cargo dependency" or "it does not declare `links`".
 #[cfg(feature = "compile")]
 fn read_dep_metadata(dep_crate: &str) -> Result<(PathBuf, Vec<String>)> {
     let key = envify(dep_crate);
@@ -1078,12 +1078,12 @@ fn read_dep_metadata(dep_crate: &str) -> Result<(PathBuf, Vec<String>)> {
     Ok((PathBuf::from(include), types))
 }
 
-/// 自分の include ディレクトリと、自分が定義した FQN 一覧を下流へ渡す。
-/// `links` が無いと cargo はこれを誰にも配らないので、その場で気付けるようにする。
+/// Hand our own include directory and the FQNs we define downstream.
+/// Without `links` cargo distributes none of it, so make that noticeable on the spot.
 #[cfg(feature = "compile")]
 fn emit_schema_metadata(meta: &PartMeta, fqns: &[String]) -> Result<()> {
-    // links を足した/消した瞬間に下の検査をやり直させる。reiny-build は rerun-if-changed を
-    // 明示している都合上、これが無いと Cargo.toml を直しても build script が再実行されない。
+    // Re-run the check below the moment links is added or removed. reiny-build states its own
+    // rerun-if-changed, so without this a fixed Cargo.toml would not re-run the build script.
     println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_LINKS");
     let want = envify(&meta.crate_name);
     match env::var("CARGO_MANIFEST_LINKS") {
@@ -1108,7 +1108,7 @@ fn emit_schema_metadata(meta: &PartMeta, fqns: &[String]) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// proto コンパイルと descriptor 走査
+// Proto compilation and walking the descriptor
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "compile")]
@@ -1123,22 +1123,22 @@ fn compile_protos(
     let mut config = prost_build::Config::new();
     config
         .out_dir(out_dir)
-        // 全パッケージを 1 ファイルに束ね、ネストした pub mod として include できるようにする。
+        // Bundle every package into one file so it can be included as nested pub mods.
         .include_file("reiny_protos.rs")
-        // 型 → 指紋(Topic::SCHEMA)と、区画が下流へ渡す FQN 一覧の両方をここから作る。
+        // Both the type → fingerprint (Topic::SCHEMA) and the FQN list handed downstream come from here.
         .file_descriptor_set_path(&descriptor_path);
-    // 他のスキーマクレートが持つ型は「参照だけ差し替え、生成はしない」。
-    // これが多クレート分割でリーフ型が二重生成されない仕組み。
+    // Types owned by another schema crate get "the reference rewritten, nothing generated".
+    // That is the mechanism keeping a leaf type from being generated twice across the split.
     for (proto_path, rust_path) in &plan.externs {
         config.extern_path(proto_path.clone(), rust_path.clone());
     }
-    // 生成型は prost-derive 由来で `::prost` を参照するため、利用側 crate は `prost` 依存が要る
-    // (prost / tonic と同じ前提)。prost_path はderive 呼び出しだけ変えても展開内の `::prost`
-    // は残るので、既定の `::prost` のまま利用側に prost を持たせる。
+    // Generated types come from prost-derive and refer to `::prost`, so the downstream crate needs a
+    // `prost` dependency (the same assumption prost / tonic make). prost_path only changes the derive
+    // call; the `::prost` inside the expansion stays, so keep the default and let downstream carry prost.
 
-    // protoc が外から与えられていなければ同梱バイナリを使う(外部インストール不要)。
-    // プロセスグローバルな `env::set_var("PROTOC")` ではなく config に載せる —— build script は
-    // 単一スレッドとはいえ、他人のプロセス環境を書き換えずに済むならその方がよい。
+    // Use the bundled binary unless protoc was supplied from outside (so no external install is needed).
+    // Put it on the config rather than the process-global `env::set_var("PROTOC")` — a build script is
+    // single-threaded, but not rewriting someone else's process environment is better where possible.
     println!("cargo:rerun-if-env-changed=PROTOC");
     if env::var_os("PROTOC").is_none()
         && let Ok(protoc) = protoc_bin_vendored::protoc_bin_path()
@@ -1146,7 +1146,7 @@ fn compile_protos(
         config.protoc_executable(protoc);
     }
 
-    // 利用側のカスタマイズは reiny の既定の**後**に当てる(上書きできる側にする)。
+    // The caller's customization is applied **after** reiny's defaults (so it can override them).
     customize(&mut config);
 
     config
@@ -1159,18 +1159,18 @@ fn compile_protos(
         .context("decoding the descriptor set prost just wrote")
 }
 
-/// descriptor set から「自分が定義した FQN 一覧」と「型 → スキーマ指紋」を取り出す。
+/// Pull "the FQNs we define" and "type → schema fingerprint" out of a descriptor set.
 #[cfg(feature = "compile")]
 struct DescriptorScan {
-    /// 自分のファイルが定義するメッセージ / enum の FQN(宣言順)。
+    /// The FQNs of the messages / enums our own files define (in declaration order).
     fqns: Vec<String>,
-    /// メッセージ FQN → 指紋。
+    /// Message FQN → fingerprint.
     fingerprints: BTreeMap<String, u64>,
 }
 
-/// `own_names` に載ったファイルを「自分のもの」として FQN を集める(空なら全部が自分のもの)。
-/// 指紋は import 由来も含め全メッセージについて計算する —— 引くのは自分の型だけなので害は無く、
-/// 分岐が 1 つ減る。
+/// Collect the FQNs of the files listed in `own_names` as "ours" (empty means all of them are ours).
+/// Fingerprints are computed for every message, imported ones included — only our own types are ever
+/// looked up, so it does no harm and it removes a branch.
 #[cfg(feature = "compile")]
 fn scan_descriptors(fds: &prost_types::FileDescriptorSet, own_names: &[String]) -> DescriptorScan {
     let mut scan = DescriptorScan {
@@ -1212,7 +1212,7 @@ fn walk_message(
 
     let nested_prefix = format!("{fq}.");
     for nested in &msg.nested_type {
-        // map フィールドの合成型(`FooEntry`)は利用側から見えないので数えない。
+        // A map field's synthesized type (`FooEntry`) is invisible downstream, so do not count it.
         if nested
             .options
             .as_ref()
@@ -1229,15 +1229,15 @@ fn walk_message(
     }
 }
 
-/// メッセージ 1 件のスキーマ指紋。
+/// One message's schema fingerprint.
 ///
-/// 材料は **そのメッセージ自身が宣言するフィールド** だけ(番号 / 名前 / 型 / ラベル /
-/// 参照先の型名 / oneof 所属)。参照先メッセージの中身までは追わない —— 指紋が守りたいのは
-/// 「同名だが別物の型が同じトピックに乗る」ケースで、それはトップレベルの形だけで判別できる。
-/// 逆にリーフ型の変更まで見たければ、そのリーフ自身がトピック型であるべきである。
+/// The ingredients are **only the fields the message itself declares** (number / name / type / label /
+/// referenced type name / oneof membership). It does not follow a referenced message any deeper — what a
+/// fingerprint guards against is "a same-named but different type landing on the same topic", and the
+/// top-level shape settles that. If a leaf's changes must matter, that leaf should be the topic type.
 ///
-/// ハッシュは FNV-1a 64。`DefaultHasher` は Rust の版で値が変わりうるので使えない
-/// (指紋はビルドを跨いで安定していなければ意味が無い)。
+/// The hash is FNV-1a 64. `DefaultHasher` is unusable because its values can change between Rust
+/// releases (a fingerprint is worthless unless it is stable across builds).
 #[cfg(feature = "descriptors")]
 fn fingerprint(fq_name: &str, msg: &prost_types::DescriptorProto) -> u64 {
     let mut fields: Vec<&prost_types::FieldDescriptorProto> = msg.field.iter().collect();
@@ -1271,30 +1271,30 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// encode 済み descriptor set の読み取り(`reiny bag` が `@schema` 応答に対して使う)
+// Reading an encoded descriptor set (what `reiny bag` uses on an `@schema` response)
 // ---------------------------------------------------------------------------
 
-/// encode 済み `FileDescriptorSet` から、完全メッセージ名 `message` の指紋を引く。
-/// set に無ければ `Ok(None)`。生成型の `Topic::SCHEMA` と同じ計算なので、バス上の
-/// attachment と突き合わせられる。
+/// Look up the fingerprint of the fully qualified message name `message` in an encoded
+/// `FileDescriptorSet`. `Ok(None)` when the set does not have it. It is the same computation as a
+/// generated type's `Topic::SCHEMA`, so it can be matched against what rides on the bus.
 #[cfg(feature = "descriptors")]
 pub fn message_fingerprint(file_set: &[u8], message: &str) -> Result<Option<u64>> {
     let fds = decode_file_set(file_set)?;
     Ok(find_message(&fds, message).map(|(_, msg)| fingerprint(message, msg)))
 }
 
-/// `message` を定義するファイルと、その推移 import だけに刈った `FileDescriptorSet`
-/// (encode 済み)。set に無ければ `Ok(None)`。
+/// The `FileDescriptorSet` (encoded) pruned to the file defining `message` plus its transitive imports.
+/// `Ok(None)` when the set does not have it.
 ///
-/// MCAP のスキーマは型ごとに 1 レコードなので、クレート全体の set をそのまま入れると
-/// 型数 × set サイズが毎 bag に乗る。必要なファイルだけに刈って、それを避ける。
+/// An MCAP schema is one record per type, so putting a whole crate's set in each would put (number of
+/// types × set size) into every bag. Pruning to the files actually needed avoids that.
 #[cfg(feature = "descriptors")]
 pub fn descriptor_subset(file_set: &[u8], message: &str) -> Result<Option<Vec<u8>>> {
     let fds = decode_file_set(file_set)?;
     let Some((root, _)) = find_message(&fds, message) else {
         return Ok(None);
     };
-    // 推移 import を集める。順序は元の set のまま(決定的に)。
+    // Collect the transitive imports. The order is the original set's (deterministically).
     let mut wanted: Vec<&str> = vec![root.name()];
     let mut cursor = 0;
     while cursor < wanted.len() {
@@ -1325,7 +1325,7 @@ fn decode_file_set(bytes: &[u8]) -> Result<prost_types::FileDescriptorSet> {
         .context("decoding FileDescriptorSet")
 }
 
-/// 完全メッセージ名(`pkg.Outer.Inner`)で descriptor を探す。ネストも辿る。
+/// Find a descriptor by fully qualified message name (`pkg.Outer.Inner`), descending into nested types.
 #[cfg(feature = "descriptors")]
 fn find_message<'a>(
     fds: &'a prost_types::FileDescriptorSet,
@@ -1355,11 +1355,11 @@ fn find_message<'a>(
 }
 
 // ---------------------------------------------------------------------------
-// reiny_generated.rs の生成
+// Generating reiny_generated.rs
 // ---------------------------------------------------------------------------
 
-/// `$OUT_DIR/reiny_generated.rs` の中身を組む。`#[reiny::main]` の `mod __reiny_generated` 内に
-/// include される前提でパスを書く。
+/// Assemble the contents of `$OUT_DIR/reiny_generated.rs`. The paths are written on the assumption that
+/// it is included inside `#[reiny::main]`'s `mod __reiny_generated`.
 #[cfg(feature = "compile")]
 fn render_generated(
     entries: &[&Entry],
@@ -1370,13 +1370,13 @@ fn render_generated(
     let mut out = String::new();
     out.push_str("// @generated by reiny-build — do not edit.\n");
 
-    // prost が束ねた全パッケージ。
+    // Every package prost bundled.
     out.push_str("#[allow(clippy::all, unused_imports, dead_code)]\n");
     out.push_str("pub mod __pb {\n");
     out.push_str("    include!(concat!(env!(\"OUT_DIR\"), \"/reiny_protos.rs\"));\n");
     out.push_str("}\n\n");
 
-    // モジュール別の再エクスポート。
+    // The per-module re-exports.
     let publications: Vec<&Entry> = entries
         .iter()
         .copied()
@@ -1395,7 +1395,7 @@ fn render_generated(
         render_reexport_module(&mut out, "internals", "super", &internals);
     }
 
-    // dependencies はプロジェクト名でネストする。
+    // dependencies nests by project name.
     let mut dep_names: Vec<&String> = entries
         .iter()
         .filter_map(|e| match &e.exposure {
@@ -1413,7 +1413,7 @@ fn render_generated(
                 .copied()
                 .filter(|e| e.exposure == Exposure::Dependencies(dep.clone()))
                 .collect();
-            // dependencies::<dep> から __pb は super::super::__pb。
+            // From dependencies::<dep>, __pb is super::super::__pb.
             writeln!(out, "    pub mod {dep} {{").ok();
             for e in &group {
                 writeln!(
@@ -1429,10 +1429,10 @@ fn render_generated(
         out.push_str("}\n\n");
     }
 
-    // prost が書いた descriptor set。`Topic::DESCRIPTOR` がこれを指し、publisher が `@schema` で
-    // 名乗る(`reiny bag record` が拾って MCAP に同梱する)。
+    // The descriptor set prost wrote. `Topic::DESCRIPTOR` points at it and a publisher announces it at
+    // `@schema` (`reiny bag record` picks it up and embeds it in the MCAP).
     out.push_str(
-        "/// この crate の proto の `FileDescriptorSet`(`reiny::Topic::DESCRIPTOR` 用)。\n",
+        "/// The `FileDescriptorSet` of this crate's protos (for `reiny::Topic::DESCRIPTOR`).\n",
     );
     out.push_str("#[doc(hidden)]\n#[allow(dead_code, unreachable_pub)]\n");
     out.push_str(
@@ -1440,12 +1440,12 @@ fn render_generated(
          include_bytes!(concat!(env!(\"OUT_DIR\"), \"/reiny_descriptors.bin\"));\n\n",
     );
 
-    // 型 → トピックの型セグメント。型ごとに 1 回だけ impl(別名で重複しても型は同一なので dedup)。
-    // SCHEMA / DESCRIPTOR は descriptor 由来(既定 None なので、引けなければ黙って省く)。
+    // The type → topic type segment. One impl per type (aliases may repeat, but the type is one, so dedup).
+    // SCHEMA / DESCRIPTOR come from the descriptor (they default to None, so silently omit what is missing).
     let mut seen = Vec::new();
     out.push_str(
-        "// 型 → トピック(publish: reiny/<domain>/<id>/<TYPE>、\
-         subscribe: reiny/<domain>/*/<TYPE>)。\n",
+        "// type → topic (publish: reiny/<domain>/<id>/<TYPE>, \
+         subscribe: reiny/<domain>/*/<TYPE>)\n",
     );
     for e in entries {
         let path = e.type_path();
@@ -1470,9 +1470,9 @@ fn render_generated(
         .ok();
     }
 
-    // [services]: request 型 → response 型。impl は request 型を定義するクレートに出る。
+    // [services]: request type → response type. The impl lands in the crate defining the request type.
     if !services.is_empty() {
-        out.push_str("\n// [services](request 型がサービスの住所: reiny/<domain>/<id>/<TYPE>)。\n");
+        out.push_str("\n// [services] (the request type is the service's address: reiny/<domain>/<id>/<TYPE>)\n");
         for (request, response) in services {
             writeln!(
                 out,
@@ -1482,7 +1482,7 @@ fn render_generated(
         }
     }
 
-    // [config] があれば型付き設定 `config::Config` と `cloudy.config()` 拡張を生成する。
+    // With a [config], generate the typed `config::Config` and the `cloudy.config()` extension.
     if let Some(table) = config {
         out.push('\n');
         out.push_str(&render_config(table)?);
@@ -1491,10 +1491,10 @@ fn render_generated(
     Ok(out)
 }
 
-/// この生成物に出す `impl Service` の `(request 型パス, response 型パス)`。
+/// The `(request type path, response type path)` pairs to emit an `impl Service` for in this output.
 ///
-/// request 型が `plan_entries`(このクレートが生成する型)に無い service は他区画の担当なので
-/// 出さない。response が別区画の所有なら `::<crate>::__pb::…` で参照する(`extern_path` と同じ形)。
+/// A service whose request type is not in `plan_entries` (the types this crate generates) belongs to
+/// another part and is skipped. A response owned elsewhere is referenced as `::<crate>::__pb::…` (the `extern_path` form).
 #[cfg(feature = "compile")]
 fn service_impls(resolution: &Resolution, plan_entries: &[&Entry]) -> Vec<(String, String)> {
     resolution
@@ -1524,16 +1524,16 @@ fn service_impls(resolution: &Resolution, plan_entries: &[&Entry]) -> Vec<(Strin
         .collect()
 }
 
-/// スキーマ消費 launch 向けの薄い生成物。proto は再コンパイルせず、スキーマクレートの
-/// `internals` をそのまま `crate::internals` として見せるだけ(`Topic`/`Message` impl は
-/// スキーマクレート側に 1 つだけあり、coherence でグローバルに効く)。
+/// The thin output for a schema-consuming launch. No proto is recompiled; the schema crates'
+/// `internals` is simply shown as `crate::internals` (the `Topic`/`Message` impls exist exactly once,
+/// in the schema crate, and coherence makes them global).
 #[cfg(feature = "compile")]
 fn render_consumer(crate_idents: &[String]) -> String {
     let mut out = String::new();
     out.push_str("// @generated by reiny-build — schema consumer (no proto recompiled).\n");
-    // スキーマクレート群の公開型を internals として再エクスポート。型に紐づく impl Topic /
-    // impl Message はスキーマクレート側で定義済みなので、ここでは型を見せるだけでよい。
-    // 多クレート分割では全区画の和になる(alias は [internals] のキーなので重複しない)。
+    // Re-export the schema crates' public types as internals. The `impl Topic` / `impl Message` tied to
+    // each type are already defined in the schema crate, so showing the types is all that is needed.
+    // Across a multi-crate split it is the union of every part (aliases are [internals] keys: no duplicates).
     out.push_str("pub mod internals {\n");
     for ident in crate_idents {
         writeln!(out, "    pub use ::{ident}::internals::*;").ok();
@@ -1542,12 +1542,12 @@ fn render_consumer(crate_idents: &[String]) -> String {
     out
 }
 
-/// `[config]` の TOML table から、型付き `config::Config`(既定値つき)と、`::reiny::Cloudy` に
-/// `config()` を生やす拡張トレイトを生成する。`#[reiny::main]` の glob re-export で
-/// トレイトがスコープに入るので、利用側は `cloudy.config()` と書ける。
+/// From the `[config]` TOML table, generate the typed `config::Config` (with defaults) and an extension
+/// trait that grows `config()` on `::reiny::Cloudy`. `#[reiny::main]`'s glob re-export brings the trait
+/// into scope, so user code can write `cloudy.config()`.
 #[cfg(feature = "compile")]
 fn render_config(table: &toml::Table) -> Result<String> {
-    // TOML 値 → (Rust 型, 既定値リテラル, getter, `v` を field へ代入する式)。
+    // TOML value → (Rust type, default literal, getter, the expression assigning `v` to the field).
     struct Field {
         name: String,
         rust_ty: &'static str,
@@ -1596,7 +1596,7 @@ fn render_config(table: &toml::Table) -> Result<String> {
     }
 
     let mut out = String::new();
-    out.push_str("// [config] から生成した型付き設定。\n");
+    out.push_str("// The typed configuration generated from [config].\n");
     out.push_str("pub mod config {\n");
     out.push_str("    #[derive(Clone, Debug)]\n    pub struct Config {\n");
     for f in &fields {
@@ -1621,7 +1621,7 @@ fn render_config(table: &toml::Table) -> Result<String> {
     }
     out.push_str("            cfg\n        }\n    }\n}\n\n");
 
-    // `cloudy.config()` 拡張。glob re-export でスコープに入る。
+    // The `cloudy.config()` extension. The glob re-export brings it into scope.
     out.push_str(
         "#[doc(hidden)]\npub trait __CloudyConfigExt { fn config(&self) -> config::Config; }\n",
     );
@@ -1635,7 +1635,7 @@ fn render_config(table: &toml::Table) -> Result<String> {
     Ok(out)
 }
 
-/// `pub mod <name> { pub use <prefix>::__pb::...::T as Alias; ... }` を 1 つ書く。
+/// Write one `pub mod <name> { pub use <prefix>::__pb::...::T as Alias; ... }`.
 #[cfg(feature = "compile")]
 fn render_reexport_module(out: &mut String, name: &str, prefix: &str, entries: &[&Entry]) {
     writeln!(out, "pub mod {name} {{").ok();
@@ -1652,11 +1652,11 @@ fn render_reexport_module(out: &mut String, name: &str, prefix: &str, entries: &
 }
 
 // ---------------------------------------------------------------------------
-// 検証
+// Validation
 // ---------------------------------------------------------------------------
 
-/// Rust の予約語(生成コードのモジュール名/再エクスポート名に使えない)。raw identifier 化は
-/// しない方針なので、ぶつかったらエラーにする。
+/// Rust's reserved words (unusable as a module or re-export name in the generated code). Raw identifiers
+/// are deliberately not used, so a clash is an error.
 const RUST_KEYWORDS: &[&str] = &[
     "as", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn",
     "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
@@ -1665,7 +1665,7 @@ const RUST_KEYWORDS: &[&str] = &[
     "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "union",
 ];
 
-/// `name` が Rust 識別子(ASCII、先頭は英字/`_`、以降は英数/`_`、予約語でない)か。
+/// Whether `name` is a Rust identifier (ASCII, a letter or `_` first, then alphanumerics or `_`, not a keyword).
 fn is_valid_rust_ident(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -1681,9 +1681,9 @@ fn is_valid_rust_ident(name: &str) -> bool {
     !RUST_KEYWORDS.contains(&name)
 }
 
-/// 生成コードでそのまま識別子になる名前(dep キー・alias・schema crate)を検証し、NG なら
-/// 「どこを直すか」を含むエラーで build を止める。これが無いと不正名はずっと下流の rustc
-/// 構文エラー(例 `expected ; or {, found -`)になって原因が分からない。
+/// Validate the names that become identifiers verbatim in the generated code (dep keys, aliases, schema
+/// crates) and stop the build with an error that says **where to fix it**. Without this, a bad name turns
+/// into an rustc syntax error far downstream (`expected ; or {, found -`) with no visible cause.
 fn ensure_rust_ident(name: &str, what: &str, section: &str) -> Result<()> {
     if is_valid_rust_ident(name) {
         return Ok(());
@@ -1697,15 +1697,15 @@ fn ensure_rust_ident(name: &str, what: &str, section: &str) -> Result<()> {
     bail!("{section} の {what} `{name}` は Rust 識別子として無効です{hint}");
 }
 
-/// 同じトピックセグメント(型名)に異なる型が割り当たっていないか。型 = トピックなので、
-/// 別々の型が同じセグメントを持つと配線が衝突する。早期に弾く。
+/// Whether two different types were assigned the same topic segment (type name). Since type = topic, two
+/// different types sharing a segment collide on the wire. Reject that early.
 fn validate_no_topic_collision(entries: &[Entry], manifest_path: &Path) -> Result<()> {
-    // ident(= トピックセグメント) → 最初に見た型パス。
+    // ident (= topic segment) → the first type path seen.
     let mut by_segment: BTreeMap<String, String> = BTreeMap::new();
     for e in entries {
         let path = e.type_path();
         if let Some(prev) = by_segment.get(&e.ident) {
-            // 同じ型の別 alias は衝突ではない。別の型なら配線がぶつかる。
+            // Another alias for the same type is not a collision. A different type would cross the wiring.
             if *prev != path {
                 bail!(
                     "トピックセグメント `{}` が異なる型に重複しています(`{}` と `{}`)。\
@@ -1723,13 +1723,13 @@ fn validate_no_topic_collision(entries: &[Entry], manifest_path: &Path) -> Resul
     Ok(())
 }
 
-/// `[services]` の別名をカタログに引き当てて検証する。
+/// Look the `[services]` aliases up in the catalog and validate them.
 ///
-/// - 別名は `[publications]` / `[internals]` のキー、または per-project の依存型 `<dep>::<Alias>`。
-/// - 同じ request 型を 2 つの service に使うことはできない(Rust の関連型は 1 つ。rustc の
-///   coherence エラーより先に、節を名指しして止める)。
-/// - 多クレート `[schema]` では、response の所有区画が request の所有区画と同じか、その
-///   `depends` に入っていること(impl は request 型を定義するクレートにしか書けない)。
+/// - An alias is a `[publications]` / `[internals]` key, or a per-project dependency type `<dep>::<Alias>`.
+/// - The same request type cannot serve two services (Rust has one associated type; this names the
+///   section and stops before rustc's coherence error does).
+/// - In a multi-crate `[schema]`, the response's owning part must be the request's own part or in its
+///   `depends` (the impl can only be written in the crate that defines the request type).
 fn resolve_services(
     manifest: &Manifest,
     entries: &[Entry],
@@ -1737,7 +1737,7 @@ fn resolve_services(
     manifest_path: &Path,
 ) -> Result<Vec<ServiceEntry>> {
     let mut services = Vec::new();
-    // request の型パス → service 名(重複検出)。
+    // request type path → service name (for duplicate detection).
     let mut by_request: BTreeMap<String, String> = BTreeMap::new();
     for (name, def) in &manifest.services {
         let lookup = |what: &str, alias: &str| -> Result<usize> {
@@ -1791,7 +1791,7 @@ fn resolve_services(
     Ok(services)
 }
 
-/// `[services]` の別名 → `entries` の添字。`<dep>::<Alias>` は per-project の依存型。
+/// `[services]` alias → index into `entries`. `<dep>::<Alias>` is a per-project dependency type.
 fn find_alias(entries: &[Entry], alias: &str) -> Option<usize> {
     if let Some((dep, a)) = alias.split_once("::") {
         entries.iter().position(|e| {
@@ -1805,11 +1805,11 @@ fn find_alias(entries: &[Entry], alias: &str) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
-// 診断(REINY_VERBOSE=1 で解決結果を cargo:warning に出す)
+// Diagnostics (REINY_VERBOSE=1 prints the resolution to cargo:warning)
 // ---------------------------------------------------------------------------
 
-/// `REINY_VERBOSE` がセットされていれば、解決したモード・型→トピック・コンパイル対象 proto を
-/// `cargo:warning=` で表示する。所有割り当てや推移 import の確認に使う(既定では何も出さない)。
+/// When `REINY_VERBOSE` is set, print the resolved mode, the type → topic table and the protos to be
+/// compiled through `cargo:warning=`. For checking ownership and transitive imports (silent by default).
 #[cfg(feature = "compile")]
 fn report_verbose(res: &Resolution) {
     println!("cargo:rerun-if-env-changed=REINY_VERBOSE");
@@ -1856,7 +1856,7 @@ fn report_verbose(res: &Resolution) {
             s.name, s.request, s.request_message, s.response, s.response_message
         ));
     }
-    // dedup したコンパイル対象 proto(推移 import は prost が別途引く)。
+    // The deduplicated protos to compile (prost pulls the transitive imports separately).
     let mut protos: Vec<&Path> = res.entries.iter().map(|e| e.proto.as_path()).collect();
     protos.sort_unstable();
     protos.dedup();
@@ -1870,7 +1870,7 @@ fn report_verbose(res: &Resolution) {
 }
 
 // ---------------------------------------------------------------------------
-// 小道具
+// Odds and ends
 // ---------------------------------------------------------------------------
 
 fn resolve_relative(base: &Path, p: &Path) -> PathBuf {
@@ -1882,8 +1882,8 @@ fn resolve_relative(base: &Path, p: &Path) -> PathBuf {
 }
 
 fn rerun_if_changed(path: &Path) {
-    // build.rs(OUT_DIR がある)でのみ cargo へ指示を出す。`reiny check` のような CLI 内省では
-    // 標準出力を汚さないよう何もしない。
+    // Only emit cargo directives from a build.rs (where OUT_DIR exists). For CLI introspection such as
+    // `reiny check`, do nothing so stdout stays clean.
     if env::var_os("OUT_DIR").is_some() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
@@ -1959,7 +1959,7 @@ mod tests {
         assert_eq!(m.internals.len(), 2);
         assert_eq!(m.projects["ping"].publications, vec!["Ping".to_string()]);
 
-        // [projects.*] は内省ビュー(reiny run の流れ図)としてそのまま出る。
+        // [projects.*] shows up verbatim as the introspection view (reiny run's flow diagram).
         let infos = project_infos(&m);
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].name, "ping");
@@ -1982,7 +1982,7 @@ mod tests {
         .unwrap();
         match m.schema.unwrap() {
             SchemaDecl::Single(s) => assert_eq!(s.crate_name, "myapp-schema"),
-            SchemaDecl::Multi(_) => panic!("単一形として読めていない"),
+            SchemaDecl::Multi(_) => panic!("did not parse as the single shape"),
         }
     }
 
@@ -2009,11 +2009,11 @@ mod tests {
                 assert_eq!(parts["state"].depends, vec!["geometry".to_string()]);
                 assert_eq!(parts["geometry"].protos.len(), 1);
             }
-            SchemaDecl::Single(_) => panic!("多クレート形として読めていない"),
+            SchemaDecl::Single(_) => panic!("did not parse as the multi-crate shape"),
         }
     }
 
-    /// テスト用の区画(protos は実ファイルを見ないので空でよい — depends の検証だけを見る)。
+    /// A part for tests (protos never touch a real file here — only the depends validation is exercised).
     fn part(name: &str, depends: &[&str]) -> SchemaPart {
         SchemaPart {
             name: Some(name.to_string()),
@@ -2025,13 +2025,13 @@ mod tests {
 
     #[test]
     fn depends_must_be_transitively_closed() {
-        // a ← b ← c で c が a を宣言していない: cargo は直接依存にしか DEP_* を渡さないので
-        // これは通せない。名指しで指摘されること。
+        // a ← b ← c with c not declaring a: cargo hands DEP_* only to direct dependents, so this cannot
+        // be allowed through. It has to be pointed out by name.
         let parts = vec![part("a", &[]), part("b", &["a"]), part("c", &["b"])];
         let err = validate_depends(&parts).unwrap_err().to_string();
         assert!(err.contains("`a`"), "got: {err}");
 
-        // 閉じていれば通る。
+        // Closed, so it passes.
         let parts = vec![part("a", &[]), part("b", &["a"]), part("c", &["b", "a"])];
         assert!(validate_depends(&parts).is_ok());
     }
@@ -2090,7 +2090,7 @@ mod tests {
         assert_eq!(entries[0].owner.as_deref(), Some("geometry"));
         assert_eq!(entries[1].owner.as_deref(), Some("state"));
 
-        // どの区画にも属さない proto は弾く(黙って生成から漏れる方が怖い)。
+        // A proto belonging to no part is rejected (silently dropping it from codegen would be worse).
         entries[1].proto = PathBuf::from("/x/stray.proto");
         let err = assign_owners(&mut entries, &parts, Path::new("/x/Reiny.toml"))
             .unwrap_err()
@@ -2102,7 +2102,7 @@ mod tests {
     #[cfg(feature = "compile")]
     fn envify_matches_cargo_dep_env_naming() {
         assert_eq!(envify("myapp-proto-geometry"), "MYAPP_PROTO_GEOMETRY");
-        // ハイフン形とアンダースコア形は同じ env 名になるので、どちらで links を書いてもよい。
+        // The hyphen and underscore spellings mangle to the same env name, so links may use either.
         assert_eq!(envify("myapp_proto_geometry"), "MYAPP_PROTO_GEOMETRY");
     }
 
@@ -2124,14 +2124,14 @@ mod tests {
         };
 
         let a = fingerprint("hs.Probe", &msg(vec![field(1, "x", 1), field(2, "y", 1)]));
-        // 宣言順が違うだけなら同じ指紋(番号で並べ替えてから畳む)。
+        // Only the declaration order differs, so the fingerprint is the same (sorted by number first).
         let b = fingerprint("hs.Probe", &msg(vec![field(2, "y", 1), field(1, "x", 1)]));
         assert_eq!(a, b);
 
-        // 型が変われば変わる。
+        // Changing a type changes it.
         let c = fingerprint("hs.Probe", &msg(vec![field(1, "x", 5), field(2, "y", 1)]));
         assert_ne!(a, c);
-        // 同じ形でも別の型名なら別物(= 同名衝突を弾くための本命)。
+        // The same shape under a different type name is a different thing (the whole point: same-name clashes).
         let d = fingerprint(
             "other.Probe",
             &msg(vec![field(1, "x", 1), field(2, "y", 1)]),
@@ -2186,7 +2186,7 @@ mod tests {
 
     #[test]
     fn topic_collision_is_rejected() {
-        // 別パッケージの同名 ident は同じトピックセグメントになる → 衝突。
+        // The same ident in a different package yields the same topic segment → a collision.
         let entries = vec![
             Entry {
                 alias: "A".into(),
@@ -2266,7 +2266,7 @@ mod tests {
 
     #[test]
     fn topic_collision_allows_same_type_aliased_twice() {
-        // 同じ型(同じパッケージ/ident)を別 alias で 2 度挙げても衝突ではない。
+        // Listing the same type (same package/ident) under two aliases is not a collision.
         let entries = vec![
             Entry {
                 alias: "A".into(),
@@ -2295,8 +2295,8 @@ mod tests {
         assert!(out.contains("pub use ::myapp_schema::internals::*"));
     }
 
-    /// 2 ファイルの `FileDescriptorSet`(msg.proto が geometry.proto を import)を手で組む。
-    /// protoc を回さずに `descriptor_subset` / `message_fingerprint` を突く。
+    /// A two-file `FileDescriptorSet` (msg.proto imports geometry.proto), assembled by hand.
+    /// It pokes at `descriptor_subset` / `message_fingerprint` without running protoc.
     #[cfg(feature = "descriptors")]
     fn two_file_set() -> Vec<u8> {
         use prost_types::field_descriptor_proto::{Label, Type};
@@ -2352,7 +2352,7 @@ mod tests {
     fn descriptor_subset_prunes_to_the_file_closure() {
         let set = two_file_set();
 
-        // Ping を含むファイルと、その推移 import(geometry)まで。
+        // The file containing Ping, plus its transitive import (geometry).
         let for_ping = descriptor_subset(&set, "msg.Ping").unwrap().unwrap();
         let decoded: prost_types::FileDescriptorSet = prost::Message::decode(&*for_ping).unwrap();
         let mut names: Vec<&str> = decoded
@@ -2363,7 +2363,7 @@ mod tests {
         names.sort_unstable();
         assert_eq!(names, ["geometry.proto", "msg.proto"]);
 
-        // Point は import しない側なので、自分のファイルだけに刈られる。
+        // Point is on the non-importing side, so it prunes down to its own file alone.
         let for_point = descriptor_subset(&set, "geo.Point").unwrap().unwrap();
         let decoded: prost_types::FileDescriptorSet = prost::Message::decode(&*for_point).unwrap();
         let names: Vec<&str> = decoded
@@ -2373,7 +2373,7 @@ mod tests {
             .collect();
         assert_eq!(names, ["geometry.proto"]);
 
-        // 無い型は None。
+        // A type that is not there is None.
         assert!(descriptor_subset(&set, "msg.Nope").unwrap().is_none());
     }
 
@@ -2388,5 +2388,315 @@ mod tests {
             Some(fingerprint("geo.Point", point)),
         );
         assert_eq!(message_fingerprint(&set, "geo.Missing").unwrap(), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Resolving a real Reiny.toml on disk (`describe`, the `reiny check` path)
+    // -----------------------------------------------------------------------
+
+    /// A throwaway directory tree for manifest fixtures. `describe` reads real files — it rejects a
+    /// `proto` that is not there — so these tests need a filesystem. The directory removes itself.
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new(name: &str) -> Self {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "reiny-build-{name}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn root(&self) -> &Path {
+            &self.0
+        }
+
+        fn path(&self, rel: &str) -> PathBuf {
+            self.0.join(rel)
+        }
+
+        /// Write `contents` at `rel`, creating the parent directories.
+        fn write(&self, rel: &str, contents: &str) {
+            let path = self.path(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, contents).unwrap();
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `Resolution` is not `Debug`, so `unwrap_err` is unavailable; this says the same thing, and
+    /// renders the whole anyhow chain so a context line can be asserted on.
+    fn describe_err(dir: &Path) -> String {
+        match describe(dir) {
+            Err(e) => format!("{e:#}"),
+            Ok(_) => panic!("expected {} to fail resolution", dir.display()),
+        }
+    }
+
+    /// A per-project layout end to end: the mode, and the type → topic table with the module each type
+    /// lands in. A dependency's public types come along under `dependencies::<dep>` — resolved by
+    /// reading *that project's* Reiny.toml, which is the only reason a dependency needs one.
+    #[test]
+    fn describe_resolves_a_per_project_layout() {
+        let f = Fixture::new("per-project");
+        f.write("pong/proto/pong.proto", "");
+        f.write(
+            "pong/Reiny.toml",
+            r#"
+            [project]
+            name = "pong"
+            version = "0.1.0"
+            [publications]
+            Pong = { proto = "proto/pong.proto", message = "pong.Pong" }
+            "#,
+        );
+        f.write("ping/proto/ping.proto", "");
+        f.write(
+            "ping/Reiny.toml",
+            r#"
+            [project]
+            name = "ping"
+            version = "0.1.0"
+            [publications]
+            Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
+            [dependencies]
+            pong = { version = "0.1", path = "../pong" }
+            "#,
+        );
+
+        let res = describe(&f.path("ping")).unwrap();
+        assert!(matches!(res.mode(), Mode::PerProject), "{:?}", res.mode());
+        assert!(res.manifest_path().parent().unwrap().ends_with("ping"));
+        assert!(!res.has_config());
+        assert!(res.services().is_empty());
+        assert!(res.projects().is_empty(), "per-project has no [projects.*]");
+
+        let mut types: Vec<(String, String, String)> = res
+            .types()
+            .into_iter()
+            .map(|t| (t.alias, t.topic_segment, t.module))
+            .collect();
+        types.sort();
+        assert_eq!(
+            types,
+            vec![
+                (
+                    "Ping".to_string(),
+                    "Ping".to_string(),
+                    "publications".to_string()
+                ),
+                (
+                    "Pong".to_string(),
+                    "Pong".to_string(),
+                    "dependencies::pong".to_string()
+                ),
+            ]
+        );
+        // The topic segment is the bare type name — the proto package is stripped.
+        let ping = res.types().into_iter().find(|t| t.alias == "Ping").unwrap();
+        assert_eq!(ping.message, "ping.Ping");
+        assert_eq!(ping.topic_segment, "Ping");
+        assert!(ping.proto.is_absolute());
+    }
+
+    /// A workspace layout end to end: everything in `[internals]` is resolved into `internals`,
+    /// regardless of which project publishes it, and `[projects.*]` survives as the introspection view
+    /// `reiny run` draws its flow diagram from.
+    #[test]
+    fn describe_resolves_a_workspace_layout() {
+        let f = Fixture::new("workspace");
+        f.write("proto/ping.proto", "");
+        f.write("proto/pong.proto", "");
+        f.write(
+            "Reiny.toml",
+            r#"
+            [internals]
+            Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
+            Pong = { proto = "proto/pong.proto", message = "pong.Pong" }
+            [projects.talker]
+            publications = ["Ping"]
+            dependencies = ["Pong"]
+            [projects.listener]
+            publications = ["Pong"]
+            dependencies = ["Ping"]
+            "#,
+        );
+
+        let res = describe(f.root()).unwrap();
+        assert!(matches!(res.mode(), Mode::Workspace), "{:?}", res.mode());
+        assert!(res.schema_crates().is_empty());
+        assert!(
+            res.types().iter().all(|t| t.module == "internals"),
+            "workspace types all go to internals"
+        );
+
+        let mut projects: Vec<&str> = res.projects().iter().map(|p| p.name.as_str()).collect();
+        projects.sort_unstable();
+        assert_eq!(projects, ["listener", "talker"]);
+        let talker = res
+            .projects()
+            .iter()
+            .find(|p| p.name == "talker")
+            .expect("talker is declared");
+        assert_eq!(talker.publications, ["Ping"]);
+        assert_eq!(talker.dependencies, ["Pong"]);
+    }
+
+    /// The manifest search runs *upward* and the nearest one wins. That is what lets a launch inside a
+    /// workspace carry its own Reiny.toml, and what lets a subdirectory (`src/`, where a build script
+    /// runs) inherit the one above it.
+    #[test]
+    fn manifest_search_takes_the_nearest_one_upward() {
+        let f = Fixture::new("upward");
+        f.write("proto/shared.proto", "");
+        f.write(
+            "Reiny.toml",
+            r#"
+            [internals]
+            Shared = { proto = "proto/shared.proto", message = "ws.Shared" }
+            [projects.ping]
+            publications = ["Shared"]
+            "#,
+        );
+        f.write("ping/proto/ping.proto", "");
+        f.write(
+            "ping/Reiny.toml",
+            r#"
+            [project]
+            name = "ping"
+            version = "0.1.0"
+            [publications]
+            Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
+            "#,
+        );
+        std::fs::create_dir_all(f.path("ping/src")).unwrap();
+
+        // From the launch directory: its own manifest, not the workspace's.
+        let inner = describe(&f.path("ping")).unwrap();
+        assert!(matches!(inner.mode(), Mode::PerProject));
+        // From a subdirectory with no manifest: the nearest ancestor's, which is still the launch's.
+        let nested = describe(&f.path("ping/src")).unwrap();
+        assert_eq!(nested.manifest_path(), inner.manifest_path());
+        // From the root: the workspace manifest.
+        let outer = describe(f.root()).unwrap();
+        assert!(matches!(outer.mode(), Mode::Workspace));
+        assert_ne!(outer.manifest_path(), inner.manifest_path());
+    }
+
+    /// `describe` also runs validation, which is the whole point of `reiny check`: a layout mistake has
+    /// to be named here rather than becoming a rustc error inside generated code much later.
+    #[test]
+    fn describe_reports_layout_mistakes() {
+        // Neither [project] nor [internals]/[projects]: the message names both ways out.
+        let f = Fixture::new("neither");
+        f.write("Reiny.toml", "[workspace]\nversion = \"0.1.0\"\n");
+        let err = describe_err(f.root());
+        assert!(err.contains("[project]"), "{err}");
+        assert!(err.contains("[internals]"), "{err}");
+
+        // A publication naming a proto that is not on disk.
+        let f = Fixture::new("missing-proto");
+        f.write(
+            "Reiny.toml",
+            r#"
+            [project]
+            name = "ping"
+            version = "0.1.0"
+            [publications]
+            Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
+            "#,
+        );
+        let err = describe_err(f.root());
+        assert!(err.contains("proto file not found"), "{err}");
+
+        // A [dependencies] key becomes `pub mod <key>` in the generated code, so a hyphen has to be
+        // caught here, not as a syntax error inside reiny_generated.rs.
+        let f = Fixture::new("bad-dep-key");
+        f.write("dep/proto/d.proto", "");
+        f.write(
+            "dep/Reiny.toml",
+            r#"
+            [project]
+            name = "dep"
+            version = "0.1.0"
+            [publications]
+            D = { proto = "proto/d.proto", message = "d.D" }
+            "#,
+        );
+        f.write("app/proto/a.proto", "");
+        f.write(
+            "app/Reiny.toml",
+            r#"
+            [project]
+            name = "app"
+            version = "0.1.0"
+            [publications]
+            A = { proto = "proto/a.proto", message = "a.A" }
+            [dependencies]
+            my-dep = { version = "0.1", path = "../dep" }
+            "#,
+        );
+        let err = describe_err(&f.path("app"));
+        assert!(err.contains("[dependencies]"), "{err}");
+        assert!(err.contains("my-dep"), "{err}");
+    }
+
+    /// No Reiny.toml in the directory or any parent: the error names where the search started, because
+    /// "which directory did you mean" is the only useful thing to say about it.
+    #[test]
+    fn missing_manifest_names_the_starting_directory() {
+        let f = Fixture::new("no-manifest"); // deliberately empty
+        let err = describe_err(f.root());
+        assert!(err.contains("Reiny.toml"), "{err}");
+        assert!(err.contains("no-manifest"), "{err}");
+    }
+
+    /// `[config]` and `[services]` reach the introspection view: `reiny check` prints both, and a
+    /// service is reported by the aliases *and* the fully qualified message names it resolved to.
+    #[test]
+    fn describe_reports_config_and_services() {
+        let f = Fixture::new("services");
+        f.write("proto/calc.proto", "");
+        f.write(
+            "Reiny.toml",
+            r#"
+            [project]
+            name = "calc"
+            version = "0.1.0"
+            [publications]
+            Add = { proto = "proto/calc.proto", message = "calc.Add" }
+            Sum = { proto = "proto/calc.proto", message = "calc.Sum" }
+            [services]
+            Adder = { request = "Add", response = "Sum" }
+            [config]
+            rate_hz = 10
+            name = "calc"
+            "#,
+        );
+
+        let res = describe(f.root()).unwrap();
+        assert!(res.has_config());
+        let services = res.services();
+        assert_eq!(services.len(), 1);
+        let s = &services[0];
+        assert_eq!(s.name, "Adder");
+        assert_eq!(
+            (s.request.as_str(), s.request_message.as_str()),
+            ("Add", "calc.Add")
+        );
+        assert_eq!(
+            (s.response.as_str(), s.response_message.as_str()),
+            ("Sum", "calc.Sum")
+        );
     }
 }
