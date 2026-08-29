@@ -1,7 +1,7 @@
-//! reiny の適合テストを iceoryx2 エンジンに流す。2 つの engine(= 2 node)を同一プロセスに
-//! 置くので、共有メモリ越しの本物の経路が走る。`prefix` を process ごとに変えて隔離する。
+//! Run reiny's conformance test against the iceoryx2 engine. Two engines (= two nodes) live in one
+//! process, so the real path through shared memory runs. `prefix` varies per process to isolate them.
 
-#![allow(clippy::expect_used)] // テストは panic で失敗を表現してよい
+#![allow(clippy::expect_used)] // tests may fail by panicking
 
 use std::sync::Arc;
 
@@ -11,7 +11,7 @@ use reiny_iceoryx2::Iceoryx2;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_launches_in_one_process() {
-    // 失敗したときに reiny(warn)と iceoryx2(debug)の両方の理由が見えるように。
+    // So that a failure shows both reiny's reason (warn) and iceoryx2's (debug).
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::TRACE)
         .try_init();

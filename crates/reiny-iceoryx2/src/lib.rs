@@ -1,24 +1,24 @@
-//! reiny を iceoryx2(同一ホストの共有メモリ)に載せる [`Engine`]。
+//! The [`Engine`] that puts reiny on iceoryx2 (same-host shared memory).
 //!
-//! iceoryx2 に wildcard も liveliness も無いので、描き方は zenoh と全部違う
+//! iceoryx2 has neither wildcards nor liveliness, so nothing about the rendering resembles zenoh's
 //! (`docs/design/0.5.0.md` §5):
 //!
 //! | reiny | iceoryx2 |
 //! | --- | --- |
-//! | `reiny/<d>/<id>/<T>` へ publish | pub-sub service `reiny/<d>/<T>`(payload `[u8]` + [`Meta`])。source は header |
-//! | `reiny/<d>/*/<T>` を subscribe | 同じ service に subscriber 1 本。`source` は header で **filter** |
-//! | respond / query | request-response service `reiny/<d>/<T>/q`。query のキー(パターン)は request header に載り、合わない server は request を drop(= finalize) |
-//! | `declare_alive(key)` | pub-sub service `reiny-alive/<key>` を `open_or_create` して**握る**。存在 = 生存 |
-//! | `alive` / `watch_alive` | `Service::list` を読む。`watch` は engine thread が 200 ms ごとに差分を取る(push は無い) |
+//! | publish to `reiny/<d>/<id>/<T>` | the pub-sub service `reiny/<d>/<T>` (payload `[u8]` + [`Meta`]); the source is in the header |
+//! | subscribe to `reiny/<d>/*/<T>` | one subscriber on that same service; `source` is a **filter** applied to the header |
+//! | respond / query | the request-response service `reiny/<d>/<T>/q`. The query's key (a pattern) rides in the request header, and a server that does not match drops the request (= finalizes it) |
+//! | `declare_alive(key)` | `open_or_create` the pub-sub service `reiny-alive/<key>` and **hold** it. Existing = alive |
+//! | `alive` / `watch_alive` | read `Service::list`. `watch` has the engine thread diffing that list every 200 ms (there is no push) |
 //!
-//! 受信は engine thread 1 本: 全 subscriber / server の event listener を `WaitSet` に attach して
-//! 待ち、起きたら空になるまで `receive()` して callback を呼ぶ。`ipc_threadsafe` を使うので
-//! publisher / client は呼び手のスレッドから直接送る。
+//! Receiving is one engine thread: it attaches every subscriber's / server's event listener to a
+//! `WaitSet`, waits, and on waking `receive()`s until empty and calls the callbacks. `ipc_threadsafe`
+//! is used, so a publisher / client sends straight from the caller's thread.
 //!
-//! # 建て方
+//! # Building it
 //!
-//! Linux は libc 直結で追加の依存なし。Windows / macOS は `iceoryx2-pal-posix` が bindgen を
-//! 使うので **libclang** が要る(`LIBCLANG_PATH` に `libclang.dll` / `.so` のディレクトリ)。
+//! Linux binds libc directly and needs nothing extra. Windows / macOS need **libclang**, because
+//! `iceoryx2-pal-posix` runs bindgen (`LIBCLANG_PATH` = the directory holding `libclang.dll` / `.so`).
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -41,7 +41,7 @@ use reiny::engine::{
 };
 use reiny::{Qos, Reliability, Result};
 
-/// iceoryx2 の service 種別。port が `Send + Sync` になる(内部 mutex 1 つの代価)。
+/// iceoryx2's service flavour. It makes ports `Send + Sync` (at the cost of one internal mutex).
 type S = ipc_threadsafe::Service;
 type PubSubFactory = iceoryx2::service::port_factory::publish_subscribe::PortFactory<S, [u8], Meta>;
 type AliveFactory = iceoryx2::service::port_factory::publish_subscribe::PortFactory<S, u8, ()>;
@@ -55,20 +55,20 @@ type Cli = Client<S, [u8], Meta, [u8], Meta>;
 type Req = ActiveRequest<S, [u8], Meta, [u8], Meta>;
 type Pending = PendingResponse<S, [u8], Meta, [u8], Meta>;
 
-/// service ごとの port 上限。`open_or_create` は設定が食い違うと失敗するので、全 launch で同じ値。
-/// iceoryx2 は port の共有メモリを **上限の積で前確保**する(client なら
-/// `max_servers × max_active_requests × max_loaned_requests × slice_len`)ので、大きくすると
-/// port の作成が秒単位で遅くなる。`// ponytail: 16 port / 型。足りない構成が出たら測って上げる`
+/// The per-service port limit. `open_or_create` fails on a settings mismatch, so every launch uses the
+/// same value. iceoryx2 **preallocates a port's shared memory as the product of the limits** (for a
+/// client, `max_servers × max_active_requests × max_loaned_requests × slice_len`), so raising them
+/// makes creating a port take seconds. `// ponytail: 16 ports per type; measure before raising it`
 const PORTS: usize = 16;
-/// subscriber の受信バッファ(iceoryx2 側)。reiny の Fifo(256)の手前にもう 1 段ある。
+/// The subscriber's receive buffer (on iceoryx2's side). One more stage in front of reiny's Fifo (256).
 const BUFFER: usize = 64;
-/// publisher / client / server が最初に確保する payload 長。超えたら倍々で再確保。
+/// The payload length a publisher / client / server allocates first. Past it, it reallocates by doubling.
 const INITIAL_SLICE: usize = 1024;
-/// client 1 つが同時に飛ばせる request。
+/// How many requests one client can have in flight.
 const REQUESTS: usize = 4;
-/// presence(`Service::list`)を読む間隔 = `watch_alive` の遅れの上限。
+/// How often presence (`Service::list`) is read = the upper bound on `watch_alive`'s lag.
 const POLL: Duration = Duration::from_millis(200);
-/// query の応答を待つ poll 間隔。`// ponytail: 1 ms poll。µs の call が要ったら qev の listener を待つ`
+/// The poll interval while waiting for a query's reply. `// ponytail: 1 ms poll; wait on a qev listener if a µs call is ever needed`
 const REPLY_POLL: Duration = Duration::from_millis(1);
 
 const KEY_MAX: usize = 224;
@@ -76,10 +76,10 @@ const ATTACHMENT_MAX: usize = 32;
 const FLAG_PAYLOAD: u8 = 1;
 const FLAG_ERROR: u8 = 2;
 
-/// sample / request / response に同伴する固定長 header。
+/// The fixed-size header that accompanies a sample / request / response.
 ///
-/// iceoryx2 の header に時刻は無いので送信側が `unix_ns` を入れる。`key` は sample では
-/// publisher の具体キー、request では query のパターン、response では responder の具体キー。
+/// iceoryx2's own header has no time, so the sender puts `unix_ns` in. `key` is the publisher's
+/// concrete key on a sample, the query's pattern on a request, and the responder's concrete key on a response.
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
 #[repr(C)]
 pub struct Meta {
@@ -157,7 +157,7 @@ fn service_name(text: &str) -> Result<ServiceName> {
         .map_err(|e| anyhow::anyhow!("iceoryx2 rejects service name '{text}': {e:?}"))
 }
 
-/// presence の service 名。iceoryx2 の名前に `@` を使ってよいか確かめていないので避ける。
+/// The presence service's name. `@` is avoided because whether iceoryx2 accepts it was never checked.
 fn alive_name(key: &Key) -> String {
     format!("reiny-alive/{}", key.to_string().replace('@', "_at_"))
 }
@@ -184,15 +184,15 @@ fn next_id() -> u64 {
 // engine
 // ---------------------------------------------------------------------------
 
-/// iceoryx2 の上の [`Engine`]。`Arc` に包んで `RuntimeOptions::engine` に渡す。
+/// The [`Engine`] on top of iceoryx2. Wrap it in an `Arc` and hand it to `RuntimeOptions::engine`.
 pub struct Iceoryx2 {
     node: Mutex<Node<S>>,
     config: Config,
     state: Arc<Mutex<State>>,
-    /// engine thread を起こす(登録 / 解除の後)。
+    /// Wake the engine thread (after a registration or a removal).
     wake: Arc<Notifier<S>>,
     stop: Arc<AtomicBool>,
-    /// 型ごとの request-response client(query のたびに port を作らない)。
+    /// The per-type request-response client (so a port is not created per query).
     clients: Mutex<HashMap<String, Arc<RrPorts>>>,
 }
 
@@ -232,17 +232,17 @@ struct WatchEntry {
 }
 
 impl Iceoryx2 {
-    /// 既定の iceoryx2 設定で。
+    /// With iceoryx2's default configuration.
     pub fn new() -> Result<Self> {
         Self::with_config(Config::default())
     }
 
-    /// 設定を指定して。テストは `config.global.prefix` を変えて共有メモリを隔離する。
+    /// With a configuration of your own. Tests change `config.global.prefix` to isolate shared memory.
     pub fn with_config(config: Config) -> Result<Self> {
         let instance = next_id();
         let pid = std::process::id();
-        // iceoryx2 は root(Linux `/tmp/iceoryx2/`、Windows `C:\Temp\iceoryx2\`)を自分では
-        // 作らず、無ければ node の作成が `InternalError` で落ちる。ここで作る。
+        // iceoryx2 does not create its root itself (Linux `/tmp/iceoryx2/`, Windows
+        // `C:\Temp\iceoryx2\`) and node creation fails with `InternalError` when it is missing.
         let root = config.global.root_path().to_string();
         std::fs::create_dir_all(&root)
             .map_err(|e| anyhow::anyhow!("creating iceoryx2 root directory {root}: {e}"))?;
@@ -365,7 +365,7 @@ impl Iceoryx2 {
         }
     }
 
-    /// いま立っている presence キー。死んだ process の残骸は先に掃除する。
+    /// The presence keys currently standing. Dead processes' leftovers are cleaned up first.
     fn alive_now(&self, pattern: &Key) -> Vec<Key> {
         let _ = Node::<S>::try_cleanup_dead_nodes(&self.config);
         list_alive(&self.config)
@@ -457,7 +457,7 @@ impl Engine for Iceoryx2 {
             .max_subscribers(1)
             .open_or_create()
             .map_err(err)?;
-        // 握っている間だけ service が存在する = 生きている。port は要らない。
+        // The service exists exactly while it is held = alive. No port is needed.
         self.wake();
         Ok(Box::new(factory))
     }
@@ -549,7 +549,7 @@ struct Thread {
     wake_listener: Listener<S>,
 }
 
-/// engine thread が 1 周ごとに見る、登録済み port の写し(ロックは写す間だけ)。
+/// The copy of the registered ports the engine thread looks at each round (locked only while copying).
 enum Drain {
     Sub(Arc<Sub>, Key, Arc<Callback<Sample>>),
     Srv(Arc<Srv>, Key, Arc<QueryCallback>),
@@ -598,8 +598,8 @@ impl Thread {
                     .collect()
             };
             {
-                // attach は 1 周ごとにやり直す —— guard が listener を借りるので、登録が
-                // 増減しても lifetime と喧嘩しない。`// ponytail: 周ごとの attach は O(port 数)`
+                // Attach again every round — a guard borrows its listener, so re-attaching keeps
+                // registrations coming and going from fighting lifetimes. `// ponytail: O(ports) per round`
                 let mut guards = Vec::with_capacity(entries.len() + 1);
                 for (listener, _) in &entries {
                     match waitset.attach_notification(&**listener) {
@@ -707,7 +707,7 @@ fn drain_server(server: &Srv, key: &Key, on_query: &QueryCallback) {
         let Some(query_key) = meta.key() else {
             continue;
         };
-        // 宛先が違う request は drop する = finalize(zenoh の queryable と同じ見え方)。
+        // A request addressed elsewhere is dropped = finalized (how a zenoh queryable looks too).
         if !query_key.matches(key) {
             tracing::trace!(%query_key, responder = %key, "iceoryx2: request for another responder");
             continue;
@@ -805,7 +805,7 @@ impl RawQuery for Iox2Query {
         let mut response = self.request.loan_slice_uninit(payload.len()).map_err(err)?;
         *response.user_header_mut() = meta;
         response.write_from_slice(&payload).send().map_err(err)
-        // ここで `self.request` が落ちる = finalize。
+        // `self.request` falls here = finalize.
     }
 
     fn reply_err(self: Box<Self>, message: Vec<u8>) -> Result<()> {
@@ -825,7 +825,7 @@ impl RawReplies for Iox2Replies {
     fn next(&mut self) -> BoxFuture<'_, Option<ReplyResult>> {
         Box::pin(async move {
             loop {
-                // 先に接続を見てから受ける: 「応答して drop」が間に挟まっても取りこぼさない。
+                // Look at the connection before receiving: nothing is missed when a "reply then drop" lands in between.
                 let connected = self.pending.is_connected();
                 match self.pending.receive() {
                     Ok(Some(response)) => {
@@ -860,5 +860,132 @@ impl RawReplies for Iox2Replies {
                 tokio::time::sleep(REPLY_POLL).await;
             }
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests may fail by panicking
+mod tests {
+    use super::*;
+    use reiny::engine::SERVICE_CHUNK;
+
+    fn key() -> Key {
+        Key::topic("lab", Some("ctrl"), "RobotState")
+    }
+
+    /// iceoryx2 carries no key of its own — the whole address rides in the fixed-size header, so what
+    /// goes in has to come back out exactly, verbatim chunks included.
+    #[test]
+    fn meta_round_trips_every_kind_of_key() {
+        for original in [
+            key(),
+            Key::topic("lab", None, "RobotState"),
+            Key::launch("lab", Some("ctrl")),
+            key().with_chunk(SERVICE_CHUNK),
+            key().with_chunk("@schema/hs.RobotState"),
+        ] {
+            let meta = Meta::new(&original, None, 0).expect("it fits");
+            assert_eq!(meta.key(), Some(original.clone()), "{original}");
+        }
+    }
+
+    /// The fingerprint travels in the header too. An absent attachment must come back as `None` rather
+    /// than as an empty slice, or the fingerprint check would see "present but different".
+    #[test]
+    fn an_absent_attachment_is_none_not_empty() {
+        let none = Meta::new(&key(), None, 0).unwrap();
+        assert_eq!(none.attachment(), None);
+
+        let some = Meta::new(&key(), Some(&0xdead_beef_u64.to_le_bytes()), 0).unwrap();
+        assert_eq!(
+            some.attachment(),
+            Some(0xdead_beef_u64.to_le_bytes().to_vec())
+        );
+
+        // An explicitly empty attachment is indistinguishable from none; reiny never sends one.
+        let empty = Meta::new(&key(), Some(&[]), 0).unwrap();
+        assert_eq!(empty.attachment(), None);
+    }
+
+    /// The header is `#[repr(C)]` and fixed-size, so anything that does not fit has to be an error
+    /// here rather than a truncated key that silently addresses a different topic.
+    #[test]
+    fn oversized_key_or_attachment_is_rejected() {
+        let long_type = "T".repeat(KEY_MAX);
+        let too_long = Key::topic("lab", Some("ctrl"), &long_type);
+        let err = Meta::new(&too_long, None, 0).expect_err("the key does not fit");
+        assert!(err.to_string().contains("longer than"), "{err}");
+
+        let big = vec![0u8; ATTACHMENT_MAX + 1];
+        let err = Meta::new(&key(), Some(&big), 0).expect_err("the attachment does not fit");
+        assert!(err.to_string().contains("longer than"), "{err}");
+
+        // Exactly at the limit still fits.
+        let edge = vec![0u8; ATTACHMENT_MAX];
+        assert_eq!(
+            Meta::new(&key(), Some(&edge), 0).unwrap().attachment(),
+            Some(edge)
+        );
+    }
+
+    /// The flags byte is carried through untouched, and a timestamp of zero means "no time" rather
+    /// than the epoch.
+    #[test]
+    fn flags_ride_along_and_a_zero_timestamp_is_none() {
+        let meta = Meta::new(&key(), None, 0b0000_0101).unwrap();
+        assert_eq!(meta.flags, 0b0000_0101);
+
+        let mut no_time = meta;
+        no_time.unix_ns = 0;
+        assert_eq!(no_time.timestamp(), None);
+        no_time.unix_ns = 42;
+        assert_eq!(no_time.timestamp(), Some(42));
+    }
+
+    /// A truncated or non-UTF-8 key does not decode. It must be `None`, not a panic — the bytes come
+    /// out of shared memory that any process on the host can write to.
+    #[test]
+    fn a_broken_key_in_the_header_decodes_to_none() {
+        let mut meta = Meta::new(&key(), None, 0).unwrap();
+        meta.key[0] = 0xff; // not UTF-8
+        assert_eq!(meta.key(), None);
+
+        let mut short = Meta::new(&key(), None, 0).unwrap();
+        short.key_len = 5; // "reiny" alone is not a key
+        assert_eq!(short.key(), None);
+    }
+
+    /// Presence is a service name, and `@` is deliberately avoided in one. The escaping has to survive
+    /// a round trip for every verbatim chunk reiny uses, or a launch's own token would never be found.
+    #[test]
+    fn alive_names_escape_at_and_round_trip() {
+        for original in [
+            Key::launch("lab", Some("ctrl")),
+            key(),
+            key().with_chunk(SERVICE_CHUNK),
+        ] {
+            let name = alive_name(&original);
+            assert!(name.starts_with("reiny-alive/"), "{name}");
+            assert!(!name.contains('@'), "an @ survived into {name}");
+            assert_eq!(parse_alive(&name), Some(original.clone()), "{original}");
+        }
+    }
+
+    /// Anything that is not one of our presence names is not ours to interpret — `Service::list`
+    /// returns every service on the host, including other processes' own.
+    #[test]
+    fn parse_alive_ignores_foreign_names() {
+        assert_eq!(parse_alive("reiny/lab/ctrl/RobotState"), None);
+        assert_eq!(parse_alive("some-other-service"), None);
+        assert_eq!(parse_alive("reiny-alive/not-a-key"), None);
+    }
+
+    /// An all-types key has no service to map onto, so it is refused with a message that says so
+    /// rather than producing an empty service name.
+    #[test]
+    fn a_key_without_a_type_is_refused() {
+        let err = type_of(&Key::all("lab")).expect_err("no type in an all-types key");
+        assert!(err.to_string().contains("names no type"), "{err}");
+        assert_eq!(type_of(&key()).unwrap(), "RobotState");
     }
 }
