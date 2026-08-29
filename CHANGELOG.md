@@ -5,14 +5,22 @@ All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
 `reiny-launch`, `reiny-cli`).
 Versions are kept in lockstep via `[workspace.package].version`.
 
-## Unreleased
+## 0.5.0 — 2026-08-29
 
-First slice of 0.5.0 (design record: `docs/design/0.5.0.md`, §11 records what
-shipped). The `Engine` abstraction itself is not in yet; what landed is the
-piece that does not depend on it.
+Two things at once, with a design record each: **taking zenoh's shape out of
+reiny's core** (`docs/design/0.5.0.md`, §11 records what shipped and where the
+implementation departed from the design) and the **operations pass** on top of it
+(`docs/design/operations.md`, §9) — the launcher actually waiting for what
+`depends_on` names, presence for subscribers, and receive buffers that say when
+they overflow.
+
+**Breaking** (see *Changed*), but the wire moves in exactly one place: the
+presence token `@grain` → `@launch`. Pub/sub and services still interoperate with
+0.4; presence does not. The keys added since — `…/<T>/@sub` — are verbatim chunks
+that `*` and `**` never match, so no 0.4 subscriber, `bag record` capture or
+`publishers()` call sees them.
 
 ### Added
-
 - **`reiny-core`** — the type vocabulary (`Topic`, `Descriptor`, `Service`) as a
   `#![no_std]` crate (needs `alloc` through `prost`). `reiny` re-exports it, so
   downstream paths are unchanged. MCU firmware depends on it directly under the
@@ -33,7 +41,6 @@ piece that does not depend on it.
   drives a `Link` on tokio and offers `send` / `call` / `recv`. CI builds
   `reiny-core` / `reiny-link` for `thumbv7em-none-eabihf` with
   `--no-default-features`.
-
 - **QoS in reiny's own vocabulary** — `Qos { reliability, priority, history,
   durability, express }` with the enums `Reliability` / `Priority` / `History`
   / `Durability` live in `reiny-core` and are re-exported by `reiny` (and its
@@ -43,7 +50,6 @@ piece that does not depend on it.
   transient-local = latched) — and `.reliability()` joins the per-field sugar.
   `.latched()` is now spelled `durability: TransientLocal` underneath. The
   engine mapping is documented in `docs/design/0.5.0.md` §2.3.
-
 - **The `Engine` trait** (`reiny::engine`) — the five primitives reiny asks
   of a bus (publisher / subscribe / liveliness: declare, list, watch /
   respond + query) as one object-safe trait; `Cloudy` now holds an
@@ -88,7 +94,6 @@ piece that does not depend on it.
   Linux it binds libc directly. Because of that the crate is not in the
   workspace's `default-members`: `cargo test` at the root skips it, CI runs
   `cargo test --workspace`, and locally it is `cargo test -p reiny-iceoryx2`.
-
 - **`reiny::bridge::forward(a, b)`** — a raw bridge between two engines
   held by two `Cloudy`s with the same id / domain (`Cloudy::with_engine`
   builds the second). It mirrors presence tokens with the *original* source,
@@ -116,7 +121,6 @@ piece that does not depend on it.
   `bridge::forward`, so MCU and iceoryx2 launches show up in `reiny node list`
   / `topic hz` / `bag record`. `iceoryx2` is behind the CLI feature of the
   same name (libclang on Windows / macOS).
-
 - **`reiny-ros2`** — a ROS 2 bridge *library* on pure-Rust DDS
   (`ros2-client` 0.10 / RustDDS; no ROS installation). A bridge launch builds
   a `Ros` (one ROS node, spinner on tokio; `ROS_DOMAIN_ID` and
@@ -129,7 +133,6 @@ piece that does not depend on it.
   reliability / durability / history 1:1 onto DDS; `priority` / `express` are
   dropped. The ROS distribution is a feature (`jazzy` default). Covered by an
   in-process e2e against a ros2-client node over RustDDS loopback.
-
 - **`reiny run` draws the topic flow at startup** — before spawning, the
   launcher resolves each launch's `Reiny.toml` (per-project and workspace
   layouts) and renders a sequence-diagram-style banner: one boxed column per
@@ -140,9 +143,54 @@ piece that does not depend on it.
   manifest cannot be resolved is skipped, and a dist layout with no
   `Reiny.toml` prints nothing. `reiny-build`'s `Resolution` gained
   `projects()` (the `[projects.*]` declarations) to feed it.
+- **`depends_on` waits for its dependency to come up.** Until now the launcher
+  only ordered the `spawn()` calls, which return at once — `depends_on` bought a
+  few microseconds of ordering and nothing else. `reiny run` now opens one zenoh
+  session and waits for each dependency's `reiny/<domain>/<name>/@launch` token
+  before starting its dependent. A dependency that does not appear within
+  `--ready-timeout` (default 10 s, `0` = 0.5's behaviour) is warned about and
+  started past, never fatal. Only launches something actually depends on are
+  waited for, and a plan with no `depends_on` anywhere opens no session at all.
+  The policy lives in `reiny-launch` and the bus knowledge in `reiny-cli`
+  (`runner::Ready { is_live, timeout }`), so **`reiny-launch` still links no
+  bus**. `@launch` goes up in `Cloudy::new`, before user code: it means "the
+  process is on the bus", which is as much as a launcher can promise — type-level
+  readiness is `publishers` / `subscribers` / `servers` and their `watch_*`.
+- **`on_exit = "respawn"` backs off** — 200 ms doubling to a 30 s ceiling, with
+  the ladder reset once a child has stayed up for a minute. A launch that dies
+  instantly (missing device, bad config) used to respawn at whatever rate
+  `spawn` + `wait` allowed. The wait is a deadline rather than a `sleep`, so
+  Ctrl+C is still answered within the monitor loop's 100 ms.
+- **Subscriber presence.** `Cloudy::subscribers::<T>()` and
+  `watch_subscribers::<T>()` join `publishers` (0.3) and `servers` (0.4): every
+  subscriber carries a liveliness token at `reiny/<domain>/<id>/<T>/@sub`. It
+  answers the first question of any bring-up — "I am publishing and nothing
+  reacts; is anyone listening?" — and lets a publisher wait for its consumer
+  (await the first `Joined` before the first `send`) instead of hoping. The
+  token is on the subscriber's **own** id even when the subscription is narrowed
+  with `.from(other)`, because the question is who listens to the *type*.
+  `reiny topic list` gains a `SUB` column and `reiny node info` a `sub :` line;
+  `LinkEngine` mirrors the peer's `flags::SUB` into the same chunk, so an MCU's
+  subscriptions are visible from the zenoh side.
+- **A subscriber answers `@schema` too** (same condition as a publisher:
+  `T::DESCRIPTOR` is `Some` and the engine has query). This is what makes
+  `reiny topic pub` work against a launch that only listens — during bring-up
+  the publisher of that type is usually the thing that is not running yet.
+- **`Subscriber::stats() -> SubscriberStats { received, dropped, blocked }`**,
+  plus a **one-shot `warn!`** the first time a buffer fills. Both receive
+  buffers were silent: the default Fifo of 256 blocks the engine's receive
+  thread when full (stalling every subscription in that launch) and `latest(n)`
+  throws the oldest sample away. Neither left a trace, so "the robot freezes now
+  and then" had nothing to go on. The Fifo path still blocks exactly as before —
+  `try_send` runs first only so a full buffer can be counted.
+- **`reiny topic pub <TYPE> [JSON]`** — the publish side of `reiny service call`.
+  It encodes through the descriptor a running launch serves at `@schema`,
+  publishes on `reiny/<domain>/<--as|reiny-cli>/<TYPE>` with a liveliness token
+  and the fingerprint attached, and takes `--rate` / `--count` / `--as`. Unlike
+  `bag play` it does not refuse a domain that already has a live publisher of the
+  type: it speaks as itself, and several sources of one type is ordinary in reiny.
 
 ### Changed
-
 - **Breaking (naming):** the word **grain** is gone — a reiny process is a
   **launch**. This renames three surfaces at once, with no compatibility
   shim: the launch config table `[grain]` → **`[launch]`**, the zenoh
@@ -187,9 +235,16 @@ piece that does not depend on it.
 - A publisher built with `history: KeepLast(n > 1)` is rejected at `build()`
   (a publisher keeps at most the one latched value; rings belong to the
   subscriber's `.latest(n)`).
+- **Breaking:** `reiny_launch::run_launch_dirs` takes a fourth argument,
+  `ready: Option<Ready<'_>>`. Pass `None` for 0.4's behaviour (order the spawns,
+  wait for nothing). `run_launch` is unchanged — it passes `None`.
+- `reiny_launch::ResolvedLaunch` gains `domain: Option<String>` — the value
+  already being passed as `--domain`, kept as a field so a readiness check can
+  address the launch without parsing the argument list back.
+- `reiny topic list` prints four columns (`TYPE / PUB / SUB / SRV`) and its
+  "nothing here" line now mentions subscribers.
 
 ### Fixed
-
 - **`reiny-link`** — `Link::decode` / `decode_reply` through a stale `Frame`
   handle returned a default-valued message instead of `None`. `payload()`
   answers a stale handle with an empty slice, and an empty slice is a valid
@@ -201,12 +256,10 @@ piece that does not depend on it.
   `servers()` kept naming a peer nothing could reach.
 
 ### Notes
-
 - An `embedded-io-async` adapter was left out; `feed` / `drain` is four
-  lines. The raw bridge subscribes on a side to every type it has seen a
-  token for (all sources), not only the types the other side wants —
-  narrowing that needs an engine-side "who wants this type" query that does
-  not exist yet.
+  lines. The raw bridge subscribes on a side to every type it has seen a token
+  for (all sources), not only the types the other side wants — see the note
+  below on why that is left as it is.
 - `reiny-ros2` on **Windows debug builds**: rustdds 0.14 still uses mio 0.6,
   whose Windows UDP code trips Rust 1.96's null-pointer UB check and aborts
   the DDS event loop. The crate builds; its e2e is `#[ignore]`d there and
@@ -215,6 +268,20 @@ piece that does not depend on it.
   + latched express them; parameters are not a bridge's job).
 - Publishers now default to `Reliable` (see *Changed*); a launch that relied on
   zenoh's `Drop` default for high-rate data should say `Qos::SENSOR`.
+- **The bridge deliberately does not narrow its subscriptions**, although `@sub`
+  is exactly the "who wants this type" question `bridge.rs`'s `ponytail:` comment
+  was waiting for. `Link::send_raw` already drops types the peer never
+  subscribed to, so on a serial link no unwanted byte reaches the wire either
+  way; narrowing would save one in-process subscription and cost a second
+  echo-analysis plus a two-sided reference count. Revisit for a bandwidth-bound
+  zenoh ↔ zenoh bridge.
+- The receive-buffer counters stay **off the bus**. A diagnostics topic is a
+  separate decision (who collects, who reads); `reiny topic hz` does not show
+  them either, because the CLI can only count its own buffer.
+- Deliberately **not** added: `topic pub --latched` (a process that fires and
+  exits cannot hold a latch), a readiness key in the launch config (one flag is
+  enough until someone needs it per launch), a lifecycle state machine, and
+  dynamic parameters. Rationale in `docs/design/operations.md` §5.
 
 ## 0.4.0 — 2026-08-28
 

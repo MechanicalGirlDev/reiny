@@ -55,7 +55,7 @@ zenoh major bump is a reiny breaking change.
 | [`reiny-link`](crates/reiny-link) | reiny over anything that moves bytes: a `no_std` sans-I/O `Link` plus host-side serial / UDP transports, a tokio `Host`, and `LinkEngine` to put a `Cloudy` on the link |
 | [`reiny-macros`](crates/reiny-macros) | The `#[reiny::main]` proc-macro (used via `reiny`) |
 | [`reiny-build`](crates/reiny-build) | `build.rs` helper: compiles protos from `Reiny.toml` and generates types/topics |
-| [`reiny-launch`](crates/reiny-launch) | Launcher library: spawns launch processes from a launch config's `[launch]` section |
+| [`reiny-launch`](crates/reiny-launch) | Launcher library: spawns launch processes from a launch config's `[launch]` section, in dependency order and with respawn backoff |
 | [`reiny-cli`](crates/reiny-cli) | The `reiny` command: scaffold (new/init/add), check, build, run, compress, bag, topic / node / service introspection, `bridge serial\|udp\|iceoryx2` |
 
 ## Getting started
@@ -84,9 +84,10 @@ Look at a live bus, `ros2 topic / node / service`-style:
 
 ```sh
 reiny node list                       # live launch ids
-reiny topic list                      # type → publishers / servers
+reiny topic list                      # type → publishers / subscribers / servers
 reiny topic hz RobotState             # rate per source (Ctrl+C to stop)
 reiny topic echo RobotState --count 3 # JSON, decoded from the schema the launch serves
+reiny topic pub Command '{"stop":{}}' # encoded the same way; --rate / --count to keep going
 reiny service call CalibrationCommand '{"start":{}}' --to hs-control
 ```
 
