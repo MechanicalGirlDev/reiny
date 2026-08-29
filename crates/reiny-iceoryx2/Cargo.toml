@@ -12,7 +12,7 @@ categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 # Engine trait と Local だけ(zenoh は引かない)。
-reiny = { path = "../reiny", version = "0.4.0", default-features = false }
+reiny = { path = "../reiny", version = "0.5.0", default-features = false }
 iceoryx2 = "0.9"
 tokio = { workspace = true }
 anyhow = { workspace = true }
@@ -20,7 +20,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 # 適合テスト(`reiny::engine::conformance`)を流す。
-reiny = { path = "../reiny", version = "0.4.0", default-features = false, features = ["conformance"] }
+reiny = { path = "../reiny", version = "0.5.0", default-features = false, features = ["conformance"] }
 prost = { workspace = true }
 tracing-subscriber = { workspace = true }
 

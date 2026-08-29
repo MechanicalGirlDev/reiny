@@ -19,16 +19,16 @@ path = "src/main.rs"
 iceoryx2 = ["dep:reiny-iceoryx2"]
 
 [dependencies]
-reiny-launch = { path = "../reiny-launch", version = "0.4.0" }
+reiny-launch = { path = "../reiny-launch", version = "0.5.0" }
 # `reiny bridge serial|udp`(LinkEngine)と、その tokio runtime。
-reiny-link = { path = "../reiny-link", version = "0.4.0" }
-reiny-iceoryx2 = { path = "../reiny-iceoryx2", version = "0.4.0", optional = true }
+reiny-link = { path = "../reiny-link", version = "0.5.0" }
+reiny-iceoryx2 = { path = "../reiny-iceoryx2", version = "0.5.0", optional = true }
 tokio = { workspace = true }
 # Reiny.toml の解決・型/トピック導出(`reiny check`)と、`@schema` 応答の descriptor 読み取り
 # (`reiny bag record`)。prost-build / protoc は引かない。
-reiny-build = { path = "../reiny-build", version = "0.4.0", default-features = false, features = ["descriptors"] }
+reiny-build = { path = "../reiny-build", version = "0.5.0", default-features = false, features = ["descriptors"] }
 # `reiny bag` が launch と同じ fabric に乗るため(zenoh の再エクスポート + 起動オプション)。
-reiny = { path = "../reiny", version = "0.4.0" }
+reiny = { path = "../reiny", version = "0.5.0" }
 mcap = { workspace = true }
 # `reiny topic echo` / `reiny service call` の動的 decode / encode(`@schema` の descriptor から)。
 # prost の版は reiny と同じ 0.13 系に揃える(prost-reflect 0.14 = prost 0.13)。

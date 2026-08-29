@@ -21,7 +21,7 @@ lyrical = ["ros2-client/lyrical"]
 
 [dependencies]
 # `Cloudy` と `Engine` の語彙だけ(zenoh は引かない)。
-reiny = { path = "../reiny", version = "0.4.0", default-features = false }
+reiny = { path = "../reiny", version = "0.5.0", default-features = false }
 ros2-client = { version = "0.10", default-features = false }
 prost = { workspace = true }
 # `export_auto` / `import_auto`: descriptor 経由の動的 decode / encode と serde の橋渡し。
