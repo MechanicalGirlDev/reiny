@@ -1,12 +1,12 @@
-//! ROS 無しで回る e2e: 同一プロセスに「ROS 役」の ros2-client node と、`Local` バス上の bridge
-//! (`Ros`)を置き、RustDDS のループバック(同じ DDS domain)で繋ぐ。topic 双方向 + service 双方向。
-//! DDS domain は process id から取り、並列実行で衝突しないようにする。
+//! An e2e that runs without ROS: a "playing ROS" ros2-client node and a bridge (`Ros`) on a `Local`
+//! bus, in one process, joined over `RustDDS`'s loopback (the same DDS domain). Topics both ways,
+//! services both ways. The DDS domain is derived from the process id so parallel runs do not collide.
 //!
-//! Windows のデバッグビルドでは ignore: rustdds 0.14 が使う mio 0.6 の Windows UDP 実装に
-//! null ポインタ参照があり、Rust 1.96 の UB 検査(debug のみ)で event loop が abort する。
-//! `cargo test -p reiny-ros2 --release -- --include-ignored` なら通る。CI(ubuntu)は素で回る。
+//! Ignored on Windows debug builds: the Windows UDP code of mio 0.6, which rustdds 0.14 uses,
+//! dereferences a null pointer, and Rust 1.96's UB check (debug only) aborts the event loop.
+//! `cargo test -p reiny-ros2 --release -- --include-ignored` passes. CI (ubuntu) runs it as-is.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // テストは panic で失敗を表現してよい
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests may fail by panicking
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,7 +23,7 @@ use reiny_ros2::ros2_client::{
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 
-// --- reiny 側の型(prost) ---
+// --- the reiny-side types (prost) ---
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct State {
@@ -85,7 +85,7 @@ impl Service for Echo {
     type Response = Echoed;
 }
 
-// --- ROS 側の型(serde = ros2-client の Message) ---
+// --- the ROS-side types (serde = ros2-client's Message) ---
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct RosState {
@@ -124,8 +124,8 @@ impl Message for RosEchoRes {}
 
 const WAIT: Duration = Duration::from_secs(10);
 
-/// ループバックだけの DDS participant。外向きのインタフェース(繋がっていない仮想アダプタを含む)
-/// に触らないので、どの機械 / CI runner でも同一ホスト内の discovery が決定的に成立する。
+/// A loopback-only DDS participant. It touches no outward-facing interface (including virtual adapters
+/// that are not connected), so same-host discovery is deterministic on any machine or CI runner.
 fn loopback_context(domain_id: u16) -> Context {
     let participant = DomainParticipantBuilder::new(domain_id)
         .with_only_networks([std::net::Ipv4Addr::LOCALHOST])
@@ -143,7 +143,7 @@ async fn open(bus: Local, id: &str) -> Cloudy {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::too_many_lines)] // 1 本で通す(DDS の discovery を 1 回で済ませる)。
+#[allow(clippy::too_many_lines)] // one pass end to end (so DDS discovery happens only once)
 #[cfg_attr(
     all(windows, debug_assertions),
     ignore = "rustdds 0.14 (mio 0.6) aborts on Windows debug builds; run with --release --include-ignored"
@@ -152,14 +152,14 @@ async fn bridge_round_trips_with_a_ros_node() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
         .try_init();
-    // 並列テスト / 隣のプロセスと domain がぶつからないように pid から取る(1..=200)。
+    // Derived from the pid (1..=200) so the domain does not clash with a parallel test or a neighbour.
     let domain_id = u16::try_from(std::process::id() % 200).unwrap() + 1;
 
     let bus = Local::new();
     let cloudy = open(bus.clone(), "bridge").await;
     let launch = open(bus, "g").await;
 
-    // --- ROS 役 ---
+    // --- playing ROS ---
     let ros_ctx = loopback_context(domain_id);
     let mut ros_node = ros_ctx
         .new_node(
@@ -223,7 +223,7 @@ async fn bridge_round_trips_with_a_ros_node() {
         }
     });
 
-    // --- bridge(同じ DDS domain の別 Context)---
+    // --- the bridge (another Context on the same DDS domain) ---
     let ros = Ros::with_context(&cloudy, loopback_context(domain_id), "reiny_bridge").unwrap();
     ros.export::<State, RosState, _>(
         "/state",
@@ -254,7 +254,7 @@ async fn bridge_round_trips_with_a_ros_node() {
     )
     .unwrap();
 
-    // --- reiny 側の launch ---
+    // --- the reiny-side launch ---
     let states = launch.publish::<State>().unwrap();
     let mut cmds = launch.subscribe::<Cmd>().unwrap();
     let mut add = launch.serve::<Add>().unwrap();
@@ -265,7 +265,7 @@ async fn bridge_round_trips_with_a_ros_node() {
         }
     });
 
-    // --- DDS の discovery を待つ(固定 sleep ではなく graph を見る)---
+    // --- wait for DDS discovery (by looking at the graph, not by sleeping) ---
     timeout(WAIT, ros_states.wait_for_publisher(&ros_node))
         .await
         .expect("bridge publisher discovered");
@@ -284,7 +284,7 @@ async fn bridge_round_trips_with_a_ros_node() {
         .unwrap();
     assert_eq!(state, RosState { x: 1.5 });
 
-    // ROS → reiny(source は bridge の id)
+    // ROS → reiny (the source is the bridge's id)
     ros_cmds.async_publish(RosCmd { v: 7 }).await.unwrap();
     let envelope = timeout(WAIT, cmds.recv_envelope())
         .await
@@ -292,15 +292,15 @@ async fn bridge_round_trips_with_a_ros_node() {
         .unwrap();
     assert_eq!((envelope.value.v, envelope.source.as_str()), (7, "bridge"));
 
-    // ROS の client → reiny の service
+    // a ROS client → a reiny service
     let res = timeout(WAIT, ros_add.async_call_service(RosAddReq { a: 2, b: 3 }))
         .await
         .expect("add within patience")
         .unwrap();
     assert_eq!(res.sum, 5);
 
-    // reiny の caller → ROS の service。bridge の DDS client が ROS の server を見つけるまでは
-    // request が消えるので、短い期限で撃ち直す。
+    // a reiny caller → a ROS service. Until the bridge's DDS client discovers the ROS server the
+    // request is lost, so retry on a short deadline.
     let caller = launch
         .caller::<Echo>()
         .timeout(Duration::from_secs(2))

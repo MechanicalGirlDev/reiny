@@ -1,37 +1,38 @@
-//! reiny ↔ ROS 2 bridge —— **型ごとの明示変換**。エンジンではなくライブラリ
-//! (`docs/design/0.5.0.md` §4)。
+//! The reiny ↔ ROS 2 bridge — **an explicit conversion per type**. A library, not an engine
+//! (`docs/design/0.5.0.md` §4).
 //!
-//! ROS 2 は `.msg` で型付けされるので protobuf の生バイトを流しても `RViz` は読めない。だから
-//! 利用側が bridge launch を書き、型ごとにクロージャで変換する:
+//! ROS 2 is typed by `.msg`, so pushing raw protobuf bytes at it leaves `RViz` unable to read them.
+//! You therefore write a bridge launch and convert per type through a closure:
 //!
 //! ```ignore
 //! use reiny_ros2::ros2_client::{MessageTypeName, ServiceTypeName};
 //!
 //! #[reiny::main]
 //! async fn main(cloudy: Cloudy) -> reiny::Result<()> {
-//!     let ros = reiny_ros2::Ros::new(&cloudy, "reiny_bridge")?;          // ROS_DOMAIN_ID は環境から
+//!     let ros = reiny_ros2::Ros::new(&cloudy, "reiny_bridge")?;          // ROS_DOMAIN_ID from the env
 //!     ros.export::<RobotState, JointState>(                                 // reiny → ROS
 //!         "/joint_states", MessageTypeName::new("sensor_msgs", "JointState"), Qos::SENSOR,
 //!         |s| JointState { .. })?;
 //!     ros.import::<Twist, CmdVel>(                                          // ROS → reiny
 //!         "/cmd_vel", MessageTypeName::new("geometry_msgs", "Twist"), Qos::COMMAND,
 //!         |t| CmdVel { .. })?;
-//!     ros.export_service::<Calibrate, SetBoolReq, SetBoolRes, _, _>(       // ROS の client → reiny の service
+//!     ros.export_service::<Calibrate, SetBoolReq, SetBoolRes, _, _>(       // a ROS client → a reiny service
 //!         "/calibrate", &ServiceTypeName::new("std_srvs", "SetBool"), |q| .., |r| ..)?;
 //!     cloudy.shutdown().await;
 //!     Ok(())
 //! }
 //! ```
 //!
-//! - ROS 2 のインストールは要らない —— [`ros2_client`] は pure Rust の DDS(RustDDS)で、
-//!   Fast DDS / Connext の ROS 2 と喋る。
-//! - ROS の型は [`ros2_client::Message`](serde の構造体)。標準 msg は `ros2-interfaces-<distro>`
-//!   から、あるいは自前の struct 3 行。
-//! - 同形の型には [`Ros::export_auto`] / [`Ros::import_auto`]: `Topic::DESCRIPTOR`(proto の
-//!   descriptor)を経由してフィールド名で写す。0 行だが、規則に合わない型はクロージャ版で。
-//! - ROS の domain(`ROS_DOMAIN_ID`)と reiny の domain は別物。bridge は両方を持つ。
-//! - presence: `import` は bridge の id を source に publish する。ROS 側の graph は写さない。
-//! - `QoS`: reliability / durability / history を 1:1 で写す。`priority` / `express` は捨てる。
+//! - No ROS 2 installation is needed — [`ros2_client`] is pure-Rust DDS (`RustDDS`) and talks to a ROS 2
+//!   running on Fast DDS / Connext.
+//! - A ROS type is a [`ros2_client::Message`] (a serde struct). Standard messages come from
+//!   `ros2-interfaces-<distro>`, or from three lines of struct of your own.
+//! - For identically shaped types there are [`Ros::export_auto`] / [`Ros::import_auto`], which map by
+//!   field name through `Topic::DESCRIPTOR` (the proto descriptor). Zero lines; a type that does not
+//!   fit that rule uses the closure form instead.
+//! - ROS's domain (`ROS_DOMAIN_ID`) and reiny's domain are different things; a bridge holds both.
+//! - presence: `import` publishes under the bridge's id as the source. The ROS graph is not mirrored.
+//! - `QoS`: reliability / durability / history map one to one. `priority` / `express` are dropped.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -49,17 +50,17 @@ pub use ros2_client;
 
 mod auto;
 
-/// `Reliable` の `max_blocking_time`。ROS 2 の rmw 既定に合わせた目安。
+/// `max_blocking_time` for `Reliable`. A starting point, matched to ROS 2's rmw default.
 const RELIABLE_BLOCKING_MS: i64 = 100;
-/// service の request / response topic の QoS(ROS 2 の `rmw_qos_profile_services_default` 相当)。
+/// The `QoS` of a service's request / response topics (ROS 2's `rmw_qos_profile_services_default`).
 const SERVICE_DEPTH: i32 = 10;
-/// ROS の service を呼ぶときの期限(reiny の `Caller` の既定と同じ 10 s)。
+/// The deadline when calling a ROS service (10 s, the same as reiny's `Caller` default).
 const ROS_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// ROS 2 側の入口。1 つの ROS node で、`export` / `import` を好きなだけ重ねる。
+/// The way in to the ROS 2 side. One ROS node, with as many `export` / `import` routes as you like.
 ///
-/// drop すると全経路と spinner が止まる。経路は `Cloudy` のシャットダウンでも止まる
-/// (reiny 側の購読が `None` を返す)。
+/// Dropping it stops every route and the spinner. The routes also stop when the `Cloudy` shuts down
+/// (the reiny-side subscription starts returning `None`).
 pub struct Ros<'c> {
     cloudy: &'c Cloudy,
     context: Context,
@@ -68,9 +69,9 @@ pub struct Ros<'c> {
 }
 
 impl<'c> Ros<'c> {
-    /// ROS node `node_name`(namespace `/`)を作り、spinner を tokio に載せる。
-    /// DDS domain は `ROS_DOMAIN_ID`(無ければ 0)、`ROS_LOCALHOST_ONLY=1` ならループバックだけ
-    /// (ROS 2 と同じ環境変数)。tokio runtime の中で呼ぶ。
+    /// Create the ROS node `node_name` (in the namespace `/`) and put its spinner on tokio.
+    /// The DDS domain comes from `ROS_DOMAIN_ID` (0 when unset), and `ROS_LOCALHOST_ONLY=1` keeps it
+    /// to loopback (the same environment variables ROS 2 uses). Call it inside a tokio runtime.
     pub fn new(cloudy: &'c Cloudy, node_name: &str) -> Result<Self> {
         let domain_id = std::env::var("ROS_DOMAIN_ID")
             .ok()
@@ -89,7 +90,7 @@ impl<'c> Ros<'c> {
         Self::with_context(cloudy, context, node_name)
     }
 
-    /// 自前の [`Context`](DDS domain / security 設定)で。
+    /// With a [`Context`] of your own (DDS domain / security settings).
     pub fn with_context(cloudy: &'c Cloudy, context: Context, node_name: &str) -> Result<Self> {
         let name = NodeName::new("/", node_name).map_err(err)?;
         let mut node = context
@@ -109,19 +110,19 @@ impl<'c> Ros<'c> {
         })
     }
 
-    /// DDS の [`Context`]。
+    /// The DDS [`Context`].
     #[must_use]
     pub fn context(&self) -> &Context {
         &self.context
     }
 
-    /// ROS の [`Node`]。reiny-ros2 が包んでいないもの(parameters / actions / 任意 topic)への逃げ道。
+    /// The ROS [`Node`]. The escape hatch to what reiny-ros2 does not wrap (parameters / actions / arbitrary topics).
     #[must_use]
     pub fn node(&self) -> &Mutex<Node> {
         &self.node
     }
 
-    /// reiny → ROS: 型 `T` を購読し、`convert` で `R` にして ROS topic `topic` へ publish する。
+    /// reiny → ROS: subscribe to the type `T`, turn it into `R` with `convert`, and publish it on the ROS topic `topic`.
     pub fn export<T, R, F>(
         &self,
         topic: &str,
@@ -137,8 +138,8 @@ impl<'c> Ros<'c> {
         self.export_with(topic, ty, qos, move |t| Ok(convert(t)))
     }
 
-    /// [`Ros::export`] の自動写像版: `T::DESCRIPTOR` を経由して proto のフィールド名で `R` に
-    /// deserialize する。名前と型が揃っていれば変換は 0 行。`T` に descriptor が無ければエラー。
+    /// The automatic form of [`Ros::export`]: deserialize into `R` by proto field name, through
+    /// `T::DESCRIPTOR`. Zero lines of conversion when the names and types line up. An error if `T` has no descriptor.
     pub fn export_auto<T, R>(&self, topic: &str, ty: MessageTypeName, qos: Qos) -> Result<()>
     where
         T: ProstMessage + Default + Topic + Send + 'static,
@@ -180,7 +181,7 @@ impl<'c> Ros<'c> {
             while let Some(value) = subscriber.recv().await {
                 match convert(value) {
                     Ok(message) => {
-                        // 失敗の型はメッセージを抱えて返る(Debug 不要にするため中身は見ない)。
+                        // The failure type carries its message home (its contents are never inspected, so it needs no Debug).
                         if publisher.async_publish(message).await.is_err() {
                             tracing::warn!(%topic, "ros2: publish failed");
                         }
@@ -192,8 +193,8 @@ impl<'c> Ros<'c> {
         Ok(())
     }
 
-    /// ROS → reiny: ROS topic `topic` を購読し、`convert` で `T` にして reiny に publish する
-    /// (source は bridge の id)。
+    /// ROS → reiny: subscribe to the ROS topic `topic`, turn it into `T` with `convert`, and publish
+    /// it on reiny (with the bridge's id as the source).
     pub fn import<R, T, F>(
         &self,
         topic: &str,
@@ -209,7 +210,7 @@ impl<'c> Ros<'c> {
         self.import_with(topic, ty, qos, move |r| Ok(convert(r)))
     }
 
-    /// [`Ros::import`] の自動写像版([`Ros::export_auto`] の逆)。
+    /// The automatic form of [`Ros::import`] (the inverse of [`Ros::export_auto`]).
     pub fn import_auto<R, T>(&self, topic: &str, ty: MessageTypeName, qos: Qos) -> Result<()>
     where
         R: Message + Send + Sync + 'static,
@@ -241,7 +242,7 @@ impl<'c> Ros<'c> {
             node.create_subscription::<R>(&ros_topic, Some(policies))
                 .map_err(err)?
         };
-        // reiny の publisher は KeepLast(1) か KeepAll しか持たない(n 件のリングは購読側)。
+        // A reiny publisher only has KeepLast(1) or KeepAll (an n-deep ring is the subscriber's).
         let history = match qos.history {
             History::KeepLast(1) => History::KeepLast(1),
             _ => History::KeepAll,
@@ -273,10 +274,10 @@ impl<'c> Ros<'c> {
         Ok(())
     }
 
-    /// ROS の client → reiny の service: ROS service `name` を serve し、request を `to_request`
-    /// で `S` にして reiny の(同 domain の任意の)server を呼び、応答を `to_response` で返す。
-    /// reiny 側が `NoReply` / `Timeout` / `reply_err` なら ROS には応答しない(ROS の service に
-    /// エラー応答の概念が無い)。
+    /// A ROS client → a reiny service: serve the ROS service `name`, turn the request into `S` with
+    /// `to_request`, call reiny's (any, same-domain) server, and answer with `to_response`.
+    /// When reiny gives `NoReply` / `Timeout` / `reply_err`, nothing is answered on the ROS side (a ROS
+    /// service has no notion of an error response).
     pub fn export_service<S, Q, P, FQ, FP>(
         &self,
         name: &str,
@@ -326,9 +327,9 @@ impl<'c> Ros<'c> {
         Ok(())
     }
 
-    /// reiny の caller → ROS の service: reiny の service `S` を serve し、request を `to_request`
-    /// で ROS の request にして ROS service `name` を呼び、応答を `to_response` で返す。
-    /// ROS 側の失敗は `reply_err` になる。
+    /// A reiny caller → a ROS service: serve the reiny service `S`, turn the request into a ROS request
+    /// with `to_request`, call the ROS service `name`, and answer with `to_response`.
+    /// A failure on the ROS side becomes a `reply_err`.
     pub fn import_service<S, Q, P, FQ, FP>(
         &self,
         name: &str,
@@ -358,7 +359,7 @@ impl<'c> Ros<'c> {
         let name = name.to_string();
         self.spawn(async move {
             while let Some(request) = server.recv().await {
-                // DDS の client は応答を待ち続けるので期限を切る(server 未発見の request は消える)。
+                // A DDS client waits forever, so put a deadline on it (a request sent before the server is discovered is lost).
                 let outcome = tokio::time::timeout(
                     ROS_CALL_TIMEOUT,
                     client.async_call_service(to_request(request.value.clone())),
@@ -398,7 +399,7 @@ fn err(e: impl std::fmt::Debug) -> anyhow::Error {
     anyhow::anyhow!("ros2: {e:?}")
 }
 
-/// `/joint_states` のような ROS の名前。相対名は `/` を付ける。
+/// A ROS name such as `/joint_states`. A relative name gets a `/` in front.
 fn parse_name(name: &str) -> Result<Name> {
     let absolute = if name.starts_with('/') {
         name.to_string()
@@ -408,7 +409,7 @@ fn parse_name(name: &str) -> Result<Name> {
     Name::parse(&absolute).map_err(|e| anyhow::anyhow!("ros2: bad name '{name}': {e:?}"))
 }
 
-/// reiny の [`Qos`] → DDS の QoS(§2.3 の ROS 2 列)。`priority` / `express` は捨てる。
+/// reiny's [`Qos`] → DDS `QoS` (the ROS 2 column of §2.3). `priority` / `express` are dropped.
 fn qos_policies(qos: Qos) -> QosPolicies {
     QosPolicyBuilder::new()
         .reliability(match qos.reliability {
@@ -439,4 +440,95 @@ fn service_qos() -> QosPolicies {
             depth: SERVICE_DEPTH,
         })
         .build()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests may fail by panicking
+mod tests {
+    use super::*;
+
+    /// ROS names are absolute. A relative one gets a `/` so `export("joint_states")` and
+    /// `export("/joint_states")` reach the same topic, and a name ROS would reject fails here rather
+    /// than at DDS discovery time, where nothing would ever arrive and nothing would say why.
+    #[test]
+    fn a_relative_name_is_made_absolute() {
+        assert_eq!(
+            parse_name("joint_states").unwrap().to_string(),
+            "/joint_states"
+        );
+        assert_eq!(
+            parse_name("/joint_states").unwrap().to_string(),
+            "/joint_states"
+        );
+        assert_eq!(parse_name("a/b").unwrap().to_string(), "/a/b");
+
+        for bad in [
+            "",
+            "/",
+            "1leading_digit",
+            "has space",
+            "has-hyphen",
+            "//double",
+        ] {
+            let err = parse_name(bad).expect_err(bad);
+            assert!(err.to_string().contains(bad), "{err}");
+        }
+    }
+
+    /// The `QoS` mapping is the documented contract with ROS 2 (`docs/design/0.5.0.md` §2.3), and it is
+    /// what decides whether a ROS subscriber and a reiny publisher are compatible at all — DDS refuses
+    /// to connect a `BestEffort` writer to a `Reliable` reader.
+    #[test]
+    fn qos_maps_onto_the_ros_2_profiles() {
+        // SENSOR: BestEffort / Volatile / KeepLast(1) — ROS 2's SensorDataQoS.
+        let sensor = qos_policies(Qos::SENSOR);
+        assert!(!sensor.is_reliable());
+        assert!(sensor.is_volatile());
+
+        // COMMAND (= the default): Reliable / Volatile / KeepAll.
+        let command = qos_policies(Qos::COMMAND);
+        assert!(command.is_reliable());
+        assert!(command.is_volatile());
+
+        // STATE: Reliable / TransientLocal / KeepLast(1) — reiny's latched, ROS 2's transient local.
+        let state = qos_policies(Qos::STATE);
+        assert!(state.is_reliable());
+        assert!(!state.is_volatile());
+        assert_eq!(
+            state.durability(),
+            Some(policy::Durability::TransientLocal),
+            "latched must arrive as transient local, or a late ROS subscriber gets nothing"
+        );
+
+        // The three profiles really are three different policies.
+        assert_ne!(sensor, command);
+        assert_ne!(command, state);
+    }
+
+    /// `History::KeepLast(n)` is a `usize` on reiny's side and an `i32` on DDS's. A depth past what
+    /// DDS can express clamps instead of wrapping into a negative depth.
+    #[test]
+    fn a_history_depth_too_large_for_dds_clamps() {
+        let huge = Qos {
+            history: History::KeepLast(usize::MAX),
+            ..Qos::DEFAULT
+        };
+        let expected = QosPolicyBuilder::new()
+            .reliability(policy::Reliability::Reliable {
+                max_blocking_time: ros2_client::ros2::Duration::from_millis(RELIABLE_BLOCKING_MS),
+            })
+            .durability(policy::Durability::Volatile)
+            .history(policy::History::KeepLast { depth: i32::MAX })
+            .build();
+        assert_eq!(qos_policies(huge), expected);
+    }
+
+    /// A service's topics are Reliable whatever the caller asked for: a lost request or reply has no
+    /// second chance, since ROS 2 services have no retry of their own.
+    #[test]
+    fn service_topics_are_always_reliable() {
+        let qos = service_qos();
+        assert!(qos.is_reliable());
+        assert_eq!(qos, service_qos(), "it is a constant profile");
+    }
 }
