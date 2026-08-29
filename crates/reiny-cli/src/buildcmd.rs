@@ -1,11 +1,11 @@
-//! `reiny build` — Reiny.toml 駆動の codegen を確実に走らせてからビルドするラッパ。
+//! `reiny build` — the wrapper that makes sure the Reiny.toml-driven codegen runs before the build.
 //!
-//! 実体は cwd(launch プロジェクト)での `cargo build`。codegen は各 launch の `build.rs` が
-//! 呼ぶ `reiny_build::compile()` が cargo build の一部として走るので、ここは薄いラッパでよい。
+//! It is really `cargo build` in the cwd (a launch project). The codegen runs as part of that build,
+//! from the `reiny_build::compile()` each launch's `build.rs` calls, so a thin wrapper is all this needs.
 
 use anyhow::{Context, Result, bail};
 
-/// `reiny build [--release] [-- <extra cargo args>]`。
+/// `reiny build [--release] [-- <extra cargo args>]`.
 pub(crate) fn build(release: bool, extra: &[String]) -> Result<()> {
     let mut cmd = std::process::Command::new("cargo");
     cmd.arg("build");

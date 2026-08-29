@@ -1,13 +1,13 @@
-//! `reiny bag record / play / info` —— バスの記録・再生・要約(rosbag2 相当、形式は MCAP)。
+//! `reiny bag record / play / info` — recording, replaying and summarizing the bus (the equivalent of rosbag2; the format is MCAP).
 //!
-//! reiny が担うのは、zenoh のキーの形と reiny の約束事(domain / 送信元 / presence / latched /
-//! 指紋 / `@schema`)を知らないと書けない部分だけ。時間やトピックで切る・統計を出すといった
-//! 「バスの語彙を要さない」操作は `mcap` CLI に委ねる(`docs/design/bag.md`)。
+//! reiny's share is only what cannot be written without knowing zenoh's key shape and reiny's
+//! conventions (domain / source / presence / latched / fingerprints / `@schema`). Operations that
+//! need none of that vocabulary — cutting by time or topic, producing statistics — are left to the `mcap` CLI (`docs/design/bag.md`).
 //!
-//! 同期。zenoh の `.wait()` と `std::thread` で足り、tokio は要らない(CLI 全体も tokio 無し)。
+//! Synchronous. zenoh's `.wait()` and `std::thread` are enough, and tokio is not needed (nor is it anywhere else in the CLI).
 
-// この file の数値キャストはすべて時刻(ns)・速度(rate)・日付の境界済み変換で、個々を
-// try_from にしても後ろに .unwrap() が並ぶだけ。civil() の 1 文字束縛も暦の慣用表記。
+// Every numeric cast in this file is a bounded conversion of a time (ns), a rate or a date; making
+// each one a try_from would only line up `.unwrap()`s behind it. The one-letter bindings in civil() are the calendar's own notation.
 #![allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -36,11 +36,11 @@ pub(crate) struct BagArgs {
 
 #[derive(Subcommand)]
 enum BagCommand {
-    /// バスを購読して MCAP へ録る(Ctrl+C か `--duration` で終了)。
+    /// Subscribe to the bus and record into MCAP (until Ctrl+C or `--duration`).
     Record(RecordArgs),
-    /// MCAP をバスへ再生する。
+    /// Replay an MCAP onto the bus.
     Play(PlayArgs),
-    /// MCAP の中身を要約する。
+    /// Summarize what is in an MCAP.
     Info(InfoArgs),
 }
 
@@ -58,34 +58,34 @@ pub(crate) fn run(args: BagArgs) -> Result<()> {
 
 #[derive(Args)]
 struct RecordArgs {
-    /// 出力ファイル(既定: `<yyyymmdd-HHMMSS>.mcap`、UTC)。
+    /// The output file (default: `<yyyymmdd-HHMMSS>.mcap`, UTC).
     #[arg(long)]
     out: Option<PathBuf>,
-    /// この型だけ録る(型セグメント名、繰り返し可。既定: 全型)。
+    /// Record only this type (the type segment's name, repeatable; default: every type).
     #[arg(long = "type")]
     types: Vec<String>,
-    /// この送信元 id だけ録る(繰り返し可。既定: 全送信元)。
+    /// Record only this source id (repeatable; default: every source).
     #[arg(long)]
     from: Vec<String>,
-    /// この型は録らない(繰り返し可)。
+    /// Do not record this type (repeatable).
     #[arg(long = "exclude-type")]
     exclude_types: Vec<String>,
-    /// この秒数で自動終了(既定: Ctrl+C まで)。
+    /// Stop after this many seconds (default: at Ctrl+C).
     #[arg(long)]
     duration: Option<f64>,
-    /// 記録開始前の latched 値(snapshot)を録らない。
+    /// Do not record the latched values (the snapshot) from before recording started.
     #[arg(long)]
     no_snapshot: bool,
     #[command(flatten)]
     bus: BusArgs,
 }
 
-/// 記録中のチャネル状態。MCAP の `channel_id` と、スキーマ登録済みかを覚える。
+/// A channel's state while recording: the MCAP `channel_id` and whether its schema is registered.
 struct RecordChannels<W: std::io::Write + std::io::Seek> {
     writer: mcap::Writer<W>,
-    /// キー → (`channel_id`, `sequence`)。
+    /// key → (`channel_id`, `sequence`).
     channels: BTreeMap<String, (u16, u32)>,
-    /// 取得済みの descriptor set(FQN → subset bytes)。チャネル作成時にスキーマへ回す。
+    /// The descriptor sets already fetched (FQN → subset bytes), handed to the schema when a channel is created.
     schemas: BTreeMap<String, (String, Vec<u8>)>,
 }
 
@@ -117,13 +117,13 @@ fn record(args: &RecordArgs) -> Result<()> {
         schemas: BTreeMap::new(),
     };
 
-    // スキーマ(descriptor)を先に集める。走っている publisher が `@schema` で名乗るものを拾う。
+    // Collect the schemas (descriptors) first: whatever the running publishers announce at `@schema`.
     state.schemas = collect_schemas(&session, &key);
 
     let filter = Filter::new(&args.types, &args.from, &args.exclude_types);
     let mut count: u64 = 0;
 
-    // snapshot: 記録開始前に publish された latched 値を先頭に入れる。
+    // The snapshot: the latched values published before recording started go in at the front.
     if !args.no_snapshot {
         let start = now_unix_nanos();
         for (key, payload, fp) in snapshot(&session, &key) {
@@ -133,7 +133,7 @@ fn record(args: &RecordArgs) -> Result<()> {
         }
     }
 
-    // Ctrl+C か --duration で抜ける。
+    // Leave on Ctrl+C or --duration.
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = Arc::clone(&stop);
@@ -165,8 +165,8 @@ fn record(args: &RecordArgs) -> Result<()> {
                     count += 1;
                 }
             }
-            Ok(None) => {}   // タイムアウト。stop を見に戻る。
-            Err(_) => break, // チャネル切断。
+            Ok(None) => {}   // a timeout; go back and look at stop.
+            Err(_) => break, // the channel is disconnected.
         }
     }
 
@@ -176,7 +176,7 @@ fn record(args: &RecordArgs) -> Result<()> {
     Ok(())
 }
 
-/// snapshot: `get` を 1 発撃って latched publisher の直近値を集める。返りは (key, payload, 指紋)。
+/// The snapshot: fire one `get` and collect the latched publishers' most recent values, as (key, payload, fingerprint).
 fn snapshot(session: &zenoh::Session, key: &str) -> Vec<(String, Vec<u8>, Option<u64>)> {
     let replies = match session.get(key).wait() {
         Ok(r) => r,
@@ -198,7 +198,7 @@ fn snapshot(session: &zenoh::Session, key: &str) -> Vec<(String, Vec<u8>, Option
     out
 }
 
-/// 1 サンプルを MCAP へ書く。初見キーはチャネル(＋あればスキーマ)を作る。フィルタで落ちれば false。
+/// Write one sample into the MCAP, creating the channel (and its schema, if any) the first time a key
 #[allow(clippy::too_many_arguments)]
 fn write_sample<W: std::io::Write + std::io::Seek>(
     state: &mut RecordChannels<W>,
@@ -251,7 +251,7 @@ fn write_sample<W: std::io::Write + std::io::Seek>(
             entry.1 += 1;
             s
         }
-        None => return Ok(false), // 直前に insert したので届かないはずだが、panic はしない。
+        None => return Ok(false), // inserted just above, so it should be there; do not panic if not.
     };
     state
         .writer
@@ -274,46 +274,46 @@ fn write_sample<W: std::io::Write + std::io::Seek>(
 
 #[derive(Args)]
 struct PlayArgs {
-    /// 再生する MCAP。
+    /// The MCAP to replay.
     file: PathBuf,
-    /// 全チャネルの送信元 id をこれに書き換える(既定: 録画時のまま)。
+    /// Rewrite every channel's source id to this (default: as recorded).
     #[arg(long = "as")]
     as_id: Option<String>,
-    /// 再生速度(1.0 = 実時間、2.0 = 倍速)。
+    /// The replay speed (1.0 = real time, 2.0 = twice as fast).
     #[arg(long, default_value_t = 1.0)]
     rate: f64,
-    /// 末尾まで行ったら先頭へ戻る。
+    /// Go back to the start on reaching the end.
     #[arg(long = "loop")]
     looping: bool,
-    /// 先頭からこの秒数を読み飛ばす。
+    /// Skip this many seconds from the start.
     #[arg(long)]
     start: Option<f64>,
-    /// 再生する長さ(秒。`--start` から数える)。
+    /// How long to replay (in seconds, counted from `--start`).
     #[arg(long)]
     duration: Option<f64>,
-    /// この型だけ再生(繰り返し可)。
+    /// Replay only this type (repeatable).
     #[arg(long = "type")]
     types: Vec<String>,
-    /// この送信元だけ再生(繰り返し可。書き換え前の id で判定)。
+    /// Replay only this source (repeatable; matched against the id before any rewrite).
     #[arg(long)]
     from: Vec<String>,
-    /// 生きた publisher が居る domain へも流す(安全弁を外す)。
+    /// Replay into a domain that has live publishers too (this removes the safety catch).
     #[arg(long)]
     force: bool,
     #[command(flatten)]
     bus: BusArgs,
 }
 
-/// 再生用に各チャネルの出力キーと reiny の約束事を保持する。
+/// What a channel needs at replay time: its output key and reiny's conventions.
 struct PlayChannel {
-    /// 出力キー `reiny/<domain>/<source>/<TYPE>`(--domain / --as を反映済み)。
+    /// The output key `reiny/<domain>/<source>/<TYPE>` (with --domain / --as already applied).
     key: String,
     ty: String,
     publisher: zenoh::pubsub::Publisher<'static>,
     _token: zenoh::liveliness::LivelinessToken,
-    /// このチャネルの指紋(attachment に戻す)。
+    /// This channel's fingerprint (put back into the attachment).
     fingerprint: Option<u64>,
-    /// latched チャネルなら、直近に流した値を返す queryable の元データ。
+    /// For a latched channel, the data behind the queryable that answers with the most recent value sent.
     latch: Option<Arc<Mutex<Option<Vec<u8>>>>>,
     _latch_queryable: Option<zenoh::query::Queryable<()>>,
 }
@@ -325,7 +325,7 @@ fn play(args: &PlayArgs) -> Result<()> {
     let bytes =
         std::fs::read(&args.file).with_context(|| format!("reading {}", args.file.display()))?;
 
-    // チャネルの目録を先に作る(メッセージ本体を読む前に、型・latched・指紋を知りたい)。
+    // Build the channel catalogue first (the type, latched and fingerprint are wanted before any message body is read).
     let summary = mcap::Summary::read(&bytes)
         .map_err(anyhow::Error::msg)?
         .context("bag has no summary section; recover it with `mcap recover`")?;
@@ -333,7 +333,7 @@ fn play(args: &PlayArgs) -> Result<()> {
 
     let filter = Filter::new(&args.types, &args.from, &[]);
 
-    // どのチャネルを再生するか(フィルタ後)と、その出力キーを決める。
+    // Decide which channels are replayed (after filtering) and what their output keys are.
     let mut plan: BTreeMap<u16, PlannedChannel> = BTreeMap::new();
     for (id, ch) in &summary.channels {
         let Some(parts) = KeyParts::parse(&ch.topic) else {
@@ -361,13 +361,13 @@ fn play(args: &PlayArgs) -> Result<()> {
         bail!("nothing to play (no channels matched the filters)");
     }
 
-    // 安全弁: 同じ型の生きた publisher が再生先 domain に居るなら、既定で拒否する。
-    // publisher を宣言する **前** に見る(自分のを数えないため)。
+    // The safety catch: refuse by default when the replay domain has a live publisher of the same type.
+    // Looked at **before** declaring our own publishers (so as not to count them).
     if !args.force {
         guard_live_publishers(&session, &domain, &plan)?;
     }
 
-    // 各チャネルの publisher + liveliness トークン(+ latched queryable)を建てる。
+    // Stand up each channel's publisher + liveliness token (+ latched queryable).
     let channels = declare_play_channels(&session, plan)?;
 
     let msgs = replay_order(&bytes, args.start, args.duration)?;
@@ -383,7 +383,7 @@ fn play(args: &PlayArgs) -> Result<()> {
             let Some(ch) = channels.get(channel_id) else {
                 continue;
             };
-            // 絶対期限へスリープ(相対 sleep の累積ではないのでドリフトしない)。
+            // Sleep to an absolute deadline (so it does not drift the way accumulated relative sleeps do).
             let target = t0 + Duration::from_nanos(((log_time - first) as f64 / args.rate) as u64);
             let now = Instant::now();
             if target > now {
@@ -410,7 +410,7 @@ fn play(args: &PlayArgs) -> Result<()> {
     Ok(())
 }
 
-/// フィルタ通過後・宣言前のチャネル情報。
+/// A channel's information after filtering and before declaring.
 struct PlannedChannel {
     key: String,
     ty: String,
@@ -418,7 +418,7 @@ struct PlannedChannel {
     latched: bool,
 }
 
-/// 各 planned チャネルについて、再生先 domain に**自分以外の**生きた publisher が居ないか見る。
+/// For each planned channel, look for a live publisher **other than ours** in the replay domain.
 fn guard_live_publishers(
     session: &zenoh::Session,
     domain: &str,
@@ -490,7 +490,7 @@ fn declare_play_channels(
     Ok(channels)
 }
 
-/// 再生中の latched チャネル用 queryable。reiny 本体の `declare_latch` の写し(直近値を返すだけ)。
+/// The queryable for a latched channel during replay. A copy of reiny's own `declare_latch` (it just answers with the last value).
 fn declare_latch_queryable(
     session: &zenoh::Session,
     key: &str,
@@ -515,7 +515,7 @@ fn declare_latch_queryable(
         .map_err(anyhow::Error::msg)
 }
 
-/// MCAP を線形に読み、`--start` / `--duration` で範囲を切って (`log_time`, `channel_id`, `data`) を返す。
+/// Read an MCAP linearly, cut to `--start` / `--duration`, yielding (`log_time`, `channel_id`, `data`).
 fn replay_order(
     bytes: &[u8],
     start: Option<f64>,
@@ -549,7 +549,7 @@ fn replay_order(
 
 #[derive(Args)]
 struct InfoArgs {
-    /// 要約する MCAP。
+    /// The MCAP to summarize.
     file: PathBuf,
 }
 
@@ -576,7 +576,7 @@ fn info(args: &InfoArgs) -> Result<()> {
         stats.message_count,
     );
 
-    // domain はチャネル metadata から(全チャネル同じはず。違えば列挙)。
+    // The domain comes from the channels' metadata (they should agree; if not, list them).
     let mut domains: Vec<&str> = summary
         .channels
         .values()
@@ -588,7 +588,7 @@ fn info(args: &InfoArgs) -> Result<()> {
         println!("domain: {}", domains.join(", "));
     }
 
-    // 行はチャネル。送信元 / 型 / 件数 / 平均 Hz / latched / スキーマ + 指紋。
+    // One row per channel: source / type / count / mean Hz / latched / schema + fingerprint.
     let mut rows: Vec<Row> = summary
         .channels
         .iter()
@@ -619,7 +619,7 @@ fn info(args: &InfoArgs) -> Result<()> {
     let w_ty = rows.iter().map(|r| r.ty.len()).max().unwrap_or(0);
     for r in &rows {
         let latched = if r.latched { "latched" } else { "       " };
-        // 記述子(あれば型名)と指紋(あれば)は独立に出す —— 段 1 の bag は指紋だけ載る。
+        // The descriptor (its type name, if any) and the fingerprint are printed independently — a stage-1 bag carries only the fingerprint.
         let schema = r.schema.as_deref().map_or("—".to_string(), str::to_string);
         let fp = r
             .fingerprint
@@ -644,10 +644,10 @@ struct Row {
 }
 
 // ===========================================================================
-// 共有の小道具
+// Shared odds and ends
 // ===========================================================================
 
-/// 型 / 送信元 / 除外型のフィルタ。空の許可リストは「全部」。
+/// The type / source / excluded-type filter. An empty allow list means "everything".
 struct Filter {
     types: Vec<String>,
     from: Vec<String>,
@@ -690,20 +690,20 @@ fn timestamp_nanos(ts: &zenoh::time::Timestamp) -> u64 {
         .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
-/// Unix ナノ秒 → `yyyymmdd-HHMMSS`(UTC)。既定ファイル名用。
+/// Unix nanoseconds → `yyyymmdd-HHMMSS` (UTC). For the default file name.
 fn utc_stamp(ns: u64) -> String {
     let (y, mo, d, h, mi, s) = civil(ns / 1_000_000_000);
     format!("{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}")
 }
 
-/// Unix ナノ秒 → `yyyy-mm-dd HH:MM:SS`(UTC)。info の表示用。
+/// Unix nanoseconds → `yyyy-mm-dd HH:MM:SS` (UTC). For info's output.
 fn utc_full(ns: u64) -> String {
     let (y, mo, d, h, mi, s) = civil(ns / 1_000_000_000);
     format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
 }
 
-/// Unix 秒 → (年, 月, 日, 時, 分, 秒) UTC。Howard Hinnant の `civil_from_days`。
-/// `time` クレートを引かないための 15 行(bag のファイル名と表示にしか要らない)。
+/// Unix seconds → (year, month, day, hour, minute, second) UTC. Howard Hinnant's `civil_from_days`.
+/// Fifteen lines to avoid pulling in the `time` crate (only a bag's file name and display need it).
 fn civil(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
     let days = (secs / 86_400) as i64;
     let rem = (secs % 86_400) as u32;
@@ -735,10 +735,10 @@ mod tests {
             ty,
         };
         assert!(f.accepts(&mk("ctrl", "A")));
-        assert!(!f.accepts(&mk("gui", "A")), "送信元が違う");
-        assert!(!f.accepts(&mk("ctrl", "B")), "除外型");
-        assert!(!f.accepts(&mk("ctrl", "C")), "許可リスト外");
-        // 空フィルタは全通し。
+        assert!(!f.accepts(&mk("gui", "A")), "the wrong source");
+        assert!(!f.accepts(&mk("ctrl", "B")), "an excluded type");
+        assert!(!f.accepts(&mk("ctrl", "C")), "not on the allow list");
+        // An empty filter passes everything.
         let all = Filter::new(&[], &[], &[]);
         assert!(all.accepts(&mk("any", "Any")));
     }
@@ -749,7 +749,7 @@ mod tests {
         // 2025-08-27 10:14:02 UTC = 1756289642
         assert_eq!(civil(1_756_289_642), (2025, 8, 27, 10, 14, 2));
         assert_eq!(utc_stamp(1_756_289_642_000_000_000), "20250827-101402");
-        // 閏日: 2024-02-29 00:00:00 UTC = 1709164800
+        // A leap day: 2024-02-29 00:00:00 UTC = 1709164800
         assert_eq!(civil(1_709_164_800), (2024, 2, 29, 0, 0, 0));
     }
 }

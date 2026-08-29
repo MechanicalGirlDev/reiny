@@ -1,31 +1,39 @@
-//! `reiny run` — launch config から launch 群を起動する。
+//! `reiny run` — start a set of launches from a launch config.
 //!
-//! launch は独立プロジェクト(各自の `target/`)に分かれていることがあるので、launch config の
-//! 場所を基準に複数の候補ディレクトリを組み立て、`reiny_launch::run_launch_dirs` に渡す。
+//! Launches are sometimes separate projects with a `target/` each, so this assembles several candidate
+//! directories from the launch config's location and hands them to `reiny_launch::run_launch_dirs`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use reiny_launch::{LaunchPlan, run_launch_dirs};
+use reiny::zenoh::{self, Wait};
+use reiny::{DEFAULT_DOMAIN, DOMAIN_ENV, RuntimeOptions};
+use reiny_launch::{LaunchPlan, Ready, ResolvedLaunch, run_launch_dirs};
 
-/// launch config の置かれたディレクトリ(絶対化。失敗時はそのまま)。
+use crate::bus::{KEY_ROOT, LAUNCH_CHUNK, alive_keys};
+
+/// How long `reiny run` waits for one `depends_on` dependency to show up on the bus.
+pub(crate) const DEFAULT_READY_TIMEOUT: f64 = 10.0;
+
+/// The directory holding the launch config (made absolute; kept as-is on failure).
 pub(crate) fn config_dir(config: &Path) -> PathBuf {
     let abs = std::fs::canonicalize(config).unwrap_or_else(|_| config.to_path_buf());
     abs.parent().map(Path::to_path_buf).unwrap_or_default()
 }
 
-/// 実行ファイルの隣(dist レイアウトでは launch bin がここに並ぶ)。
+/// Next to the executable (in a dist layout the launch bins sit here).
 fn exe_dir() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(Path::to_path_buf))
 }
 
-/// bin を探す候補ディレクトリを組み立てる。優先順:
-/// 1. 明示 `--bin-dir`、2. `<cfg>/<launch>/target/{debug,release}`(個別プロジェクト)、
-/// 3. `<cfg>/target/{debug,release}`(共有ワークスペース)、4. 実行ファイルの隣(dist)。
+/// Assemble the candidate directories to look for bins in, in priority order:
+/// 1. an explicit `--bin-dir`, 2. `<cfg>/<launch>/target/{debug,release}` (separate projects),
+/// 3. `<cfg>/target/{debug,release}` (a shared workspace), 4. next to the executable (dist).
 pub(crate) fn search_dirs(
     cfg_dir: &Path,
     plan: &LaunchPlan,
@@ -42,12 +50,12 @@ pub(crate) fn search_dirs(
     if let Some(d) = explicit {
         push(d);
     }
-    // 各 launch の個別プロジェクト target(ディレクトリ名 = launch 名 = bin 名の前提)。
+    // Each launch's own project target (assuming directory name = launch name = bin name).
     for g in &plan.launches {
         push(cfg_dir.join(&g.name).join("target").join("debug"));
         push(cfg_dir.join(&g.name).join("target").join("release"));
     }
-    // 共有ワークスペースの target。
+    // The shared workspace's target.
     push(cfg_dir.join("target").join("debug"));
     push(cfg_dir.join("target").join("release"));
     if include_exe_dir && let Some(d) = exe_dir() {
@@ -56,48 +64,110 @@ pub(crate) fn search_dirs(
     dirs
 }
 
-/// 複数の候補ディレクトリから bin を探す(`reiny run` / `reiny compress` 共通)。
+/// Look for a bin across several candidate directories (shared by `reiny run` and `reiny compress`).
 pub(crate) fn find_bin(dirs: &[PathBuf], bin: &str) -> Option<PathBuf> {
     dirs.iter()
         .map(|dir| dir.join(format!("{bin}{}", std::env::consts::EXE_SUFFIX)))
         .find(|p| p.exists())
 }
 
-/// `reiny run <launch.toml>`。`cd` した先からの相対 bin も拾えるよう launch config 基準で探す。
-pub(crate) fn run(config: &Path, explicit_bin_dir: Option<PathBuf>, log_level: &str) -> Result<()> {
+/// A launch's namespace, resolved the same way the child itself resolves it.
+fn domain_of(spec: &ResolvedLaunch) -> String {
+    spec.domain
+        .clone()
+        .unwrap_or_else(|| std::env::var(DOMAIN_ENV).unwrap_or_else(|_| DEFAULT_DOMAIN.to_string()))
+}
+
+/// The session `reiny run` uses to ask whether a dependency is up, or `None` when nothing depends on
+/// anything (no point paying for a session) or when it cannot be opened.
+///
+/// A launcher that refuses to start because it could not open a *diagnostic* session would be worse
+/// than one that starts without the wait, so a failure here is a warning, not an error.
+fn ready_session(plan: &LaunchPlan) -> Option<zenoh::Session> {
+    if plan.launches.iter().all(|l| l.depends_on.is_empty()) {
+        return None;
+    }
+    let config = RuntimeOptions::new("reiny-run").zenoh_config();
+    match config.and_then(|c| zenoh::open(c).wait().map_err(anyhow::Error::msg)) {
+        Ok(session) => Some(session),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "cannot open a zenoh session to wait on depends_on; starting without the wait"
+            );
+            None
+        }
+    }
+}
+
+/// `reiny run <launch.toml>`. It searches relative to the launch config, so a bin relative to wherever you `cd`ed is still found.
+///
+/// `ready_timeout` seconds is how long each `depends_on` dependency is waited for (`0` = start
+/// everything at once, which is what 0.5 did).
+pub(crate) fn run(
+    config: &Path,
+    explicit_bin_dir: Option<PathBuf>,
+    log_level: &str,
+    ready_timeout: f64,
+) -> Result<()> {
     let plan = LaunchPlan::from_launch_config(config)
         .with_context(|| format!("loading launch config {}", config.display()))?;
     let cfg_dir = config_dir(config);
     log_topic_flow(&cfg_dir, &plan);
     let dirs = search_dirs(&cfg_dir, &plan, explicit_bin_dir, true);
-    run_launch_dirs(&plan, &dirs, Some(log_level))
+
+    let timeout = Duration::try_from_secs_f64(ready_timeout.max(0.0)).unwrap_or_default();
+    let session = (!timeout.is_zero()).then(|| ready_session(&plan)).flatten();
+    let Some(session) = session else {
+        return run_launch_dirs(&plan, &dirs, Some(log_level), None);
+    };
+    // `@launch` goes up in `Cloudy::new`, before user code: it means "the process is on the bus",
+    // which is exactly as much as a launcher can promise. Type-level readiness is the launch's own
+    // job (`publishers` / `subscribers` / `servers`).
+    let is_live = |spec: &ResolvedLaunch| {
+        let key = format!(
+            "{KEY_ROOT}/{}/{}/{LAUNCH_CHUNK}",
+            domain_of(spec),
+            spec.name
+        );
+        alive_keys(&session, &key).is_ok_and(|keys| !keys.is_empty())
+    };
+    run_launch_dirs(
+        &plan,
+        &dirs,
+        Some(log_level),
+        Some(Ready {
+            is_live: &is_live,
+            timeout,
+        }),
+    )
 }
 
-/// リネームされたランチャ(`./ping-pong`)が自分の隣の `<name>.toml` を引数なしで起動する経路。
-/// bin はランチャの隣(dist)にも、launch config 基準のプロジェクト target にも置けるよう探す。
+/// The path a renamed launcher (`./ping-pong`) takes to start its neighbouring `<name>.toml` with no
+/// arguments. Bins are looked for next to the launcher (dist) as well as in the project targets around the launch config.
 pub(crate) fn run_self(config: &Path) -> Result<()> {
-    run(config, None, "info")
+    run(config, None, "info", DEFAULT_READY_TIMEOUT)
 }
 
 // ---------------------------------------------------------------------------
-// トピックの流れ図(起動ログ)
+// The topic flow diagram (in the startup log)
 // ---------------------------------------------------------------------------
 
-/// 1 launch の pub/sub 宣言(値はトピックの型セグメント)。
+/// One launch's pub/sub declarations (the values are topic type segments).
 struct LaunchFlow {
     name: String,
     pubs: BTreeSet<String>,
     subs: BTreeSet<String>,
 }
 
-/// 各 launch の Reiny.toml を解決し、宣言(publications / dependencies)と `[services]` の
-/// request 型 → response 別名を集める。マニフェストの見つからない launch は黙って飛ばす
-/// (dist 配置などでも起動を妨げないため、この図は best-effort)。
+/// Resolve each launch's Reiny.toml and collect its declarations (publications / dependencies) and
+/// its `[services]` request type → response alias. A launch whose manifest cannot be found is skipped
+/// silently (this diagram is best-effort and must not get in the way of starting, in a dist layout say).
 fn collect_flows(cfg_dir: &Path, plan: &LaunchPlan) -> (Vec<LaunchFlow>, BTreeMap<String, String>) {
     let mut flows = Vec::new();
     let mut services = BTreeMap::new();
     for g in &plan.launches {
-        // 個別プロジェクト(<cfg>/<launch>)を優先し、無ければ launch config の場所から上方探索。
+        // Prefer the launch's own project (<cfg>/<launch>); failing that, search upward from the launch config.
         let dir = [cfg_dir.join(&g.name), cfg_dir.join(&g.bin)]
             .into_iter()
             .find(|d| d.is_dir())
@@ -111,7 +181,7 @@ fn collect_flows(cfg_dir: &Path, plan: &LaunchPlan) -> (Vec<LaunchFlow>, BTreeMa
             .map(|t| (t.alias.as_str(), t.topic_segment.as_str()))
             .collect();
         let (pubs, subs) = if matches!(res.mode(), reiny_build::Mode::PerProject) {
-            // per-project: publications = 公開、dependencies::* = 購読できる型。
+            // per-project: publications = what it publishes, dependencies::* = what it can subscribe to.
             let pick = |f: fn(&str) -> bool| {
                 types
                     .iter()
@@ -124,7 +194,7 @@ fn collect_flows(cfg_dir: &Path, plan: &LaunchPlan) -> (Vec<LaunchFlow>, BTreeMa
                 pick(|m| m.starts_with("dependencies::")),
             )
         } else {
-            // workspace: [projects.<bin>] の宣言(別名)をカタログでセグメントへ引く。
+            // workspace: look the `[projects.<bin>]` declarations (aliases) up in the catalogue for their segments.
             let Some(p) = res
                 .projects()
                 .iter()
@@ -154,7 +224,7 @@ fn collect_flows(cfg_dir: &Path, plan: &LaunchPlan) -> (Vec<LaunchFlow>, BTreeMa
     (flows, services)
 }
 
-/// `by` から型 `t` の辺を引く(無ければ作って `[services]` の reply を写す)。
+/// Add an edge for the type `t` from `by` (creating it, and copying the `[services]` reply, if new).
 fn edge_for<'m, 'k>(
     by: &'m mut BTreeMap<&'k str, crate::flowart::Edge>,
     t: &'k str,
@@ -168,8 +238,8 @@ fn edge_for<'m, 'k>(
     })
 }
 
-/// 宣言を型ごとの辺(列 = `flows` の添字)へ畳む。`[services]` の request 型は矢印を
-/// 呼ぶ側 → serve する側の向きにしたいので、公開/購読の役割を入れ替える。
+/// Fold the declarations into one edge per type (columns = indices into `flows`). A `[services]`
+/// request type has its publish / subscribe roles swapped, so the arrow runs caller → server.
 fn build_edges(
     flows: &[LaunchFlow],
     services: &BTreeMap<String, String>,
@@ -189,15 +259,15 @@ fn build_edges(
             std::mem::swap(&mut e.pubs, &mut e.subs);
         }
     }
-    // 行順: 送り手の列 → 受け手の列 → 型名。上から下へ流れが読めるようにする。
+    // Row order: sender's column → receiver's column → type name, so the flow reads top to bottom.
     edges.sort_by(|a, b| {
         (a.pubs.first(), a.subs.first(), &a.ty).cmp(&(b.pubs.first(), b.subs.first(), &b.ty))
     });
     edges
 }
 
-/// 起動する launch 群のトピックの流れ図を起動ログに出す。宣言を 1 つも解決できなければ
-/// 何も出さない。多行の図なので tracing ではなく素の stdout へ描く(バナー扱い)。
+/// Print the topic flow diagram of the launches being started into the startup log. With no
+/// declarations resolved at all, nothing is printed. It is many lines, so it goes to plain stdout rather than through tracing (it is a banner).
 fn log_topic_flow(cfg_dir: &Path, plan: &LaunchPlan) {
     let (flows, services) = collect_flows(cfg_dir, plan);
     let names: Vec<String> = flows.iter().map(|f| f.name.clone()).collect();
@@ -215,7 +285,7 @@ fn log_topic_flow(cfg_dir: &Path, plan: &LaunchPlan) {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)] // テストは panic で失敗を表現してよい
+#[allow(clippy::expect_used, clippy::unwrap_used)] // tests may fail by panicking
 mod tests {
     use super::*;
 
@@ -229,7 +299,7 @@ mod tests {
 
     #[test]
     fn collect_reads_per_project_declarations() {
-        // per-project 配置(repo 内の例)では publications / dependencies::* が流れ図に写ること。
+        // In a per-project layout (an in-repo example), publications / dependencies::* reach the diagram.
         let cfg_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/ping-pong-ring");
         let plan = LaunchPlan::from_launch_config(&cfg_dir.join("ping-pong.toml")).unwrap();
         let (flows, _services) = collect_flows(&cfg_dir, &plan);
@@ -244,7 +314,7 @@ mod tests {
 
     #[test]
     fn collect_reads_workspace_declarations() {
-        // 例のワークスペース(repo 内)で、[projects.*] の宣言が流れ図に写ること。
+        // In the in-repo example workspace, the `[projects.*]` declarations reach the diagram.
         let cfg_dir =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/ping-pong-workspace");
         let plan = LaunchPlan::from_launch_config(&cfg_dir.join("ping-pong.toml")).unwrap();
@@ -263,7 +333,7 @@ mod tests {
 
     #[test]
     fn build_edges_flips_service_direction() {
-        // serve する側が publications、呼ぶ側が dependencies に宣言するが、矢印は caller → server。
+        // The serving side declares it under publications and the caller under dependencies, but the arrow runs caller → server.
         let flows = [flow("asker", &[], &["Add"]), flow("calc", &["Add"], &[])];
         let services = BTreeMap::from([("Add".to_string(), "Sum".to_string())]);
         let edges = build_edges(&flows, &services);

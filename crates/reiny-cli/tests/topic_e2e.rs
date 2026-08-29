@@ -1,9 +1,9 @@
-//! `reiny topic / node / service` の通し試験 —— 本物の zenoh fabric に対して、ビルド済み
-//! `reiny` バイナリで list / hz / echo / node / service call を回す。
+//! The end-to-end test of `reiny topic / node / service` — list / hz / echo / node / service call
+//! against a real zenoh fabric, driven through the built `reiny` binary.
 //!
-//! `bag_e2e` と同じ流儀: テスト側が「launch 役」の zenoh セッションを 1 本張り、publisher /
-//! presence / `@schema` / service の queryable を素の zenoh で演じる。descriptor は
-//! `prost-types` で手組みする(protoc 無し)。ループバック TCP 固定ポート・マルチキャスト off。
+//! The same style as `bag_e2e`: the test side holds one zenoh session "playing a launch" and acts out
+//! the publisher / presence / `@schema` / service queryable parts in plain zenoh. The descriptors are
+//! built by hand with `prost-types` (no protoc). A fixed loopback TCP port, multicast off.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
@@ -20,7 +20,7 @@ use prost_types::{
 };
 use reiny::zenoh::{self, Wait};
 
-/// この試験専用のループバックポート(e2e 37447 / `bag_e2e` 37448 / `rpc_e2e` 37449 の次)。
+/// The loopback port for this test alone (the next one after e2e's 37447, `bag_e2e`'s 37448 and `rpc_e2e`'s 37449).
 const ENDPOINT: &str = "tcp/127.0.0.1:37450";
 const BIN: &str = env!("CARGO_BIN_EXE_reiny");
 
@@ -58,7 +58,7 @@ fn field(name: &str, number: i32, ty: field_descriptor_proto::Type) -> FieldDesc
 }
 
 /// `package e2e; message Probe {uint32 seq=1; string name=2;} message Add {int32 a=1; int32 b=2;}
-/// message Sum {int32 sum=1;}` を 1 ファイルに持つ descriptor set。
+/// message Sum {int32 sum=1;}` in one file.
 fn file_set() -> Vec<u8> {
     use field_descriptor_proto::Type;
     let msg = |name: &str, fields: Vec<FieldDescriptorProto>| DescriptorProto {
@@ -127,7 +127,7 @@ fn stdout(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
 
-/// `<key>/@schema/<fqn>` で descriptor set を名乗る queryable。
+/// The queryable that announces a descriptor set at `<key>/@schema/<fqn>`.
 fn schema_queryable(fab: &zenoh::Session, key: &str, fqn: &str) -> zenoh::query::Queryable<()> {
     let reply_key = format!("{key}/@schema/{fqn}");
     let k = reply_key.clone();
@@ -141,14 +141,14 @@ fn schema_queryable(fab: &zenoh::Session, key: &str, fqn: &str) -> zenoh::query:
 }
 
 #[test]
-#[allow(clippy::too_many_lines)] // 1 本で通す(ポートを増やさない)ので長い。
+#[allow(clippy::too_many_lines)] // one pass end to end (so as not to add another port), hence long
 fn topic_node_service_against_live_launch() {
     let fab = fabric();
     let fp = reiny_build::message_fingerprint(&file_set(), "e2e.Probe")
         .unwrap()
         .unwrap();
 
-    // --- launch 役 ctrl: @launch、Probe の publisher + presence + @schema ---
+    // --- playing the launch ctrl: @launch, plus Probe's publisher + presence + @schema ---
     let _launch = fab
         .liveliness()
         .declare_token("reiny/lab/ctrl/@launch")
@@ -163,7 +163,7 @@ fn topic_node_service_against_live_launch() {
         .expect("probe token");
     let _probe_schema = schema_queryable(&fab, probe_key, "e2e.Probe");
 
-    // --- service Add: queryable + @service + @schema(request / response の 2 本) ---
+    // --- the service Add: a queryable + @service + @schema (two: the request and the response) ---
     let add_key = "reiny/lab/ctrl/Add";
     let _add_token = fab
         .liveliness()
@@ -183,7 +183,7 @@ fn topic_node_service_against_live_launch() {
         .wait()
         .expect("add queryable");
 
-    // --- Probe を 50 Hz で流し続ける(echo / hz が拾う) ---
+    // --- keep Probe flowing at 50 Hz (for echo / hz to pick up) ---
     let stop = Arc::new(AtomicBool::new(false));
     let feeder = {
         let stop = Arc::clone(&stop);
@@ -206,6 +206,27 @@ fn topic_node_service_against_live_launch() {
         })
     };
 
+    // --- playing the launch gui: it only subscribes to Cmd (@sub + @schema; there is no publisher) ---
+    let cmd_key = "reiny/lab/gui/Cmd";
+    let _cmd_sub_token = fab
+        .liveliness()
+        .declare_token(format!("{cmd_key}/@sub"))
+        .wait()
+        .expect("sub token");
+    let _cmd_schema = schema_queryable(&fab, cmd_key, "e2e.Sum");
+    let cmd_seen = Arc::new(AtomicBool::new(false));
+    let _cmd_sub = {
+        let seen = Arc::clone(&cmd_seen);
+        fab.declare_subscriber("reiny/lab/*/Cmd")
+            .callback(move |s| {
+                if Sum::decode(s.payload().to_bytes().as_ref()).is_ok_and(|v| v.sum == 7) {
+                    seen.store(true, Ordering::SeqCst);
+                }
+            })
+            .wait()
+            .expect("cmd subscriber")
+    };
+
     // --- node list / info ---
     let out = stdout(&reiny(&["node", "list"]));
     assert!(out.lines().any(|l| l.trim() == "ctrl"), "node list: {out}");
@@ -214,28 +235,36 @@ fn topic_node_service_against_live_launch() {
         out.contains("pub : Probe") && out.contains("srv : Add"),
         "node info: {out}"
     );
-
-    // --- topic list: Probe は [pub ctrl]、Add は [srv ctrl] ---
-    let out = stdout(&reiny(&["topic", "list"]));
-    let probe_row = out
-        .lines()
-        .find(|l| l.starts_with("Probe"))
-        .expect("Probe row");
-    assert!(probe_row.contains("ctrl"), "topic list: {out}");
-    let add_row = out.lines().find(|l| l.starts_with("Add")).expect("Add row");
+    // A launch that only listens is still a launch, and `sub :` is the line that says so.
+    let out = stdout(&reiny(&["node", "info", "gui"]));
     assert!(
-        add_row.contains('-') && add_row.ends_with("ctrl"),
-        "Add should be srv only: {add_row}"
+        out.contains("sub : Cmd") && out.contains("pub : -"),
+        "node info gui: {out}"
     );
 
-    // --- topic hz: ctrl の行に Hz が出る ---
+    // --- topic list: Probe is [pub ctrl], Add is [srv ctrl], Cmd is [sub gui] ---
+    let out = stdout(&reiny(&["topic", "list"]));
+    let row = |ty: &str| {
+        out.lines()
+            .find(|l| l.starts_with(ty))
+            .unwrap_or_else(|| panic!("{ty} row in: {out}"))
+            .split_whitespace()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    };
+    // TYPE  PUB  SUB  SRV
+    assert_eq!(row("Probe"), ["Probe", "ctrl", "-", "-"], "{out}");
+    assert_eq!(row("Add"), ["Add", "-", "-", "ctrl"], "{out}");
+    assert_eq!(row("Cmd"), ["Cmd", "-", "gui", "-"], "{out}");
+
+    // --- topic hz: a Hz appears on ctrl's row ---
     let out = stdout(&reiny(&["topic", "hz", "Probe", "--duration", "1.5"]));
     assert!(
         out.contains("ctrl") && out.contains("Hz"),
         "topic hz: {out}"
     );
 
-    // --- topic echo: @schema で decode した JSON が source 付きで出る ---
+    // --- topic echo: the JSON decoded through @schema, with its source ---
     let out = stdout(&reiny(&["topic", "echo", "Probe", "--count", "3"]));
     let lines: Vec<&str> = out.lines().filter(|l| l.starts_with("ctrl")).collect();
     assert_eq!(lines.len(), 3, "topic echo: {out}");
@@ -245,7 +274,7 @@ fn topic_node_service_against_live_launch() {
             .all(|l| l.contains(r#""name":"probe""#) && l.contains(r#""seq":"#)),
         "topic echo JSON: {out}"
     );
-    // --raw は hex。
+    // --raw is hex.
     let out = stdout(&reiny(&["topic", "echo", "Probe", "--count", "1", "--raw"]));
     assert!(
         out.contains("120570726f6265"),
@@ -271,6 +300,42 @@ fn topic_node_service_against_live_launch() {
     assert!(
         !ghost.status.success(),
         "call to an absent server must fail"
+    );
+
+    // --- topic pub: a listen-only launch can be poked, because it announces `@schema` too ---
+    let out = stdout(&reiny(&[
+        "topic",
+        "pub",
+        "Cmd",
+        r#"{"sum": 7}"#,
+        "--as",
+        "sim",
+    ]));
+    assert!(
+        out.contains("reiny/lab/sim/Cmd: sent 1") && out.contains("e2e.Sum"),
+        "topic pub: {out}"
+    );
+    for _ in 0..50 {
+        if cmd_seen.load(Ordering::SeqCst) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        cmd_seen.load(Ordering::SeqCst),
+        "the subscriber must have received the published Cmd"
+    );
+    // A source id that would corrupt the key is refused before anything is declared.
+    assert!(
+        !reiny(&["topic", "pub", "Cmd", "{}", "--as", "a/b"])
+            .status
+            .success(),
+        "--as must be a single key segment"
+    );
+    // Nothing describes this type, so there is no way to encode for it.
+    assert!(
+        !reiny(&["topic", "pub", "Nope", "{}"]).status.success(),
+        "an undescribed type must fail rather than guess"
     );
 
     stop.store(true, Ordering::SeqCst);

@@ -1,11 +1,11 @@
-//! `reiny bag` / `reiny topic` / `reiny node` / `reiny service` が共有する、バスの語彙。
+//! The bus vocabulary `reiny bag` / `reiny topic` / `reiny node` / `reiny service` share.
 //!
-//! キーの形(`reiny/<domain>/<id>/<TYPE>` と脇道 `@schema` / `@service` / `@launch`)、launch と
-//! 同じ経路でのセッション構築、走っている publisher / server が名乗る descriptor の収集。
-//! ここに置くのは「reiny / zenoh の約束事を知らないと書けない」部分だけで、統計や表示は
-//! 各サブコマンド側にある。
+//! The key shape (`reiny/<domain>/<id>/<TYPE>` plus the side chunks `@schema` / `@service` /
+//! `@launch`), building a session by the same path a launch does, and collecting the descriptors a
+//! running publisher / server announces. Only what cannot be written without knowing reiny's and
+//! zenoh's conventions lives here; the statistics and the printing belong to each subcommand.
 //!
-//! 同期。zenoh の `.wait()` で足り、tokio は要らない(CLI 全体も tokio 無し)。
+//! Synchronous. zenoh's `.wait()` is enough and tokio is not needed (nor is it anywhere else in the CLI).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -15,32 +15,33 @@ use clap::Args;
 use reiny::zenoh::{self, Wait};
 use reiny::{RuntimeOptions, ZenohSource};
 
-/// キーのプレフィクスと、脇道のチャンク名。reiny 本体と揃える(verbatim なので `*` に見えない)。
+/// The key prefix and the side chunk names. Kept in step with reiny proper (verbatim, so `*` never sees them).
 pub(crate) const KEY_ROOT: &str = "reiny";
 pub(crate) const SCHEMA_CHUNK: &str = "@schema";
 pub(crate) const SERVICE_CHUNK: &str = "@service";
+pub(crate) const SUB_CHUNK: &str = "@sub";
 pub(crate) const LAUNCH_CHUNK: &str = "@launch";
 
-/// launch と同じ綴りの fabric 引数。全サブコマンドで共通。
+/// The fabric arguments, spelled as a launch spells them. Shared by every subcommand.
 #[derive(Args, Clone)]
 pub(crate) struct BusArgs {
-    /// 論理名前空間(既定: `--domain` > `REINY_DOMAIN` > "default")。
+    /// The logical namespace (default: `--domain` > `REINY_DOMAIN` > "default").
     #[arg(long)]
     pub(crate) domain: Option<String>,
-    /// zenoh 設定ファイル(JSON5 / JSON / YAML)。
+    /// A zenoh configuration file (JSON5 / JSON / YAML).
     #[arg(long)]
     pub(crate) zenoh_config: Option<PathBuf>,
-    /// 接続先エンドポイント(繰り返し可、例 `tcp/127.0.0.1:7447`)。
+    /// An endpoint to connect to (repeatable, e.g. `tcp/127.0.0.1:7447`).
     #[arg(long)]
     pub(crate) connect: Vec<String>,
-    /// zenoh の動作モード(`peer` / `client` / `router`)。
+    /// zenoh's mode (`peer` / `client` / `router`).
     #[arg(long)]
     pub(crate) zenoh_mode: Option<String>,
 }
 
 impl BusArgs {
-    /// fabric 引数を launch と同じ `RuntimeOptions` に写す(既定値・`REINY_DOMAIN`・`--connect`
-    /// の json5 化が launch と同じ経路になる)。tracing は CLI 側で入れるので off。
+    /// Map the fabric arguments onto the same `RuntimeOptions` a launch uses (so the defaults,
+    /// `REINY_DOMAIN` and the json5-ification of `--connect` all take a launch's path). tracing is off:
     pub(crate) fn runtime_options(&self, id: &str) -> RuntimeOptions {
         let mut opts = RuntimeOptions::new(id);
         opts.install_tracing = false;
@@ -67,7 +68,7 @@ impl BusArgs {
         opts
     }
 
-    /// fabric 引数から (zenoh セッション, 解決済み domain) を組む。
+    /// Build a (zenoh session, resolved domain) pair from the fabric arguments.
     pub(crate) fn open(&self) -> Result<(zenoh::Session, String)> {
         let opts = self.runtime_options("reiny-cli");
         let config = opts.zenoh_config()?;
@@ -79,7 +80,7 @@ impl BusArgs {
     }
 }
 
-/// キー `reiny/<domain>/<source>/<TYPE>` の 3 セグメント。脇道(`/@…`)付きは弾く(None)。
+/// The three segments of a key `reiny/<domain>/<source>/<TYPE>`. A side chunk (`/@…`) is rejected (None).
 pub(crate) struct KeyParts<'a> {
     pub(crate) domain: &'a str,
     pub(crate) source: &'a str,
@@ -95,26 +96,26 @@ impl<'a> KeyParts<'a> {
         let domain = segs.next()?;
         let source = segs.next()?;
         let ty = segs.next()?;
-        // 4 段ちょうど(脇道 `/@schema/...` が付いていたら型のトピックではない)。
+        // Exactly four segments (with a side chunk `/@schema/...` it is not a type's topic).
         if segs.next().is_some() {
             return None;
         }
         Some(Self { domain, source, ty })
     }
 
-    /// `reiny/<domain>/<source>/<TYPE>/<chunk>` の形(脇道付き)。`chunk` は `@service` など。
+    /// The form `reiny/<domain>/<source>/<TYPE>/<chunk>` (with a side chunk). `chunk` is `@service` and the like.
     pub(crate) fn parse_with_chunk(key: &'a str, chunk: &str) -> Option<Self> {
         let base = key.strip_suffix(chunk)?.strip_suffix('/')?;
         Self::parse(base)
     }
 }
 
-/// `reiny/<domain>/<id>/…` から `<id>` を取る(presence 判定用)。
+/// Take `<id>` out of `reiny/<domain>/<id>/…` (for reading presence).
 pub(crate) fn key_source(key: &str) -> &str {
     key.split('/').nth(2).unwrap_or_default()
 }
 
-/// zenoh の attachment を reiny の指紋(8 バイト LE)として読む。形が違えば `None`。
+/// Read a zenoh attachment as reiny's fingerprint (8 bytes LE). `None` when the shape differs.
 pub(crate) fn attachment_u64(sample: &zenoh::sample::Sample) -> Option<u64> {
     let bytes = sample.attachment()?.to_bytes();
     <[u8; 8]>::try_from(bytes.as_ref())
@@ -122,7 +123,7 @@ pub(crate) fn attachment_u64(sample: &zenoh::sample::Sample) -> Option<u64> {
         .map(u64::from_le_bytes)
 }
 
-/// `key` に生きている liveliness トークンのキー一覧(昇順、重複なし)。
+/// The keys of the liveliness tokens alive on `key` (sorted, deduplicated).
 pub(crate) fn alive_keys(session: &zenoh::Session, key: &str) -> Result<Vec<String>> {
     let replies = session
         .liveliness()
@@ -139,8 +140,8 @@ pub(crate) fn alive_keys(session: &zenoh::Session, key: &str) -> Result<Vec<Stri
     Ok(keys)
 }
 
-/// [`collect_schemas_all`] のうち、各キーの **型そのもの**の descriptor だけ(fqn の短い名前が
-/// キーの型セグメントに一致するもの。無ければ最初の 1 件)。pub/sub の型はこれで足りる。
+/// The subset of [`collect_schemas_all`] holding each key's **own type**'s descriptor (the one whose
+/// short fqn matches the key's type segment, else the first). Enough for a pub/sub type.
 pub(crate) fn collect_schemas(
     session: &zenoh::Session,
     pattern: &str,
@@ -158,11 +159,11 @@ pub(crate) fn collect_schemas(
         .collect()
 }
 
-/// `@schema` を 1 発撃って、走っている publisher / server が名乗る descriptor set を集める。
-/// 返りは `<base key>` → `[(fqn, その message に刈った FileDescriptorSet)]`(service の
-/// キーは request / response の 2 件を名乗る)。
+/// Fire one `@schema` query and collect the descriptor sets running publishers / servers announce.
+/// The result is `<base key>` → `[(fqn, the FileDescriptorSet pruned to that message)]` (a service's
+/// key announces two: the request and the response).
 ///
-/// `pattern` は `reiny/<domain>/*/*`(全型)や `reiny/<domain>/*/<TYPE>`(1 型)。
+/// `pattern` is `reiny/<domain>/*/*` (every type) or `reiny/<domain>/*/<TYPE>` (one).
 pub(crate) fn collect_schemas_all(
     session: &zenoh::Session,
     pattern: &str,

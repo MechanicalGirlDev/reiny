@@ -1,12 +1,12 @@
-//! `reiny bag` の通し試験 —— 本物の zenoh fabric に対して、ビルド済み `reiny` バイナリで
-//! record → info → play を回す。
+//! The end-to-end test of `reiny bag` — record → info → play against a real zenoh fabric, driven
+//! through the built `reiny` binary.
 //!
-//! reiny-cli は bin 専用クレート(lib ターゲットが無い)なので、`bagcmd` を直接呼べない。
-//! そこで `CARGO_BIN_EXE_reiny` の実体をサブプロセスで起動し、テスト側は「launch 役」の
-//! zenoh セッションを 1 本張って publisher / latched / presence を演じる —— reiny の e2e と
-//! 同じく、ループバック TCP 固定ポート・マルチキャスト off で決定的に繋ぐ。
+//! reiny-cli is a bin-only crate (it has no lib target), so `bagcmd` cannot be called directly.
+//! Instead the real `CARGO_BIN_EXE_reiny` is started as a subprocess while the test side holds one
+//! zenoh session "playing a launch", acting out the publisher / latched / presence parts — wired
+//! deterministically over a fixed loopback TCP port with multicast off, as reiny's own e2e is.
 //!
-//! ペイロードは bag にとって不透明なバイト列なので、prost も proto も要らない。
+//! The payloads are opaque bytes as far as a bag is concerned, so neither prost nor a proto is needed.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
@@ -16,14 +16,14 @@ use std::time::Duration;
 
 use reiny::zenoh::{self, Wait};
 
-/// この試験専用のループバックポート(reiny の e2e が使う 37447 とずらす)。
+/// The loopback port for this test alone (kept clear of the 37447 reiny's e2e uses).
 const ENDPOINT: &str = "tcp/127.0.0.1:37448";
 const BIN: &str = env!("CARGO_BIN_EXE_reiny");
 
-/// 記録対象の型の指紋(実機の attachment を手で再現)。
+/// The fingerprint of the recorded type (a real attachment, recreated by hand).
 const PROBE_FP: u64 = 0xA1B2_C3D4_E5F6_0718;
 
-/// launch 役: この 1 本が ENDPOINT を listen し、他(record / play のサブプロセス)は client で繋ぐ。
+/// Playing a launch: this one session listens on ENDPOINT, and the others (the record / play subprocesses) connect as clients.
 fn fabric() -> zenoh::Session {
     let mut config = zenoh::Config::default();
     for (k, v) in [
@@ -35,7 +35,7 @@ fn fabric() -> zenoh::Session {
     zenoh::open(config).wait().expect("fabric session")
 }
 
-/// サブプロセスの `reiny bag` に共通の fabric 引数(client で listener へ繋ぐ)。
+/// The fabric arguments every `reiny bag` subprocess shares (a client connecting to the listener).
 fn bus_args(domain: &str) -> Vec<String> {
     vec![
         "--domain".into(),
@@ -54,8 +54,8 @@ fn record_info_play_round_trip_and_live_guard() {
 
     let fab = fabric();
 
-    // --- launch 役の口を用意する ---
-    // 1) ライブの型 ctrl/Probe: publisher + liveliness トークン(presence と guard 用)。
+    // --- set up what the launch offers ---
+    // 1) The live type ctrl/Probe: a publisher plus a liveliness token (for presence and the safety catch).
     let probe_key = "reiny/lab/ctrl/Probe";
     let probe_pub = fab.declare_publisher(probe_key).wait().expect("probe pub");
     let _probe_token = fab
@@ -63,7 +63,7 @@ fn record_info_play_round_trip_and_live_guard() {
         .declare_token(probe_key)
         .wait()
         .expect("probe token");
-    // 2) latched の cfg/Config: 直近値を返す queryable(record の snapshot が拾う)。
+    // 2) The latched cfg/Config: a queryable answering with the most recent value (record's snapshot picks it up).
     let cfg_key = "reiny/lab/cfg/Config";
     let _cfg_q = fab
         .declare_queryable(cfg_key)
@@ -73,7 +73,7 @@ fn record_info_play_round_trip_and_live_guard() {
         .wait()
         .expect("cfg queryable");
 
-    // --- record をサブプロセスで起動(1.5s) ---
+    // --- start record as a subprocess (1.5 s) ---
     let mut record = Command::new(BIN)
         .arg("bag")
         .arg("record")
@@ -84,7 +84,7 @@ fn record_info_play_round_trip_and_live_guard() {
         .spawn()
         .expect("spawn record");
 
-    // record が接続・購読・snapshot を済ませるまで待ってから、ライブを流す。
+    // Wait until record has connected, subscribed and taken its snapshot before publishing anything live.
     sleep(Duration::from_millis(500));
     for seq in 0u32..5 {
         fab.put(probe_key, seq.to_le_bytes().to_vec())
@@ -98,7 +98,7 @@ fn record_info_play_round_trip_and_live_guard() {
     assert!(status.success(), "record exited with {status:?}");
     assert!(bag.is_file(), "bag file not written");
 
-    // --- info: snapshot の cfg と、ライブの ctrl が両方見える ---
+    // --- info: the snapshotted cfg and the live ctrl are both visible ---
     let info = Command::new(BIN)
         .args(["bag", "info"])
         .arg(&bag)
@@ -117,7 +117,7 @@ fn record_info_play_round_trip_and_live_guard() {
         "info lacks the Probe fingerprint: {info_out}"
     );
 
-    // --- play: 別 domain へ、送信元を bag に書き換えて流し、テスト側で拾う ---
+    // --- play: into another domain, with the source rewritten to bag, and picked up on the test side ---
     let collected = fab
         .declare_subscriber("reiny/replay/*/*")
         .wait()
@@ -135,7 +135,7 @@ fn record_info_play_round_trip_and_live_guard() {
         String::from_utf8_lossy(&play.stderr)
     );
 
-    // 収集: Probe が送信元 bag で戻り、指紋も復元されている。cfg(latched)は空でも可。
+    // Collect: Probe comes back from the source bag with its fingerprint restored. cfg (latched) may be empty.
     let mut probe_values = Vec::new();
     let mut saw_fp = false;
     while let Ok(Some(sample)) = collected.recv_timeout(Duration::from_millis(500)) {
@@ -155,7 +155,7 @@ fn record_info_play_round_trip_and_live_guard() {
     assert_eq!(probe_values, [0, 1, 2, 3, 4], "replayed Probe values");
     assert!(saw_fp, "fingerprint attachment was not restored on replay");
 
-    // --- 安全弁: ライブの ctrl/Probe が居る domain lab へ --force 無しで再生 → 拒否 ---
+    // --- the safety catch: replaying into domain lab, where a live ctrl/Probe is, without --force → refused ---
     let guarded = Command::new(BIN)
         .args(["bag", "play"])
         .arg(&bag)
@@ -172,7 +172,7 @@ fn record_info_play_round_trip_and_live_guard() {
         "guard message missing: {stderr}"
     );
 
-    // --force を付ければ通る。
+    // With --force it goes through.
     let forced = Command::new(BIN)
         .args(["bag", "play"])
         .arg(&bag)

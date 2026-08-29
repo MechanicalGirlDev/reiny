@@ -1,10 +1,10 @@
-//! トピックの流れ図 —— launch を縦レール、型を横矢印で描く(sequence-diagram 風)。
+//! The topic flow diagram — launches as vertical rails, types as horizontal arrows (sequence-diagram style).
 //!
-//! 依存を増やさず自前で描く。1 launch = 1 列(箱 + 縦レール)、1 型 = 1 行の横矢印。
-//! `●` = 送り手、`▶ / ◀` = 受け手へ向かう矢先、`┼` = 関係しないレールとの交差。
-//! `[services]` の request 型は二重線 `═` で caller ●══▶ server の向き、ラベルに
-//! `Req => Reply` を添える。色は型ごとに ANSI の基本色を巡回し、呼び出し側が
-//! 端末かどうか(と `NO_COLOR`)で on/off する。
+//! Drawn by hand rather than by adding a dependency. One launch = one column (a box plus a rail),
+//! one type = one row of horizontal arrow. `●` = the sender, `▶ / ◀` = the arrowhead into a receiver,
+//! `┼` = a crossing with an uninvolved rail. A `[services]` request type is drawn with a double line
+//! `═` from caller ●══▶ server, with `Req => Reply` in the label. Colours cycle the basic ANSI colours
+//! per type, switched on or off by whether the caller is a terminal (and by `NO_COLOR`).
 //!
 //! ```text
 //!  topic flow
@@ -18,19 +18,19 @@
 //!      │            │
 //! ```
 
-/// 1 型ぶんの辺。`pubs` / `subs` は列(launch)の添字で、矢印は `pubs` → `subs` に引く。
-/// service の request 型は呼び出し側が caller / server を入れ替えてから渡す
-/// (`pubs` = caller、`subs` = server)。
+/// One type's worth of edge. `pubs` / `subs` are column (launch) indices, and the arrow runs `pubs` → `subs`.
+/// For a `[services]` request type the caller swaps the roles before handing it over
+/// (`pubs` = the caller, `subs` = the server).
 pub(crate) struct Edge {
     pub ty: String,
     pub pubs: Vec<usize>,
     pub subs: Vec<usize>,
-    /// `[services]` の request 型なら reply の型名。
+    /// For a `[services]` request type, the reply type's name.
     pub reply: Option<String>,
 }
 
 impl Edge {
-    /// 行に描くラベル。service は reply まで一息で読めるようにする。
+    /// The label drawn on the row. A service shows its reply too, so the row reads in one go.
     fn label(&self) -> String {
         self.reply
             .as_ref()
@@ -38,14 +38,14 @@ impl Edge {
     }
 }
 
-/// 型(行)に巡回で割り当てる ANSI 前景色。
+/// The ANSI foreground colours assigned to types (rows) in a cycle.
 const PALETTE: [&str; 6] = ["36", "35", "33", "32", "34", "91"];
-/// 枠とレールのスタイル(dim)。
+/// The style of the frame and the rails (dim).
 const FRAME: u8 = 0;
-/// launch 名のスタイル(bold)。
+/// The style of a launch's name (bold).
 const NAME: u8 = 255;
 
-/// 1 行ぶんのキャンバス。文字と、セルごとのスタイル(FRAME / NAME / 1 始まりのパレット番号)。
+/// One row's canvas: the characters, plus a style per cell (FRAME / NAME / a 1-based palette number).
 struct Line {
     ch: Vec<char>,
     st: Vec<u8>,
@@ -78,8 +78,8 @@ impl Line {
         }
     }
 
-    /// 末尾の空白を落として 1 行の文字列にする。`color` なら同スタイルの連なりごとに
-    /// ANSI エスケープを挟む(空白セルはスタイル切り替えを起こさない)。
+    /// Trim the trailing blanks into one line of text. With `color`, wrap each run of one style in
+    /// ANSI escapes (a blank cell does not force a style change).
     fn render(&self, color: bool) -> String {
         let end = self.ch.iter().rposition(|&c| c != ' ').map_or(0, |i| i + 1);
         if !color {
@@ -108,14 +108,14 @@ impl Line {
     }
 }
 
-/// 流れ図を行の列として描く。`names` が列(launch)、`edges` が行(型)。
-/// どちらかが空なら何も描かない。
+/// Draw the flow diagram as a sequence of rows. `names` are the columns (launches), `edges` the rows (types).
+/// With either empty, nothing is drawn.
 pub(crate) fn render(names: &[String], edges: &[Edge], color: bool) -> Vec<String> {
     if names.is_empty() || edges.is_empty() {
         return Vec::new();
     }
 
-    // 箱の幅は名前 + 4。レールを中央に通すため奇数へ切り上げる。
+    // A box is as wide as its name + 4, rounded up to odd so the rail runs down its middle.
     let boxw: Vec<usize> = names.iter().map(|n| (n.chars().count() + 4) | 1).collect();
     let maxw = boxw.iter().copied().max().unwrap_or(0);
     let maxlabel = edges
@@ -123,7 +123,7 @@ pub(crate) fn render(names: &[String], edges: &[Edge], color: bool) -> Vec<Strin
         .map(|e| e.label().chars().count())
         .max()
         .unwrap_or(0);
-    // 列間隔: 箱が重ならず、たいていのラベルが隣接レール間に収まる幅(長すぎる分は右余白へ)。
+    // The column spacing: wide enough that boxes do not touch and most labels fit between adjacent rails (anything longer spills into the right margin).
     let pitch = (maxw + 4).max((maxlabel + 6).min(30)).max(12);
     let centers: Vec<usize> = (0..names.len()).map(|i| 1 + maxw / 2 + i * pitch).collect();
     let last = centers[centers.len() - 1];
@@ -137,7 +137,7 @@ pub(crate) fn render(names: &[String], edges: &[Edge], color: bool) -> Vec<Strin
         l
     };
 
-    // 見出しと箱。
+    // The heading and the boxes.
     let mut title = Line::new(width);
     title.text(1, "topic flow", NAME);
     let mut top = Line::new(width);
@@ -159,7 +159,7 @@ pub(crate) fn render(names: &[String], edges: &[Edge], color: bool) -> Vec<Strin
     }
     let mut lines = vec![title, top, mid, bot, rails()];
 
-    // 型ごとの矢印行(行間にレールを 1 行挟む)。
+    // One arrow row per type (with a rail row in between).
     for (k, e) in edges.iter().enumerate() {
         let style = u8::try_from(k % PALETTE.len() + 1).unwrap_or(1);
         let mut row = rails();
@@ -173,21 +173,21 @@ pub(crate) fn render(names: &[String], edges: &[Edge], color: bool) -> Vec<Strin
     lines.iter().map(|l| l.render(color)).collect()
 }
 
-/// 1 本の辺を `row` に描く。線へ埋め込めなかった(または片側が居ない)ラベルを返す
-/// (呼び出し側が右余白に置く)。
+/// Draw one edge into `row`. Returns the label that could not be embedded in the line (or whose side
+/// is missing), for the caller to place in the right margin.
 fn draw_edge(row: &mut Line, e: &Edge, centers: &[usize], style: u8) -> Option<String> {
     let lc = if e.reply.is_some() { '═' } else { '─' };
     let text = e.label();
 
     if e.pubs.is_empty() {
-        // 送り手不在: 最左の受け手へ矢先だけ描く。
+        // No sender: draw only an arrowhead into the leftmost receiver.
         let c = centers[e.subs[0]];
         row.fill(c - 4, c - 2, lc, style);
         row.put(c - 1, '▶', style);
         return Some(format!("{text}  (no publisher)"));
     }
     if e.subs.is_empty() {
-        // 受け手不在: 右へ抜ける矢印にする。
+        // No receiver: make it an arrow running off to the right.
         for &p in &e.pubs {
             row.put(centers[p], '●', style);
         }
@@ -201,7 +201,7 @@ fn draw_edge(row: &mut Line, e: &Edge, centers: &[usize], style: u8) -> Option<S
     let lo = involved.iter().map(|&i| centers[i]).min().unwrap_or(0);
     let hi = involved.iter().map(|&i| centers[i]).max().unwrap_or(0);
     row.fill(lo + 1, hi - 1, lc, style);
-    // 辺に関与しないレールとは交差(┼)。
+    // Rails not involved in this edge are crossed (┼).
     for (i, &c) in centers.iter().enumerate() {
         if c > lo && c < hi && !involved.contains(&i) {
             row.put(c, '┼', style);
@@ -224,7 +224,7 @@ fn draw_edge(row: &mut Line, e: &Edge, centers: &[usize], style: u8) -> Option<S
     for &p in &e.pubs {
         row.put(centers[p], '●', style);
     }
-    // ラベル: 左端レールとその右隣のレールの間に収まれば線へ埋め込む。
+    // The label: embedded in the line when it fits between the leftmost rail and the next one along.
     let next = centers
         .iter()
         .copied()
@@ -243,7 +243,7 @@ fn draw_edge(row: &mut Line, e: &Edge, centers: &[usize], style: u8) -> Option<S
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)] // テストは panic で失敗を表現してよい
+#[allow(clippy::expect_used, clippy::unwrap_used)] // tests may fail by panicking
 mod tests {
     use super::*;
 
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn crossing_rails_and_missing_sides() {
-        // a → c は b のレールを ┼ で跨ぐ。Lost は受け手なしで右へ抜ける。
+        // a → c crosses b's rail with ┼. Lost has no receiver and runs off to the right.
         let lines = render(
             &names(&["a", "b", "c"]),
             &[

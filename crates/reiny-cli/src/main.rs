@@ -1,8 +1,8 @@
-//! `reiny` — launch 雛形生成(`new`/`init`/`add`)・`build`・`run`・`compress` を束ねる CLI。
+//! `reiny` — the CLI tying together launch scaffolding (`new`/`init`/`add`), `build`, `run` and `compress`.
 //!
-//! 後方互換: `reiny --config <launch.toml>` と `reiny <launch.toml>`(位置引数)は
-//! `reiny run <launch.toml>` と同義。さらに自分の実行ファイル名が `reiny` 以外(= `compress
-//! --launcher` でリネームされた配布物)のときは、引数なしで隣の `<basename>.toml` を起動する。
+//! Backwards compatibility: `reiny --config <launch.toml>` and `reiny <launch.toml>` (a bare
+//! positional) both mean `reiny run <launch.toml>`. And when our own executable is not named `reiny`
+//! (= an artifact renamed by `compress --launcher`), it starts the neighbouring `<basename>.toml` with no arguments.
 
 mod bagcmd;
 mod bridgecmd;
@@ -36,99 +36,102 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// 新規ディレクトリに launch 雛形を作る(cargo new 相当)。
+    /// Scaffold a launch in a new directory (the equivalent of cargo new).
     New {
-        /// 作成するプロジェクトのパス。
+        /// The path of the project to create.
         path: PathBuf,
-        /// 公開する型名。proto・[publications]・publish 行まで用意する。
+        /// The type name to publish. The proto, `[publications]` and the publishing line are all set up.
         #[arg(long)]
         publish: Option<String>,
-        /// プロジェクト名(省略時はディレクトリ名)。
+        /// The project name (defaults to the directory name).
         #[arg(long)]
         name: Option<String>,
     },
-    /// 既存ディレクトリにその場で launch 雛形を足す(cargo init 相当)。
+    /// Add a launch scaffold to an existing directory in place (the equivalent of cargo init).
     Init {
-        /// 対象ディレクトリ(省略時はカレント)。
+        /// The target directory (defaults to the current one).
         path: Option<PathBuf>,
-        /// 公開する型名。
+        /// The type name to publish.
         #[arg(long)]
         publish: Option<String>,
-        /// プロジェクト名(省略時はディレクトリ名)。
+        /// The project name (defaults to the directory name).
         #[arg(long)]
         name: Option<String>,
     },
-    /// カレント launch の Reiny.toml [dependencies] に相手を追記する(cargo add --path 相当)。
+    /// Add another project to the current launch's Reiny.toml `[dependencies]` (the equivalent of cargo add --path).
     Add {
-        /// 依存先プロジェクトへのパス。
+        /// The path to the project to depend on.
         path: PathBuf,
     },
-    /// Reiny.toml を解決し、型 → トピック対応とモードを表示する(proto はコンパイルしない)。
+    /// Resolve a Reiny.toml and print the type → topic mapping and the layout mode (no proto is compiled).
     Check {
-        /// 対象ディレクトリ(省略時はカレントから上方へ Reiny.toml を探す)。
+        /// The target directory (unset = search upward from the current one for a Reiny.toml).
         path: Option<PathBuf>,
     },
-    /// Reiny.toml 駆動の codegen を走らせてビルドする(cargo build のラッパ)。
+    /// Run the Reiny.toml-driven codegen and build (a wrapper around cargo build).
     Build {
-        /// リリースビルド。
+        /// A release build.
         #[arg(long)]
         release: bool,
-        /// `--` の後ろは cargo build にそのまま渡す。
+        /// Everything after `--` is passed to cargo build verbatim.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// launch config から launch 群をまとめて起動する。
+    /// Start a whole set of launches from a launch config.
     Run {
-        /// launch config(`[launch]` 節)へのパス。
+        /// The path to the launch config (its `[launch]` section).
         config: PathBuf,
-        /// launch bin を探すディレクトリ(既定は launch config 基準で自動探索)。
+        /// Where to look for launch bins (default: derived from the launch config's location).
         #[arg(long)]
         bin_dir: Option<PathBuf>,
-        /// ランチャ既定のログレベル。
+        /// The launcher's default log level.
         #[arg(long, default_value = "info")]
         log_level: String,
+        /// How many seconds to wait for a `depends_on` to appear on the bus (0 = do not wait).
+        #[arg(long, default_value_t = runcmd::DEFAULT_READY_TIMEOUT)]
+        ready_timeout: f64,
     },
-    /// 動かすのに要るものだけ(launch + 依存ライブラリ + config + ランチャ)を 1 ディレクトリへ束ねる。
+    /// Gather only what it takes to run (launches + their libraries + configs + the launcher) into one directory.
     Compress {
-        /// launch config へのパス。
+        /// The path to the launch config.
         config: PathBuf,
-        /// 出力ディレクトリ。
+        /// The output directory.
         #[arg(long, default_value = "dist")]
         out: PathBuf,
-        /// 同梱するランチャをこの名前にリネームし、`<name>.toml` に揃える。
+        /// Rename the bundled launcher to this and line the config up as `<name>.toml`.
         #[arg(long)]
         launcher: Option<String>,
-        /// システムライブラリも同梱する。
+        /// Bundle the system libraries too.
         #[arg(long)]
         include_system: bool,
     },
-    /// バスの記録 / 再生 / 要約(rosbag2 相当。形式は MCAP)。
+    /// Record / replay / summarize the bus (the equivalent of rosbag2; the format is MCAP).
     Bag(bagcmd::BagArgs),
-    /// 生きている型の一覧・受信レート・帯域(`ros2 topic` 相当)。
+    /// The live types, their receive rates and their bandwidth (the equivalent of `ros2 topic`).
     Topic(topiccmd::TopicArgs),
-    /// 生きている launch の一覧・詳細(`ros2 node` 相当)。
+    /// The live launches, listed and described (the equivalent of `ros2 node`).
     Node(topiccmd::NodeArgs),
-    /// 生きている service の一覧・JSON での呼び出し(`ros2 service` 相当)。
+    /// The live services, listed and called with JSON (the equivalent of `ros2 service`).
     Service(servicecmd::ServiceArgs),
-    /// zenoh と別エンジン(serial / udp / iceoryx2)の間に raw bridge を立てる。
+    /// Stand up a raw bridge between zenoh and another engine (serial / udp / iceoryx2).
     Bridge(bridgecmd::BridgeArgs),
 }
 
 fn main() -> Result<()> {
-    // 1. リネームされたランチャの自己起動(`./ping-pong` → 隣の `ping-pong.toml`)。
+    // 1. A renamed launcher starting itself (`./ping-pong` → the neighbouring `ping-pong.toml`).
     if let Some(config) = renamed_launcher_config()? {
         init_tracing("info");
         return runcmd::run_self(&config);
     }
 
-    // 2. 後方互換: `reiny --config X` / `reiny X.toml` を run に振り向ける。
+    // 2. Backwards compatibility: `reiny --config X` / `reiny X.toml` are routed to run.
     let argv: Vec<String> = std::env::args().collect();
     if let Some(config) = backward_compat_config(&argv) {
         init_tracing("info");
-        return runcmd::run(&config, None, "info");
+        return runcmd::run(&config, None, "info", runcmd::DEFAULT_READY_TIMEOUT);
     }
 
-    // 3. 通常のサブコマンド。
+    // 3. The ordinary subcommands.
     let cli = Cli::parse();
     match cli.command {
         Command::New {
@@ -148,9 +151,10 @@ fn main() -> Result<()> {
             config,
             bin_dir,
             log_level,
+            ready_timeout,
         } => {
             init_tracing(&log_level);
-            runcmd::run(&config, bin_dir, &log_level)
+            runcmd::run(&config, bin_dir, &log_level, ready_timeout)
         }
         Command::Compress {
             config,
@@ -181,7 +185,7 @@ fn main() -> Result<()> {
     }
 }
 
-/// 実行ファイル名が `reiny` 以外なら、隣の `<basename>.toml` を launch config として返す。
+/// When our executable is not named `reiny`, return the neighbouring `<basename>.toml` as the launch config.
 fn renamed_launcher_config() -> Result<Option<PathBuf>> {
     let exe = std::env::current_exe().context("resolving current_exe")?;
     let base = exe.file_stem().map(|s| s.to_string_lossy().into_owned());
@@ -203,7 +207,7 @@ fn renamed_launcher_config() -> Result<Option<PathBuf>> {
     }
 }
 
-/// 後方互換の launch 起動形を検出する。`reiny --config X` / `reiny X`(サブコマンドでない位置引数)。
+/// Detect the backwards-compatible launch forms: `reiny --config X` / `reiny X` (a positional that is not a subcommand).
 fn backward_compat_config(argv: &[String]) -> Option<PathBuf> {
     const SUBCOMMANDS: [&str; 13] = [
         "new", "init", "add", "check", "build", "run", "compress", "bag", "topic", "node",
@@ -214,12 +218,12 @@ fn backward_compat_config(argv: &[String]) -> Option<PathBuf> {
         return argv.get(2).map(PathBuf::from);
     }
     if first.starts_with('-') {
-        return None; // --help / --version / 不明フラグは clap に任せる。
+        return None; // --help / --version / an unknown flag: leave it to clap.
     }
     if SUBCOMMANDS.contains(&first.as_str()) {
         return None;
     }
-    Some(PathBuf::from(first)) // 位置引数のパス = run のショートハンド。
+    Some(PathBuf::from(first)) // a positional path = shorthand for run.
 }
 
 fn init_tracing(level: &str) {
@@ -231,7 +235,7 @@ fn init_tracing(level: &str) {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)] // テストは panic で失敗を表現してよい
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)] // tests may fail by panicking
 mod tests {
     use super::*;
 

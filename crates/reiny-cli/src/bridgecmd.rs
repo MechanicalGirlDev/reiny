@@ -1,10 +1,10 @@
-//! `reiny bridge serial|udp|iceoryx2` —— zenoh と別エンジンの間に raw bridge を 1 本立てる。
+//! `reiny bridge serial|udp|iceoryx2` — stand up one raw bridge between zenoh and another engine.
 //!
-//! zenoh の `Cloudy` と、もう 1 つのエンジン(リンク / iceoryx2)の `Cloudy` を同じ id / domain
-//! で組み、`reiny::bridge::forward` に渡す。MCU や iceoryx2 の launch が `reiny node list` /
-//! `topic hz` / `bag record` にそのまま出るのはこれのおかげ。CLI 自体は zenoh のまま。
+//! It builds zenoh's `Cloudy` and a second engine's (a link's / iceoryx2's) with the same id and
+//! domain and hands them to `reiny::bridge::forward`. This is why an MCU's or an iceoryx2 launch shows
+//! up in `reiny node list` / `topic hz` / `bag record` as-is. The CLI itself stays on zenoh.
 //!
-//! 唯一 tokio が要るサブコマンド(`Cloudy::open` と `Host` が async)。
+//! The one subcommand that needs tokio (`Cloudy::open` and `Host` are async).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -22,7 +22,7 @@ use crate::bus::BusArgs;
 pub(crate) struct BridgeArgs {
     #[command(flatten)]
     bus: BusArgs,
-    /// bridge の launch id(両側の `@launch` に立つ)。
+    /// The bridge's launch id (raised as `@launch` on both sides).
     #[arg(long, default_value = "bridge")]
     id: String,
     #[command(subcommand)]
@@ -31,23 +31,23 @@ pub(crate) struct BridgeArgs {
 
 #[derive(Subcommand)]
 enum BridgeEngine {
-    /// シリアルポートの向こうの MCU(`reiny-link`)。
+    /// An MCU (`reiny-link`) at the other end of a serial port.
     Serial {
-        /// `/dev/ttyACM0` / `COM3`。
+        /// `/dev/ttyACM0` / `COM3`.
         path: String,
-        /// baud(USB CDC では無視される)。
+        /// The baud rate (ignored on USB CDC).
         #[arg(long, default_value_t = 115_200)]
         baud: u32,
     },
-    /// UDP の向こうの相手(`reiny-link`)。
+    /// A peer (`reiny-link`) at the other end of UDP.
     Udp {
-        /// bind するアドレス(例 `0.0.0.0:7000`)。
+        /// The address to bind (e.g. `0.0.0.0:7000`).
         bind: String,
-        /// 相手のアドレス。省略すると最初に届いた datagram の送り元。
+        /// The peer's address. Unset, it is learned from the first datagram that arrives.
         #[arg(long)]
         peer: Option<SocketAddr>,
     },
-    /// 同一ホストの iceoryx2(共有メモリ)。
+    /// iceoryx2 on the same host (shared memory).
     #[cfg(feature = "iceoryx2")]
     Iceoryx2,
 }

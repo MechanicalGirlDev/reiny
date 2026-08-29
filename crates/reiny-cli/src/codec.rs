@@ -1,22 +1,22 @@
-//! 走っている launch が `@schema` で名乗る descriptor から、payload ↔ JSON を組む。
+//! Building payload ↔ JSON from the descriptors a running launch announces at `@schema`.
 //!
-//! `reiny topic echo` / `reiny service call` の中身。`prost-reflect` を CLI に入れる唯一の場所 ——
-//! bag は「ファイルの動的 decode は `mcap cat --json` がやる」として締め出したが、**生きている
-//! バスに `mcap cat` は使えない**。reiny 本体は相変わらず descriptor のバイト列を解釈しない。
+//! The innards of `reiny topic echo` / `reiny service call`, and the only place `prost-reflect` is let
+//! into the CLI — bag keeps it out on the grounds that `mcap cat --json` does the dynamic decoding of
+//! a file, but **`mcap cat` cannot be pointed at a live bus**. reiny proper still never interprets a descriptor.
 
 use anyhow::{Context, Result};
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
 
-/// 1 メッセージ型の encode / decode 器。
+/// The encoder / decoder for one message type.
 pub(crate) struct Codec {
     message: MessageDescriptor,
-    /// descriptor 由来の指紋(reiny-build と同じ算法)。attachment と突き合わせて警告に使う。
+    /// The descriptor-derived fingerprint (the same computation reiny-build uses). Matched against the attachment to warn.
     pub(crate) fingerprint: Option<u64>,
 }
 
 impl Codec {
-    /// `@schema` 応答(`reiny_build::descriptor_subset` で刈った `FileDescriptorSet`)と
-    /// 完全メッセージ名から組む。
+    /// Build it from an `@schema` response (a `FileDescriptorSet` pruned by
+    /// `reiny_build::descriptor_subset`) and a fully qualified message name.
     pub(crate) fn from_file_set(file_set: &[u8], fqn: &str) -> Result<Self> {
         let pool = DescriptorPool::decode(file_set)
             .with_context(|| format!("decoding descriptor set for {fqn}"))?;
@@ -30,19 +30,19 @@ impl Codec {
         })
     }
 
-    /// 完全メッセージ名(例 `hs.RobotState`)。
+    /// The fully qualified message name (e.g. `hs.RobotState`).
     pub(crate) fn full_name(&self) -> &str {
         self.message.full_name()
     }
 
-    /// proto バイト列 → JSON(proto3 JSON mapping。int64 は文字列になる)。
+    /// proto bytes → JSON (the proto3 JSON mapping, where an int64 becomes a string).
     pub(crate) fn decode_json(&self, payload: &[u8]) -> Result<String> {
         let msg = DynamicMessage::decode(self.message.clone(), payload)
             .with_context(|| format!("decoding {} payload", self.full_name()))?;
         serde_json::to_string(&msg).context("serializing to JSON")
     }
 
-    /// JSON → proto バイト列。
+    /// JSON → proto bytes.
     pub(crate) fn encode_json(&self, json: &str) -> Result<Vec<u8>> {
         let mut de = serde_json::Deserializer::from_str(json);
         let msg = DynamicMessage::deserialize(self.message.clone(), &mut de)
@@ -52,7 +52,7 @@ impl Codec {
     }
 }
 
-/// descriptor を持たない型の payload の見せ方(hex)。
+/// How the payload of a type with no descriptor is shown (hex).
 pub(crate) fn hex(payload: &[u8]) -> String {
     use std::fmt::Write as _;
     payload.iter().fold(String::new(), |mut out, b| {
@@ -71,8 +71,8 @@ mod tests {
         field_descriptor_proto,
     };
 
-    /// `message Probe { uint32 seq = 1; string name = 2; }` の descriptor set を手で組む
-    /// (protoc 無しでテストするため)。
+    /// The descriptor set of `message Probe { uint32 seq = 1; string name = 2; }`, built by hand
+    /// (so the test needs no protoc).
     fn probe_set() -> Vec<u8> {
         let field =
             |name: &str, number: i32, ty: field_descriptor_proto::Type| FieldDescriptorProto {

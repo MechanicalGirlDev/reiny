@@ -1,14 +1,14 @@
-//! `reiny new` / `reiny init` / `reiny add` — launch 雛形の生成と依存配線。
+//! `reiny new` / `reiny init` / `reiny add` — scaffolding a launch and wiring up its dependencies.
 //!
-//! `new` と `init` の違いはディレクトリを新規に作るかどうかだけで、生成する中身
-//! (`Cargo.toml` / `Reiny.toml` / `build.rs` / `proto/` / `src/main.rs`)は同じ。
-//! `add` は自分の `Reiny.toml` の `[dependencies]` に相手を追記する(src は変えない)。
+//! `new` and `init` differ only in whether they create the directory; what they write
+//! (`Cargo.toml` / `Reiny.toml` / `build.rs` / `proto/` / `src/main.rs`) is the same.
+//! `add` appends another project to our own `Reiny.toml`'s `[dependencies]` (it does not touch `src`).
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-/// `reiny new <path> --publish <T>`。`<path>` を新規作成して雛形を書き出す。
+/// `reiny new <path> --publish <T>`. Creates `<path>` and writes the scaffold into it.
 pub(crate) fn new(path: &Path, publish: Option<&str>, name: Option<&str>) -> Result<()> {
     if path.exists() {
         bail!(
@@ -27,7 +27,7 @@ pub(crate) fn new(path: &Path, publish: Option<&str>, name: Option<&str>) -> Res
     Ok(())
 }
 
-/// `reiny init [path] --publish <T>`。ディレクトリは作らず、その場に雛形を足す。
+/// `reiny init [path] --publish <T>`. Adds the scaffold in place, creating no directory.
 pub(crate) fn init(path: Option<&Path>, publish: Option<&str>, name: Option<&str>) -> Result<()> {
     let dir = match path {
         Some(p) => p.to_path_buf(),
@@ -43,7 +43,7 @@ pub(crate) fn init(path: Option<&Path>, publish: Option<&str>, name: Option<&str
     Ok(())
 }
 
-/// 雛形一式を `dir` に書き出す。既存ファイルは壊さない(`Cargo.toml` は追記マージ)。
+/// Write the whole scaffold into `dir`. Existing files are left intact (`Cargo.toml` is merged into).
 fn scaffold(dir: &Path, publish: Option<&str>, name: Option<&str>) -> Result<()> {
     let proj = project_name(dir, name)?;
 
@@ -65,7 +65,7 @@ fn scaffold(dir: &Path, publish: Option<&str>, name: Option<&str>) -> Result<()>
     Ok(())
 }
 
-/// `reiny add <path>`。カレント launch の `Reiny.toml` の `[dependencies]` に相手を追記する。
+/// `reiny add <path>`. Appends another project to the current launch's `Reiny.toml` `[dependencies]`.
 pub(crate) fn add(dep_path: &Path) -> Result<()> {
     let cwd = std::env::current_dir().context("resolving current dir")?;
     let my_manifest = cwd.join("Reiny.toml");
@@ -91,7 +91,7 @@ pub(crate) fn add(dep_path: &Path) -> Result<()> {
         .and_then(|p| p.version)
         .map_or_else(|| "0.1".to_string(), |v| major_minor(&v));
 
-    // 相対パスはそのまま使う(Reiny.toml のパスは manifest dir 基準で解決される)。
+    // A relative path is used as-is (a Reiny.toml path resolves against its own manifest dir).
     let dep_path_str = dep_path.to_string_lossy().replace('\\', "/");
     let entry = format!("{dep_name} = {{ version = \"{version}\", path = \"{dep_path_str}\" }}");
 
@@ -111,11 +111,11 @@ pub(crate) fn add(dep_path: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Cargo.toml(新規生成 / 既存への追記マージ)
+// Cargo.toml (newly generated, or merged into an existing one)
 // ---------------------------------------------------------------------------
 
-/// reiny の各クレートへの path 依存を埋め込んで `Cargo.toml` を用意する。既存があれば
-/// `[package].name` と reiny 依存を補うだけで、他は壊さない。
+/// Prepare `Cargo.toml` with path dependencies on the reiny crates embedded. With one already there,
+/// only `[package].name` and the reiny dependencies are filled in; nothing else is disturbed.
 fn write_cargo_toml(dir: &Path, proj: &str) -> Result<()> {
     let (reiny_dep, build_dep) = if let Some((reiny, build)) = locate_reiny_crates(dir) {
         (
@@ -155,7 +155,7 @@ fn write_cargo_toml(dir: &Path, proj: &str) -> Result<()> {
     }
 }
 
-/// 既存 `Cargo.toml` に reiny 依存・build-deps・`[package].name` を補う(他は保持)。
+/// Fill the reiny dependencies, build-deps and `[package].name` into an existing `Cargo.toml` (keeping the rest).
 fn merge_cargo_toml(path: &Path, proj: &str, reiny_dep: &str, build_dep: &str) -> Result<()> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -192,7 +192,7 @@ fn merge_cargo_toml(path: &Path, proj: &str, reiny_dep: &str, build_dep: &str) -
     Ok(())
 }
 
-/// `prost` / `tokio` / `tracing` / `tracing-subscriber` を `[dependencies]` に補う。
+/// Fill `prost` / `tokio` / `tracing` / `tracing-subscriber` into `[dependencies]`.
 fn insert_simple_deps(doc: &mut toml::Table) {
     let str_dep = |s: &str| toml::Value::String(s.to_string());
     insert_dep(doc, "dependencies", "prost", str_dep("0.13"));
@@ -210,7 +210,7 @@ fn insert_simple_deps(doc: &mut toml::Table) {
     }
 }
 
-/// `doc[table][key]` を未設定なら value で埋める。
+/// Set `doc[table][key]` to `value` unless it is already set.
 fn insert_dep(doc: &mut toml::Table, table: &str, key: &str, value: toml::Value) {
     let t = doc
         .entry(table.to_string())
@@ -221,7 +221,7 @@ fn insert_dep(doc: &mut toml::Table, table: &str, key: &str, value: toml::Value)
 }
 
 // ---------------------------------------------------------------------------
-// Reiny.toml の [dependencies] への追記(テキストを保ったまま)
+// Appending to Reiny.toml's [dependencies] (keeping the text as it is)
 // ---------------------------------------------------------------------------
 
 enum InsertResult {
@@ -229,8 +229,8 @@ enum InsertResult {
     AlreadyPresent,
 }
 
-/// `[dependencies]` セクションの末尾に `entry` 行を挿入する。セクションが無ければ末尾に作る。
-/// コメントや整形を壊さないよう、TOML を再シリアライズせずテキストを編集する。
+/// Insert the line `entry` at the end of the `[dependencies]` section, creating the section at the end
+/// of the file if there is none. The text is edited rather than the TOML re-serialized, so comments and formatting survive.
 fn insert_dependency(text: &str, dep_name: &str, entry: &str) -> InsertResult {
     let lines: Vec<&str> = text.lines().collect();
     let mut dep_header: Option<usize> = None;
@@ -242,7 +242,7 @@ fn insert_dependency(text: &str, dep_name: &str, entry: &str) -> InsertResult {
     }
 
     let Some(start) = dep_header else {
-        // セクションが無い → 末尾に新設。
+        // No such section → create one at the end.
         let mut out = text.trim_end().to_string();
         out.push_str("\n\n[dependencies]\n");
         out.push_str(entry);
@@ -250,7 +250,7 @@ fn insert_dependency(text: &str, dep_name: &str, entry: &str) -> InsertResult {
         return InsertResult::Added(out);
     };
 
-    // セクションの範囲(次のテーブルヘッダ or EOF まで)。
+    // The section's extent (up to the next table header, or EOF).
     let mut end = lines.len();
     for (i, line) in lines.iter().enumerate().skip(start + 1) {
         let t = line.trim_start();
@@ -260,7 +260,7 @@ fn insert_dependency(text: &str, dep_name: &str, entry: &str) -> InsertResult {
         }
     }
 
-    // 既に宣言済みか。
+    // Already declared?
     let already = lines[start + 1..end].iter().any(|l| {
         let t = l.trim_start();
         t.strip_prefix(dep_name)
@@ -270,7 +270,7 @@ fn insert_dependency(text: &str, dep_name: &str, entry: &str) -> InsertResult {
         return InsertResult::AlreadyPresent;
     }
 
-    // セクション内の最後の非空行の直後に挿入する。
+    // Insert right after the last non-empty line inside the section.
     let mut insert_at = start + 1;
     for (i, line) in lines.iter().enumerate().take(end).skip(start + 1) {
         if !line.trim().is_empty() {
@@ -288,12 +288,12 @@ fn insert_dependency(text: &str, dep_name: &str, entry: &str) -> InsertResult {
 }
 
 // ---------------------------------------------------------------------------
-// テンプレート
+// Templates
 // ---------------------------------------------------------------------------
 
-const BUILD_RS: &str = "//! Reiny.toml 駆動のコード生成。\n\
-//! [publications] の proto から `reiny::publications::*` を、[dependencies] の公開型から\n\
-//! `reiny::dependencies::<project>::*` を生成し、「型 → トピック」を埋め込む。\n\
+const BUILD_RS: &str = "//! Reiny.toml-driven code generation.\n\
+//! It generates `reiny::publications::*` from [publications]' protos and\n\
+//! `reiny::dependencies::<project>::*` from the dependencies' public types, embedding type → topic.\n\
 fn main() {\n\
     reiny_build::compile().expect(\"reiny codegen from Reiny.toml\");\n\
 }\n";
@@ -308,15 +308,15 @@ fn reiny_toml(proj: &str, publish: Option<&str>) -> String {
     };
     format!(
         "[project]\n\
-         # プロジェクト名 = プロセス/インスタンス名(トピックではない)。\n\
+         # The project name = the process / instance name (not a topic).\n\
          name = \"{proj}\"\n\
          version = \"0.1.0\"\n\
          \n\
-         # このプロジェクトが公開する型(型 = トピック)。\n\
+         # The types this project publishes (type = topic).\n\
          [publications]\n\
          {publications}\
          \n\
-         # 依存する他プロジェクト。`reiny add <path>` で追記される。\n\
+         # The other projects it depends on. `reiny add <path>` appends here.\n\
          [dependencies]\n"
     )
 }
@@ -328,7 +328,7 @@ fn proto(ty: &str) -> String {
          \n\
          package {lower};\n\
          \n\
-         // {ty}: 一定間隔で送られるメッセージ。\n\
+         // {ty}: a message sent at a fixed interval.\n\
          message {ty} {{\n\
          \x20 uint64 seq = 1;\n\
          \x20 int64 sent_unix = 2;\n\
@@ -341,10 +341,10 @@ fn main_rs(publish: Option<&str>) -> String {
         Some(ty) => {
             let lower = ty.to_lowercase();
             format!(
-                "//! {lower} — 公開型 `{ty}` を一定間隔で流す launch。\n\
+                "//! {lower} — a launch that publishes `{ty}` at a fixed interval.\n\
                  //!\n\
-                 //! 他プロジェクトの型を購読するには `reiny add <path>` で依存を足し、\n\
-                 //! `cloudy.subscribe::<T>()` をこの main に書き足す。\n\
+                 //! To subscribe to another project's type, add the dependency with `reiny add <path>`\n\
+                 //! and write `cloudy.subscribe::<T>()` into this main.\n\
                  \n\
                  use std::time::Duration;\n\
                  \n\
@@ -371,8 +371,9 @@ fn main_rs(publish: Option<&str>) -> String {
                  }}\n"
             )
         }
-        None => "//! 純粋な購読者(sink)の雛形。`reiny add <path>` で依存を足し、\n\
-             //! `cloudy.subscribe::<T>()` を書いて受信ループを組む。\n\
+        None => {
+            "//! A pure subscriber (sink) scaffold. Add a dependency with `reiny add <path>`,\n\
+             //! then write `cloudy.subscribe::<T>()` and build the receive loop.\n\
              \n\
              use reiny::prelude::*;\n\
              \n\
@@ -382,15 +383,16 @@ fn main_rs(publish: Option<&str>) -> String {
              \x20   cloudy.shutdown().await;\n\
              \x20   Ok(())\n\
              }\n"
-        .to_string(),
+            .to_string()
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// 小道具
+// Odds and ends
 // ---------------------------------------------------------------------------
 
-/// `--name` 指定、無ければディレクトリ名をプロジェクト名にする。
+/// The project name: `--name` if given, else the directory's name.
 fn project_name(dir: &Path, name: Option<&str>) -> Result<String> {
     if let Some(n) = name {
         return Ok(n.to_string());
@@ -401,8 +403,8 @@ fn project_name(dir: &Path, name: Option<&str>) -> Result<String> {
         .with_context(|| format!("cannot derive a name from {}", dir.display()))
 }
 
-/// `dir` から上方向に reiny リポジトリ(`crates/reiny` と `crates/reiny-build` を持つ)を探す。
-/// 見つかればその 2 クレートへの絶対パスを返す。生成プロジェクトの path 依存に使う。
+/// Search upward from `dir` for the reiny repository (the one holding `crates/reiny` and
+/// `crates/reiny-build`). If found, return absolute paths to those two crates, for the generated project's path dependencies.
 fn locate_reiny_crates(dir: &Path) -> Option<(PathBuf, PathBuf)> {
     let start = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let mut cur = Some(start.as_path());
@@ -417,7 +419,7 @@ fn locate_reiny_crates(dir: &Path) -> Option<(PathBuf, PathBuf)> {
     None
 }
 
-/// `"0.1.0"` → `"0.1"`。解釈できなければ元のまま。
+/// `"0.1.0"` → `"0.1"`. Left alone if it cannot be read that way.
 fn major_minor(v: &str) -> String {
     let parts: Vec<&str> = v.split('.').collect();
     if parts.len() >= 2 {
@@ -427,7 +429,7 @@ fn major_minor(v: &str) -> String {
     }
 }
 
-/// 既に在るファイルは上書きしない(雛形は壊さない)。
+/// A file that is already there is never overwritten (the scaffold does not break anything).
 fn write_if_absent(path: &Path, contents: &str) -> Result<()> {
     if path.exists() {
         return Ok(());
@@ -436,7 +438,7 @@ fn write_if_absent(path: &Path, contents: &str) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// 依存先 Reiny.toml の最小スキーマ([project] だけ読む)
+// The minimal schema of a dependency's Reiny.toml (only [project] is read)
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Deserialize)]
@@ -451,7 +453,7 @@ struct DepProject {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)] // テストは panic で失敗を表現してよい
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)] // tests may fail by panicking
 mod tests {
     use super::*;
 

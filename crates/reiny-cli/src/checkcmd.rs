@@ -1,14 +1,14 @@
-//! `reiny check` — Reiny.toml を解決し、型 → トピックの対応と所有/依存モードを表示する。
+//! `reiny check` — resolve a Reiny.toml and print the type → topic mapping and the ownership / dependency mode.
 //!
-//! proto はコンパイルしない(`reiny-build` を `default-features = false` で使う)。配置ミス
-//! (ハイフン入りの依存キー、トピック衝突、proto 不在など)はここで `reiny-build` の検証に
-//! かかって早期に分かる。出力は人向け。CI 用途なら終了コードで判定できる。
+//! No proto is compiled (`reiny-build` is used with `default-features = false`). A layout mistake (a
+//! hyphenated dependency key, a topic collision, a missing proto) is caught here by `reiny-build`'s
+//! validation, early. The output is for people; for CI, branch on the exit code.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-/// `reiny check [path]`。`path` 省略時はカレントディレクトリから上方へ Reiny.toml を探す。
+/// `reiny check [path]`. Without `path`, search upward from the current directory for a Reiny.toml.
 pub(crate) fn check(path: Option<&Path>) -> Result<()> {
     let dir = match path {
         Some(p) => p.to_path_buf(),
@@ -61,7 +61,7 @@ pub(crate) fn check(path: Option<&Path>) -> Result<()> {
         return Ok(());
     }
 
-    // 列幅を揃える。
+    // Line the columns up.
     let w_alias = types.iter().map(|t| t.alias.len()).max().unwrap_or(0);
     let w_msg = types.iter().map(|t| t.message.len()).max().unwrap_or(0);
     let w_topic = types
@@ -90,10 +90,42 @@ pub(crate) fn check(path: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// proto パスを Reiny.toml のあるディレクトリ基準の相対にして読みやすくする(無理なら絶対のまま)。
+/// Make a proto path relative to the directory holding Reiny.toml, for readability (absolute if it cannot be).
 fn rel_to(manifest_path: &Path, proto: &Path) -> PathBuf {
     let base = manifest_path.parent().unwrap_or(Path::new("."));
     proto
         .strip_prefix(base)
         .map_or_else(|_| proto.to_path_buf(), Path::to_path_buf)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)] // tests may fail by panicking
+mod tests {
+    use super::*;
+
+    /// Proto paths are printed relative to the manifest so the table stays readable, but a path from
+    /// outside that tree (a dependency's proto, or a schema crate's) has to stay absolute rather than
+    /// come out as something that does not exist.
+    #[test]
+    fn proto_paths_print_relative_to_the_manifest() {
+        let manifest = Path::new("/proj/Reiny.toml");
+        assert_eq!(
+            rel_to(manifest, Path::new("/proj/proto/ping.proto")),
+            Path::new("proto/ping.proto")
+        );
+        assert_eq!(
+            rel_to(manifest, Path::new("/proj/a/b/deep.proto")),
+            Path::new("a/b/deep.proto")
+        );
+        // Outside the manifest's directory: left as it is.
+        assert_eq!(
+            rel_to(manifest, Path::new("/other/proto/shared.proto")),
+            Path::new("/other/proto/shared.proto")
+        );
+        // A manifest path with no parent falls back to ".", which strips nothing.
+        assert_eq!(
+            rel_to(Path::new("Reiny.toml"), Path::new("proto/ping.proto")),
+            Path::new("proto/ping.proto")
+        );
+    }
 }
