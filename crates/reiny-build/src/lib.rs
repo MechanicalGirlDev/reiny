@@ -152,9 +152,9 @@ struct Dependency {
 }
 
 /// `[projects.<name>]` の publications / dependencies(カタログのキー名を参照)。
-/// 現状は宣言の存在確認のみ。将来 publish/subscribe の許可制に使う。
+/// 存在確認のほか、[`Resolution::projects`] で内省ビューとして公開する
+/// (`reiny run` がトピックの流れ図を組むのに使う)。
 #[derive(Debug, Default, Deserialize)]
-#[allow(dead_code)]
 struct ProjectDecl {
     #[serde(default)]
     publications: Vec<String>,
@@ -286,6 +286,20 @@ pub struct Resolution {
     schema_parts: Vec<SchemaPart>,
     /// `[services]`(無ければ空)。
     services: Vec<ServiceEntry>,
+    /// `[projects.*]` の宣言(workspace 配置のみ。per-project では空)。
+    projects: Vec<ProjectInfo>,
+}
+
+/// `[projects.<name>]` 1 件の内省ビュー。publications / dependencies は
+/// `[internals]` のキー(別名)をそのまま持つ([`Resolution::types`] の `alias` で引ける)。
+#[derive(Debug, Clone)]
+pub struct ProjectInfo {
+    /// `[projects.<name>]` のキー(= パッケージ / 既定 bin 名)。
+    pub name: String,
+    /// 公開する型の別名。
+    pub publications: Vec<String>,
+    /// 購読する型の別名。
+    pub dependencies: Vec<String>,
 }
 
 /// `[services]` 1 件の内省ビュー(`reiny check` 用)。
@@ -352,6 +366,12 @@ impl Resolution {
                 }
             })
             .collect()
+    }
+
+    /// `[projects.*]` の宣言一覧(workspace 配置のみ。per-project では空)。
+    #[must_use]
+    pub fn projects(&self) -> &[ProjectInfo] {
+        &self.projects
     }
 
     /// 解決済みの型一覧(トピック・モジュール付き)。
@@ -491,6 +511,7 @@ pub fn describe(dir: &Path) -> Result<Resolution> {
     Ok(Resolution {
         mode,
         entries,
+        projects: project_infos(&manifest),
         config: manifest.config,
         manifest_path,
         schema_parts,
@@ -538,11 +559,25 @@ fn resolve_for(manifest_dir: &Path, pkg_name: &str) -> Result<Resolution> {
     Ok(Resolution {
         mode,
         entries,
+        projects: project_infos(&manifest),
         config: manifest.config,
         manifest_path,
         schema_parts,
         services,
     })
+}
+
+/// `[projects.*]` を内省ビューへ写す。
+fn project_infos(manifest: &Manifest) -> Vec<ProjectInfo> {
+    manifest
+        .projects
+        .iter()
+        .map(|(name, d)| ProjectInfo {
+            name: name.clone(),
+            publications: d.publications.clone(),
+            dependencies: d.dependencies.clone(),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1923,6 +1958,13 @@ mod tests {
         assert!(m.project.is_none());
         assert_eq!(m.internals.len(), 2);
         assert_eq!(m.projects["ping"].publications, vec!["Ping".to_string()]);
+
+        // [projects.*] は内省ビュー(reiny run の流れ図)としてそのまま出る。
+        let infos = project_infos(&m);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "ping");
+        assert_eq!(infos[0].publications, vec!["Ping".to_string()]);
+        assert_eq!(infos[0].dependencies, vec!["Pong".to_string()]);
     }
 
     #[test]
