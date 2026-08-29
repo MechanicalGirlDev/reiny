@@ -24,7 +24,7 @@ pub(crate) struct ServiceArgs {
 
 #[derive(Subcommand)]
 enum ServiceCommand {
-    /// 生きている service(request 型 → response 型)と server の grain id を並べる。
+    /// 生きている service(request 型 → response 型)と server の launch id を並べる。
     List {
         #[command(flatten)]
         bus: BusArgs,
@@ -39,7 +39,7 @@ struct CallArgs {
     ty: String,
     /// request の JSON(proto3 JSON mapping。省略時は `{}`)。
     json: Option<String>,
-    /// この grain id の server に撃つ(既定は同 domain の任意の server、最初の応答)。
+    /// この launch id の server に撃つ(既定は同 domain の任意の server、最初の応答)。
     #[arg(long)]
     to: Option<String>,
     /// 応答を待つ秒数。

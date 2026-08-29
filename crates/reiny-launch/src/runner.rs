@@ -1,6 +1,6 @@
-//! launch plan に従い grain の子プロセスを起動・監視するランナー。
+//! launch plan に従い launch の子プロセスを起動・監視するランナー。
 //!
-//! grain は全て同一ワークスペースの target ディレクトリ(ランチャ実行ファイルの隣)から
+//! launch は全て同一ワークスペースの target ディレクトリ(ランチャ実行ファイルの隣)から
 //! 起動する。hs-launch のような別ワークスペース plugin 探索は持たない。
 
 use std::collections::HashMap;
@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::Context;
 
 use crate::config::OnExit;
-use crate::launch::{LaunchPlan, ResolvedGrain};
+use crate::launch::{LaunchPlan, ResolvedLaunch};
 
 /// `bin` 名を、与えられたディレクトリ内の実行ファイルパスに解決する。
 /// プラットフォームの実行ファイル拡張子(Windows は `.exe`)を付与する。
@@ -22,7 +22,7 @@ fn resolve_bin(bin_dir: &Path, bin: &str) -> PathBuf {
 }
 
 /// 複数の探索ディレクトリから `bin` を探し、最初に見つかった実行ファイルパスを返す。
-/// grain は独立したプロジェクト(各自の `target/`)に置かれることがあるため、単一の
+/// launch は独立したプロジェクト(各自の `target/`)に置かれることがあるため、単一の
 /// ディレクトリではなく候補列を順に当たる。
 fn find_bin(bin_dirs: &[PathBuf], bin: &str) -> Option<PathBuf> {
     bin_dirs
@@ -39,10 +39,10 @@ fn default_bin_dir() -> anyhow::Result<PathBuf> {
         .context("current_exe has no parent dir")
 }
 
-/// 1 grain を子プロセスとして起動する。`bin_dirs` を順に探して bin を解決する。
+/// 1 launch を子プロセスとして起動する。`bin_dirs` を順に探して bin を解決する。
 fn spawn_one(
     bin_dirs: &[PathBuf],
-    spec: &ResolvedGrain,
+    spec: &ResolvedLaunch,
     default_log_level: Option<&str>,
 ) -> anyhow::Result<Child> {
     let path = find_bin(bin_dirs, &spec.bin).ok_or_else(|| {
@@ -103,7 +103,7 @@ fn run_inner(
 
     // 依存順に逐次起動(name → Child)。
     for &i in &order {
-        let spec = &plan.grains[i];
+        let spec = &plan.launches[i];
         tracing::info!("starting '{}' (bin={})", spec.name, spec.bin);
         let child = spawn_one(bin_dirs, spec, default_log_level)?;
         children.insert(spec.name.clone(), child);
@@ -112,7 +112,7 @@ fn run_inner(
     // 監視ループ。
     loop {
         if stop.load(Ordering::SeqCst) {
-            tracing::info!("Ctrl+C received; stopping all grains");
+            tracing::info!("Ctrl+C received; stopping all launches");
             break;
         }
         // 終了した子を探す。
@@ -129,11 +129,11 @@ fn run_inner(
         };
 
         // name は children のキー由来なので plan に必ず在るが、無ければ安全側で読み飛ばす。
-        let Some(spec) = plan.grains.iter().find(|g| g.name == name) else {
+        let Some(spec) = plan.launches.iter().find(|g| g.name == name) else {
             children.remove(&name);
             continue;
         };
-        tracing::warn!("grain '{}' exited with {:?}", name, status);
+        tracing::warn!("launch '{}' exited with {:?}", name, status);
         match spec.on_exit {
             OnExit::Ignore => {
                 children.remove(&name);
@@ -147,9 +147,9 @@ fn run_inner(
                     Ok(child) => {
                         children.insert(name, child);
                     }
-                    // respawn 失敗は当該 grain を諦め、他は監視継続。
+                    // respawn 失敗は当該 launch を諦め、他は監視継続。
                     Err(e) => {
-                        tracing::error!("failed to respawn '{}': {:#}; dropping grain", name, e);
+                        tracing::error!("failed to respawn '{}': {:#}; dropping launch", name, e);
                         children.remove(&name);
                         if children.is_empty() {
                             break;
@@ -169,7 +169,7 @@ fn run_inner(
 }
 
 /// launch plan を実行する。`bin_dir` が None なら `current_exe` の隣接ディレクトリ。
-/// `default_log_level` は per-grain override の無い子に渡すログレベル(通常はランチャ自身)。
+/// `default_log_level` は per-launch override の無い子に渡すログレベル(通常はランチャ自身)。
 pub fn run_launch(
     plan: &LaunchPlan,
     bin_dir: Option<PathBuf>,
@@ -182,9 +182,9 @@ pub fn run_launch(
     run_launch_dirs(plan, &[bin_dir], default_log_level)
 }
 
-/// `run_launch` の複数探索ディレクトリ版。各 grain bin を `bin_dirs` の順で探す。
-/// grain が別々のプロジェクト(各自の `target/`)に分かれているとき(例: `reiny new` で
-/// 個別生成した grain 群)に、`<launch>/<grain>/target/<profile>` などを順に当たれる。
+/// `run_launch` の複数探索ディレクトリ版。各 launch bin を `bin_dirs` の順で探す。
+/// launch が別々のプロジェクト(各自の `target/`)に分かれているとき(例: `reiny new` で
+/// 個別生成した launch 群)に、`<launch>/<launch>/target/<profile>` などを順に当たれる。
 pub fn run_launch_dirs(
     plan: &LaunchPlan,
     bin_dirs: &[PathBuf],

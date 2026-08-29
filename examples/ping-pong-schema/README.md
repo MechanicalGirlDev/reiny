@@ -7,17 +7,17 @@ reiny の使い方を示すサンプル。通信の中身は [`../ping-pong-work
 > **配置パターン: workspace 共有 + `[schema]`。** workspace 版は ping と pong が **両方**
 > `[internals]` の proto を prost コンパイルしていました(同じ型を 2 度生成)。こちらは
 > `[schema] crate = "..."` を足し、`[internals]` を **そのクレートだけ** が 1 度だけ
-> コンパイル + `impl Topic` し、grain はそれを Cargo 依存として共有します。grain ごとの
+> コンパイル + `impl Topic` し、launch はそれを Cargo 依存として共有します。launch ごとの
 > 重複 proto コンパイルが無くなります。
 
 ## workspace 版との違い
 
 | | workspace(共有カタログ) | workspace + schema |
 | --- | --- | --- |
-| `[internals]` の prost コンパイル | **各 grain** が自前で(ping と pong で 2 回) | **スキーマクレートが 1 度だけ** |
-| grain の型の入手 | 各 grain が `crate::internals`(自前生成) | スキーマクレートを依存 → `crate::internals` に再エクスポート |
-| grain の `prost` 依存 | 要る(自前で prost 型を生成) | **不要**(型を使うだけ。生成はスキーマ側) |
-| 向く場面 | 少数 grain / 手軽さ重視 | grain が増えてビルド時間に効くとき |
+| `[internals]` の prost コンパイル | **各 launch** が自前で(ping と pong で 2 回) | **スキーマクレートが 1 度だけ** |
+| launch の型の入手 | 各 launch が `crate::internals`(自前生成) | スキーマクレートを依存 → `crate::internals` に再エクスポート |
+| launch の `prost` 依存 | 要る(自前で prost 型を生成) | **不要**(型を使うだけ。生成はスキーマ側) |
+| 向く場面 | 少数 launch / 手軽さ重視 | launch が増えてビルド時間に効くとき |
 
 ## 仕組み
 
@@ -62,7 +62,7 @@ dependencies = ["Ping"]
 ping-pong-schema/
 ├── Cargo.toml          # cargo ワークスペース(members = schema, ping, pong)
 ├── Reiny.toml          # ★ [internals] + [schema] + [projects.*]
-├── ping-pong.toml      # launch config(schema は lib なので grain には出ない)
+├── ping-pong.toml      # launch config(schema は lib なので launch には出ない)
 ├── proto/              # 共有 proto
 │   ├── ping.proto
 │   └── pong.proto
@@ -86,7 +86,7 @@ ping-pong-schema/
 # モードと型 → トピックを表示(proto はコンパイルしない)
 reiny check .
 # → mode: workspace+schema (schema crate)
-#   schema crate: pingpong-schema (compiles [internals] once; grains share it)
+#   schema crate: pingpong-schema (compiles [internals] once; launches share it)
 ```
 
 ## 動かす

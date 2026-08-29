@@ -33,7 +33,7 @@ const LATCHED_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct Envelope<T> {
     /// decode 済みのメッセージ本体。
     pub value: T,
-    /// 送信元 grain の id(キーの `<id>` セグメント)。
+    /// 送信元 launch の id(キーの `<id>` セグメント)。
     pub source: String,
     /// 送信時刻(unix ns)。エンジンが持つときだけ載る(zenoh は timestamping が有効なとき)。
     pub timestamp: Option<u64>,
@@ -206,7 +206,7 @@ fn declare_latch(
         key,
         Box::new(move |query: Box<dyn RawQuery>| {
             // payload 付きの query は service の呼び出し(`service.rs`)。同じ型を latched publish
-            // しつつ serve する grain で、呼び出しに直近値を返してしまわないよう無視する。
+            // しつつ serve する launch で、呼び出しに直近値を返してしまわないよう無視する。
             if query.payload().is_some() {
                 return;
             }
@@ -277,7 +277,7 @@ impl<'a, T> SubscriberBuilder<'a, T> {
         }
     }
 
-    /// 特定の grain id だけを購読する。同じ型を複数の grain が publish する構成で、
+    /// 特定の launch id だけを購読する。同じ型を複数の launch が publish する構成で、
     /// 購読側が出し手を選ぶための指定。
     pub fn from(mut self, id: impl Into<String>) -> Self {
         self.from = Some(id.into());
@@ -300,7 +300,7 @@ impl<'a, T> SubscriberBuilder<'a, T> {
     /// 直近 `n` 件だけを保持し、溢れたら**最古を捨てる**(ROS 2 の `KEEP_LAST(n)`)。
     ///
     /// 既定(未指定)は Fifo(256 件)で、**満杯になるとエンジンの受信スレッドがブロックし、
-    /// その grain の全購読が詰まる**。高レートの状態量を自分の周期でしか読まない
+    /// その launch の全購読が詰まる**。高レートの状態量を自分の周期でしか読まない
     /// 購読(GUI が 100Hz の `RobotState` を描画周期で読む等)は `latest(1)` にする。
     /// コマンド系は既定のまま —— 黙って落ちる方が制御では危ない。
     pub fn latest(mut self, n: usize) -> Self {
@@ -639,7 +639,7 @@ fn decode<T: Message + Default + Topic>(sample: &Sample) -> Option<T> {
 /// publisher の参加 / 離脱。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PresenceEvent {
-    /// この grain id がその型の publisher を宣言した(宣言済みのものも初回に流れる)。
+    /// この launch id がその型の publisher を宣言した(宣言済みのものも初回に流れる)。
     Joined(String),
     /// publisher が drop された、またはプロセスごと落ちた。
     Left(String),

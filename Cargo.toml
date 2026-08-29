@@ -73,7 +73,7 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [workspace.dependencies]
-# Protobuf(reiny-build が各 grain の proto をコンパイルするのに使う)
+# Protobuf(reiny-build が各 launch の proto をコンパイルするのに使う)
 prost = "0.13"
 prost-build = "0.13"
 # descriptor set(prost-build が書き出すもの)を読むための型定義。
@@ -95,7 +95,7 @@ thiserror = "2"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
-# 設定ファイル(launch config の [grain] 節)
+# 設定ファイル(launch config の [launch] 節)
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 

@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
-description = "reiny Engine on iceoryx2: zero-copy shared-memory pub/sub for grains on one host"
+description = "reiny Engine on iceoryx2: zero-copy shared-memory pub/sub for launches on one host"
 keywords = ["reiny", "iceoryx2", "shared-memory", "ipc", "pubsub"]
 categories = ["network-programming", "asynchronous"]
 

@@ -1,6 +1,6 @@
-//! `reiny run` — launch config から grain 群を起動する。
+//! `reiny run` — launch config から launch 群を起動する。
 //!
-//! grain は独立プロジェクト(各自の `target/`)に分かれていることがあるので、launch config の
+//! launch は独立プロジェクト(各自の `target/`)に分かれていることがあるので、launch config の
 //! 場所を基準に複数の候補ディレクトリを組み立て、`reiny_launch::run_launch_dirs` に渡す。
 
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ pub(crate) fn config_dir(config: &Path) -> PathBuf {
     abs.parent().map(Path::to_path_buf).unwrap_or_default()
 }
 
-/// 実行ファイルの隣(dist レイアウトでは grain bin がここに並ぶ)。
+/// 実行ファイルの隣(dist レイアウトでは launch bin がここに並ぶ)。
 fn exe_dir() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
@@ -22,7 +22,7 @@ fn exe_dir() -> Option<PathBuf> {
 }
 
 /// bin を探す候補ディレクトリを組み立てる。優先順:
-/// 1. 明示 `--bin-dir`、2. `<cfg>/<grain>/target/{debug,release}`(個別プロジェクト)、
+/// 1. 明示 `--bin-dir`、2. `<cfg>/<launch>/target/{debug,release}`(個別プロジェクト)、
 /// 3. `<cfg>/target/{debug,release}`(共有ワークスペース)、4. 実行ファイルの隣(dist)。
 pub(crate) fn search_dirs(
     cfg_dir: &Path,
@@ -40,8 +40,8 @@ pub(crate) fn search_dirs(
     if let Some(d) = explicit {
         push(d);
     }
-    // 各 grain の個別プロジェクト target(ディレクトリ名 = grain 名 = bin 名の前提)。
-    for g in &plan.grains {
+    // 各 launch の個別プロジェクト target(ディレクトリ名 = launch 名 = bin 名の前提)。
+    for g in &plan.launches {
         push(cfg_dir.join(&g.name).join("target").join("debug"));
         push(cfg_dir.join(&g.name).join("target").join("release"));
     }

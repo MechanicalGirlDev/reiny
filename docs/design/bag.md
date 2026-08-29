@@ -56,7 +56,7 @@ false`（非圧縮）に落とす。今は刺さっていない。
 HumanoidSystem で実際に困っている順:
 
 1. **実機の歩行 1 本を hs-gui でオフライン再生する。** 今は実機の隣に座って見るしかない。
-2. **不具合報告に bag を添える。** ログは各 grain の `logs/*.log` で揃ったが、バス上の値は残らない。
+2. **不具合報告に bag を添える。** ログは各 launch の `logs/*.log` で揃ったが、バス上の値は残らない。
 3. **policy の回帰比較。** 実機で録った `WorldState` / `ImuData` を別 domain の hs-control
    （policy モード）へ流し、policy のビルド差で setpoint がどう変わるかを見る。
 4. **sysid の入力。** 今は専用 JSONL（`hs-plugin-sysid`）。bag から `Trajectory` を作れば録り直しが要らない。
@@ -74,8 +74,8 @@ reiny bag play   <file> [--as <id>] [--rate <x>] [--loop] [--start <sec>] [--dur
                  [--type <T>]... [--from <id>]... [--force]  [bus 引数]
 reiny bag info   <file>
 
-bus 引数（3 つ共通、grain と同じ綴り）: --domain <d> / --zenoh-config <f> / --connect <ep>... / --zenoh-mode <m>
-domain の既定は grain と同じ: --domain > REINY_DOMAIN > "default"
+bus 引数（3 つ共通、launch と同じ綴り）: --domain <d> / --zenoh-config <f> / --connect <ep>... / --zenoh-mode <m>
+domain の既定は launch と同じ: --domain > REINY_DOMAIN > "default"
 ```
 
 例:
@@ -121,8 +121,8 @@ MCAP のメッセージは `log_time` と `publish_time` の 2 つを持つ。
 - `log_time` = 受信時の `SystemTime`（ns since epoch）。rosbag2 と同じく**受信時刻が主**。
 - `publish_time` = zenoh の `Sample::timestamp()` があればその HLC、無ければ `log_time`。
 
-**grain の既定では無い**: zenoh の `timestamping.enabled` は peer で `false`
-（`zenoh-config/src/defaults.rs:139-145`）。送信時刻が要る用途は grain 側の zenoh 設定
+**launch の既定では無い**: zenoh の `timestamping.enabled` は peer で `false`
+（`zenoh-config/src/defaults.rs:139-145`）。送信時刻が要る用途は launch 側の zenoh 設定
 （`--zenoh-config` か `RuntimeOptions.zenoh_overrides` に `timestamping/enabled = true`）で
 入れる。bag はあるものを写すだけで、無いものを捏造しない。
 
@@ -175,7 +175,7 @@ Foxglove で中を見るには §5 が要る。
 既定は**録ったキーそのまま** —— `reiny/<domain>/<source>/<TYPE>`。購読側の `Envelope.source`
 と `subscriber().from(id)` が録画時と同じに見える。これが「再生」の意味。
 
-- `--domain <d>`: 1 段目を差し替える。**flag > `REINY_DOMAIN` > bag の値**（grain と同じ優先順。
+- `--domain <d>`: 1 段目を差し替える。**flag > `REINY_DOMAIN` > bag の値**（launch と同じ優先順。
   bag の値が最後に来るのは、`REINY_DOMAIN` を張った環境で再生したら普通はそこへ出したいから）。
 - `--as <id>`: 2 段目を差し替える。全チャネルが同じ id になる。「これは bag です」と
   presence で名乗らせたいときの口。
@@ -252,7 +252,7 @@ record は型を知らない。Foxglove や `mcap cat --json` で中を見るに
 | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | `reiny bag record --manifest Reiny.toml` で CLI が protoc を回す | CLI に `prost-build` + 同梱 protoc が入る（重い）。録る機械に**その版の**ソースが要る。配布 bundle（`dist/`）から録れない |
 | `--descriptors <bin>` を手で渡す                   | 版ズレを人が管理する。指紋があるのに手作業に戻す                                                       |
-| **grain がバスで名乗る**                           | **採用。** 走っている grain が持つ descriptor が唯一正しい。CLI に protoc が要らない                   |
+| **launch がバスで名乗る**                           | **採用。** 走っている launch が持つ descriptor が唯一正しい。CLI に protoc が要らない                   |
 
 ### 5.2 仕組み
 
@@ -311,7 +311,7 @@ record は型を知らない。Foxglove や `mcap cat --json` で中を見るに
 
 - **tokio は入れない。** zenoh の同期 API（`.wait()`）と std スレッドで足りる。CLI は今も tokio 無し。
 - **feature で括らない。** 括ると「録れない `reiny`」を配る手段が増えるだけ。zenoh のビルド時間は
-  bag が無くても `reiny run` の利用者は grain 側で払っている。
+  bag が無くても `reiny run` の利用者は launch 側で払っている。
 - **`main.rs:171` の `SUBCOMMANDS` に `"bag"` を足す。** 忘れると `reiny bag …` が後方互換の
   「位置引数 = launch config」に食われて `bag` というファイルを探しに行く。テスト
   `subcommands_are_not_backward_compat` に足す。
@@ -386,11 +386,11 @@ record は型を知らない。Foxglove や `mcap cat --json` で中を見るに
 
 - **info の schema 列は「記述子名」と「指紋」を独立に出す**。§4 の例は
   `schema hs.RobotState 9f4e…` と 1 まとまりに見えるが、段 1 の bag は指紋しか無い
-  (`@schema` を出す grain が居ないと descriptor が付かない)。両者を 1 つの match で
+  (`@schema` を出す launch が居ないと descriptor が付かない)。両者を 1 つの match で
   組むと「指紋はあるが記述子は無い」行で指紋が落ちる。別々に組む。
 - **e2e は「ビルド済みバイナリのサブプロセス」で回す**(§9 は「`bagcmd.rs` の e2e」)。
   reiny-cli は bin 専用クレート(lib ターゲットが無い)なので、`tests/` から `bagcmd::run`
-  を呼べない。`CARGO_BIN_EXE_reiny` を `Command` で起動し、テスト側は grain 役の zenoh
+  を呼べない。`CARGO_BIN_EXE_reiny` を `Command` で起動し、テスト側は launch 役の zenoh
   セッションを 1 本張って publisher / latched / presence を演じる。record は `--duration`
   で終わらせる。**ポートは 37448**(reiny 本体 e2e の 37447 と 1 つずらす)。
 - **descriptor は「不透明バイト列」として扱う**。reiny(`declare_schema`)も play も、

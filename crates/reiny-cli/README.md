@@ -9,11 +9,11 @@ cargo install reiny-cli
 
 Subcommands:
 
-- `reiny new` / `reiny init` — scaffold a grain project (a standalone cargo project)
+- `reiny new` / `reiny init` — scaffold a launch project (a standalone cargo project)
 - `reiny add` — append a dependency type to the target's `Reiny.toml` `[dependencies]`
-- `reiny build` — run `cargo build` in the cwd (code generation is handled by the grain's `build.rs`)
-- `reiny run` — read a launch config and spawn the grain processes
-- `reiny compress` — bundle the reachable grain binaries, `.so`s, launch config, and launcher into one self-contained directory
+- `reiny build` — run `cargo build` in the cwd (code generation is handled by the launch's `build.rs`)
+- `reiny run` — read a launch config and spawn the launch processes
+- `reiny compress` — bundle the reachable launch binaries, `.so`s, launch config, and launcher into one self-contained directory
 
 `reiny <launch>.toml` (a bare positional argument) is shorthand for `reiny run`.
 

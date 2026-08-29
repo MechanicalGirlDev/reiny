@@ -2,7 +2,7 @@
 # 04-build.sh — `reiny build` で Reiny.toml 駆動の codegen を回してビルドする。
 #
 # `reiny build` は build.rs の `reiny_build::compile()` と同じ codegen を確実に
-# 走らせてから cargo build をかけるラッパ。各 grain の Reiny.toml を読み、
+# 走らせてから cargo build をかけるラッパ。各 launch の Reiny.toml を読み、
 #   - [publications] の proto → `reiny::publications::*`
 #   - [dependencies] の公開型 → `reiny::dependencies::<name>::*`
 # を生成して「型 → トピック」を埋め込む。

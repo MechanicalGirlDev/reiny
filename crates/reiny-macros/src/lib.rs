@@ -3,7 +3,7 @@
 //! `reiny` umbrella クレートから `pub use reiny_macros::main;` で再エクスポートされ、利用側は
 //! `#[reiny::main]` として使う。展開は 2 つの仕事をする:
 //!
-//! 1. **生成型の取り込み** — `reiny-build`(各 grain の `build.rs`)が `$OUT_DIR/reiny_generated.rs`
+//! 1. **生成型の取り込み** — `reiny-build`(各 launch の `build.rs`)が `$OUT_DIR/reiny_generated.rs`
 //!    に書き出した `publications` / `dependencies` / `internals` モジュールを crate ルートへ
 //!    取り込む。これで利用側コードの `use crate::publications::Ping;` 等が解決する。
 //!    (外部クレート `reiny::` の名前空間には利用側固有の生成型を後入れできないため、
@@ -13,16 +13,16 @@
 //!    `reiny::run_with` に肩代わりさせる。
 //!
 //! 唯一のオプションは `#[reiny::main(tracing = false)]` で、reiny に
-//! `tracing_subscriber` をグローバル登録させない(自前の subscriber を持つ grain 用)。
+//! `tracing_subscriber` をグローバル登録させない(自前の subscriber を持つ launch 用)。
 
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{ItemFn, LitBool, parse_macro_input};
 
-/// grain のエントリポイント。`async fn main(cloudy: Cloudy) -> reiny::Result<()>` に付ける。
+/// launch のエントリポイント。`async fn main(cloudy: Cloudy) -> reiny::Result<()>` に付ける。
 ///
 /// `#[reiny::main(tracing = false)]` で reiny の `tracing_subscriber` 登録を止められる。
-/// `tracing_subscriber::try_init` は**後勝ちしない**ので、自前の subscriber を持つ grain が
+/// `tracing_subscriber::try_init` は**後勝ちしない**ので、自前の subscriber を持つ launch が
 /// 「reiny より先に入れる」順序依存を抱えずに済む唯一の方法がこれ。
 #[proc_macro_attribute]
 pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {

@@ -55,7 +55,7 @@ type Cli = Client<S, [u8], Meta, [u8], Meta>;
 type Req = ActiveRequest<S, [u8], Meta, [u8], Meta>;
 type Pending = PendingResponse<S, [u8], Meta, [u8], Meta>;
 
-/// service ごとの port 上限。`open_or_create` は設定が食い違うと失敗するので、全 grain で同じ値。
+/// service ごとの port 上限。`open_or_create` は設定が食い違うと失敗するので、全 launch で同じ値。
 /// iceoryx2 は port の共有メモリを **上限の積で前確保**する(client なら
 /// `max_servers × max_active_requests × max_loaned_requests × slice_len`)ので、大きくすると
 /// port の作成が秒単位で遅くなる。`// ponytail: 16 port / 型。足りない構成が出たら測って上げる`

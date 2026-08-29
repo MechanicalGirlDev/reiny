@@ -58,7 +58,7 @@ impl Service for AddV2 {
     type Response = Sum;
 }
 
-/// latched publish と serve を **同じ型**でやる grain の再現。
+/// latched publish と serve を **同じ型**でやる launch の再現。
 #[derive(Clone, PartialEq, prost::Message)]
 struct Cfg {
     #[prost(uint32, tag = "1")]
@@ -214,7 +214,7 @@ async fn services_round_trip_presence_and_latched_coexistence() {
     );
     assert!(client.servers::<Add>().await.expect("servers").is_empty());
 
-    // --- 同じ型を latched publish しつつ serve する grain ---
+    // --- 同じ型を latched publish しつつ serve する launch ---
     let cfg_pub = other
         .publisher::<Cfg>()
         .latched()

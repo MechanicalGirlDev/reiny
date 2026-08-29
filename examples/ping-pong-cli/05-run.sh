@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 05-run.sh — `reiny run` で launch config から grain 群をまとめて起動する。
+# 05-run.sh — `reiny run` で launch config から launch 群をまとめて起動する。
 #
-# `reiny run <launch.toml>` は launch config の [grain] 節を読み、各 grain を
+# `reiny run <launch.toml>` は launch config の [launch] 節を読み、各 launch を
 # 同一ワークスペースの子プロセスとして起動する。depends_on の順序を守る。
 #
 #   reiny run ping-pong.toml          # 推奨(将来像)
@@ -11,7 +11,7 @@
 # 期待する挙動:
 #   - ping-pong.toml の通り pong → ping の順に起動する。
 #   - ping が Ping を流し、pong が受けて Pong を返し、ping が Pong を受ける。
-#   - 各 grain のログが seq 付きで流れる。Ctrl-C で全 grain を停止。
+#   - 各 launch のログが seq 付きで流れる。Ctrl-C で全 launch を停止。
 #
 # 別々の端末で動かしたいときは(下流から上げると取りこぼしが少ない):
 #   cargo run -p pong &

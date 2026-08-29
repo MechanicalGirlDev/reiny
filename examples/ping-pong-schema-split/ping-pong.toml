@@ -1,10 +1,10 @@
 # launch config — ping/pong をまとめて起動する。
-# スキーマクレート(geometry / msg)はライブラリなので grain には現れない。
+# スキーマクレート(geometry / msg)はライブラリなので launch には現れない。
 #
 #   reiny ping-pong.toml
 #
 # この launch だけを他と隔離したいなら domain を足す(0.3 で入った名前空間):
 #   domain = "split-demo"
-[grain]
+[launch]
 pong = { bin = "pong", on_exit = "respawn" }
 ping = { bin = "ping", depends_on = ["pong"] }

@@ -1,7 +1,7 @@
 # reiny-iceoryx2
 
 [reiny](https://github.com/MechanicalGirlDev/reiny) on
-[iceoryx2](https://github.com/eclipse-iceoryx/iceoryx2): grains on one host
+[iceoryx2](https://github.com/eclipse-iceoryx/iceoryx2): launches on one host
 talk over shared memory instead of zenoh. Same `Cloudy`, same types, same
 `Reiny.toml` — only the engine changes:
 
@@ -23,7 +23,7 @@ What it maps to (design: `docs/design/0.5.0.md` §5):
 | latched / services / `@schema` | request-response service `reiny/<d>/<T>/q`                               |
 | presence                       | a `reiny-alive/<key>` service held open; `watch` polls every 200 ms      |
 
-iceoryx2 is single-host. To see these grains from another machine (or from
+iceoryx2 is single-host. To see these launches from another machine (or from
 `reiny topic` / `reiny bag`, which stay on zenoh) run one `reiny bridge iceoryx2`.
 
 ## Building

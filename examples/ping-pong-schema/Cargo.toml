@@ -1,5 +1,5 @@
 # ping-pong-schema の cargo ワークスペース。
-# schema/(共有スキーマクレート)+ ping/ + pong/(消費 grain)を束ねる。reiny 本体の
+# schema/(共有スキーマクレート)+ ping/ + pong/(消費 launch)を束ねる。reiny 本体の
 # ワークスペースとは分離した独立ワークスペースなので、ルートの `cargo build` には巻き込まれない。
 #
 # 配置パターン: workspace 共有 + [schema]。proto と Reiny.toml はワークスペース直下に 1 つだけ
@@ -25,7 +25,7 @@ reiny-build = { path = "../../crates/reiny-build" }
 # 共有スキーマクレート。ping/pong はこれを依存して [internals] の型を引く。
 pingpong-schema = { path = "schema" }
 # prost は **スキーマクレートだけ**が要る(生成 prost 型を持つのはそのクレート)。
-# 消費 grain(ping/pong)は型を使うだけなので prost を直接依存しない。
+# 消費 launch(ping/pong)は型を使うだけなので prost を直接依存しない。
 prost = "0.13"
 
 tokio = { version = "1", features = ["full"] }

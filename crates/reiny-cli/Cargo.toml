@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
-description = "reiny CLI: scaffold grains (new/init/add), check, build, run, compress, bag, and topic/node/service introspection via the `reiny` command"
+description = "reiny CLI: scaffold launches (new/init/add), check, build, run, compress, bag, and topic/node/service introspection via the `reiny` command"
 keywords = ["reiny", "cli", "scaffold", "launcher"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -27,7 +27,7 @@ tokio = { workspace = true }
 # Reiny.toml の解決・型/トピック導出(`reiny check`)と、`@schema` 応答の descriptor 読み取り
 # (`reiny bag record`)。prost-build / protoc は引かない。
 reiny-build = { path = "../reiny-build", version = "0.4.0", default-features = false, features = ["descriptors"] }
-# `reiny bag` が grain と同じ fabric に乗るため(zenoh の再エクスポート + 起動オプション)。
+# `reiny bag` が launch と同じ fabric に乗るため(zenoh の再エクスポート + 起動オプション)。
 reiny = { path = "../reiny", version = "0.4.0" }
 mcap = { workspace = true }
 # `reiny topic echo` / `reiny service call` の動的 decode / encode(`@schema` の descriptor から)。

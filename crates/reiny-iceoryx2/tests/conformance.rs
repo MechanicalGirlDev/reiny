@@ -10,7 +10,7 @@ use reiny::engine::conformance::{cloudy, exercise};
 use reiny_iceoryx2::Iceoryx2;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn two_grains_in_one_process() {
+async fn two_launches_in_one_process() {
     // 失敗したときに reiny(warn)と iceoryx2(debug)の両方の理由が見えるように。
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::TRACE)

@@ -1,7 +1,7 @@
 //! reiny SDK。
 //!
-//! grain は「型を渡すだけ」で publish / subscribe する。型 → トピックの対応は
-//! `reiny-build`(各 grain の `build.rs`)が `Reiny.toml` から生成し、各型に [`Topic`] を
+//! launch は「型を渡すだけ」で publish / subscribe する。型 → トピックの対応は
+//! `reiny-build`(各 launch の `build.rs`)が `Reiny.toml` から生成し、各型に [`Topic`] を
 //! impl することで埋め込む。利用側はトピック名(文字列)に触れない。
 //!
 //! ```ignore
@@ -21,7 +21,7 @@
 //! # エンジン
 //!
 //! [`Cloudy`] はバスを [`engine::Engine`] 越しに使う。既定は zenoh([`engine::Zenoh`]、
-//! feature `zenoh`)。[`engine::Local`] はプロセス内バスで、ネットワーク無しで grain の
+//! feature `zenoh`)。[`engine::Local`] はプロセス内バスで、ネットワーク無しで launch の
 //! テストが書ける —— [`Cloudy::open`] に `RuntimeOptions::engine` で挿す。
 //!
 //! # 逃げ道
@@ -67,20 +67,20 @@ pub use reiny_core::{Descriptor, Durability, History, Priority, Qos, Reliability
 #[cfg(feature = "zenoh")]
 pub use zenoh;
 
-/// `#[reiny::main]` — grain のエントリポイント属性。詳細は [`reiny_macros::main`]。
+/// `#[reiny::main]` — launch のエントリポイント属性。詳細は [`reiny_macros::main`]。
 pub use reiny_macros::main;
 
 /// 共有スキーマクレート(`[schema] crate = ...`)の `lib.rs` に置く 1 行。
 ///
 /// workspace モードで `[internals]` を **1 度だけ** prost コンパイル + `impl Topic` する
 /// クレートが、`reiny-build` 生成物(`$OUT_DIR/reiny_generated.rs`)をライブラリとして取り込み、
-/// `internals` / `__pb` を公開する。消費側 grain はこのクレートを Cargo 依存にするだけで、
+/// `internals` / `__pb` を公開する。消費側 launch はこのクレートを Cargo 依存にするだけで、
 /// 自前の proto 再コンパイルが要らなくなる(`#[reiny::main]` の取り込みと同じ仕組み)。
 ///
 /// ```ignore
 /// // myapp-schema/src/lib.rs
 /// reiny::schema!();
-/// // → myapp_schema::internals::* が他の grain から使える
+/// // → myapp_schema::internals::* が他の launch から使える
 /// ```
 #[macro_export]
 macro_rules! schema {
@@ -110,7 +110,7 @@ const ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// 起動時の「同じ id が居るか」の問い合わせ。起動を遅らせない程度に短く。
 const DUPLICATE_CHECK: Duration = Duration::from_millis(300);
 
-/// grain のランタイムハンドル。`#[reiny::main]` が構築して渡す。
+/// launch のランタイムハンドル。`#[reiny::main]` が構築して渡す。
 ///
 /// エンジン([`engine::Engine`])と、自分のインスタンス id・名前空間・協調シャットダウンを束ねる。
 /// `publish` / `subscribe` は **型を型引数で渡すだけ**。トピックは [`Topic`] から解決される。
@@ -119,17 +119,17 @@ pub struct Cloudy {
     id: String,
     domain: String,
     shutdown: Shutdown,
-    /// grain の presence トークン(保持するだけ。プロセスが落ちれば消える)。
-    _grain: Guard,
+    /// launch の presence トークン(保持するだけ。プロセスが落ちれば消える)。
+    _launch: Guard,
     /// `--config <path>` で渡された設定ファイルを parse したもの(無ければ `None`)。
     /// `reiny-build` 生成の `config()` 拡張(per-project の `[config]`)が読む。
     config: Option<toml::Table>,
-    /// reiny が解釈しなかった起動引数(grain 固有の `--port` など)。
+    /// reiny が解釈しなかった起動引数(launch 固有の `--port` など)。
     extra_args: Vec<String>,
 }
 
 impl Cloudy {
-    /// エンジンの上に構築する。`@grain` トークンを立て、同じ id の grain が既に居れば警告する
+    /// エンジンの上に構築する。`@launch` トークンを立て、同じ id の launch が既に居れば警告する
     /// (エラーにはしない —— `bag play --as` のような意図的な成り代わりがある)。
     async fn new(
         engine: Arc<dyn Engine>,
@@ -139,15 +139,15 @@ impl Cloudy {
         config: Option<toml::Table>,
         extra_args: Vec<String>,
     ) -> Result<Self> {
-        let grain_key = Key::grain(&domain, Some(&id));
+        let launch_key = Key::launch(&domain, Some(&id));
         if engine.caps().liveliness {
-            if let Ok(alive) = engine.alive(&grain_key, DUPLICATE_CHECK).await
+            if let Ok(alive) = engine.alive(&launch_key, DUPLICATE_CHECK).await
                 && !alive.is_empty()
             {
                 tracing::warn!(
                     id,
                     domain,
-                    "another grain with the same id is already on the bus; \
+                    "another launch with the same id is already on the bus; \
                      both will publish under the same keys"
                 );
             }
@@ -155,16 +155,16 @@ impl Cloudy {
             tracing::debug!(
                 id,
                 domain,
-                "engine has no liveliness; grain presence is off"
+                "engine has no liveliness; launch presence is off"
             );
         }
-        let grain = engine.declare_alive(&grain_key)?;
+        let launch = engine.declare_alive(&launch_key)?;
         Ok(Self {
             engine,
             id,
             domain,
             shutdown,
-            _grain: grain,
+            _launch: launch,
             config,
             extra_args,
         })
@@ -198,7 +198,7 @@ impl Cloudy {
         SubscriberBuilder::new(self)
     }
 
-    /// いま型 `T` を publish している grain id の一覧(自分を含む。id 昇順)。
+    /// いま型 `T` を publish している launch id の一覧(自分を含む。id 昇順)。
     ///
     /// [`Cloudy::publish`] は publisher と同じキーに liveliness トークンを同伴させる
     /// (opt-out は無い —— 持たない publisher を許すとこの戻り値が信用できなくなる)ので、
@@ -252,7 +252,7 @@ impl Cloudy {
         self.caller::<S>().build().call(request).await
     }
 
-    /// いま request 型 `S` を serve している grain id の一覧(自分を含む。id 昇順)。
+    /// いま request 型 `S` を serve している launch id の一覧(自分を含む。id 昇順)。
     pub async fn servers<S: Service>(&self) -> Result<Vec<String>> {
         self.alive_ids(self.key_for(None, S::TYPE).with_chunk(SERVICE_CHUNK))
             .await
@@ -271,7 +271,7 @@ impl Cloudy {
 
     /// 同じ id / domain / シャットダウン / 設定で、**別のエンジン**の上に 2 本目を組む。
     /// bridge(`reiny::bridge::forward`)が「zenoh の `Cloudy`」と「リンクの `Cloudy`」を
-    /// 1 プロセスに持つための口。`@grain` トークンは新しいエンジンにも立つ。
+    /// 1 プロセスに持つための口。`@launch` トークンは新しいエンジンにも立つ。
     pub async fn with_engine(&self, engine: Arc<dyn Engine>) -> Result<Self> {
         Self::new(
             engine,
@@ -306,14 +306,14 @@ impl Cloudy {
     }
 
     /// 自分の論理名前空間(`--domain` / `REINY_DOMAIN`、既定 [`DEFAULT_DOMAIN`])。
-    /// 同じバス上でも domain が違う grain とは通信しない。
+    /// 同じバス上でも domain が違う launch とは通信しない。
     #[must_use]
     pub fn domain(&self) -> &str {
         &self.domain
     }
 
-    /// reiny が解釈しなかった起動引数。grain 固有の引数(`--port` など)はここから拾う。
-    /// reiny は未知の引数をエラーにしない —— 知りようがないし、厳格化すると全 grain が落ちる。
+    /// reiny が解釈しなかった起動引数。launch 固有の引数(`--port` など)はここから拾う。
+    /// reiny は未知の引数をエラーにしない —— 知りようがないし、厳格化すると全 launch が落ちる。
     #[must_use]
     pub fn extra_args(&self) -> &[String] {
         &self.extra_args
@@ -335,7 +335,7 @@ impl Cloudy {
         self.config.as_ref()
     }
 
-    /// シャットダウンが要求されるまで待つ(自前のループを持つ grain 用)。
+    /// シャットダウンが要求されるまで待つ(自前のループを持つ launch 用)。
     pub async fn shutdown(&self) {
         self.shutdown.wait().await;
     }

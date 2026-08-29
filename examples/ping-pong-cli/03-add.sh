@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 03-add.sh — `reiny add` で「他プロジェクトの公開型を購読する」依存を配線する。
 #
-# `reiny add <path>` は、カレント grain の Reiny.toml の [dependencies] に相手を
+# `reiny add <path>` は、カレント launch の Reiny.toml の [dependencies] に相手を
 # 足す。これで相手の公開型が `reiny::dependencies::<name>::<Type>` として見え、
 # subscribe できるようになる(型 = トピックなので、購読は型を渡すだけ)。
 #

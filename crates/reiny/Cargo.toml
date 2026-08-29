@@ -7,7 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
 description = "reiny SDK: publish/subscribe by Rust type via Cloudy and the #[reiny::main] runtime"
-keywords = ["zenoh", "pubsub", "distributed", "actor", "grain"]
+keywords = ["zenoh", "pubsub", "distributed", "actor", "launch"]
 categories = ["network-programming", "asynchronous"]
 
 [features]

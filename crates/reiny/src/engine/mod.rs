@@ -55,9 +55,9 @@ pub const KEY_ROOT: &str = "reiny";
 /// service の presence トークンが付く verbatim チャンク(`…/<Req>/@service`)。publisher の
 /// トークン(型のキーそのもの)と分けるのは、`publishers::<Req>()` に server が混ざらないため。
 pub const SERVICE_CHUNK: &str = "@service";
-/// grain そのものの presence トークン(`reiny/<domain>/<id>/@grain`)。publisher を 1 つも
-/// 持たない grain も `reiny node list` に出すため。
-pub const GRAIN_CHUNK: &str = "@grain";
+/// launch そのものの presence トークン(`reiny/<domain>/<id>/@launch`)。publisher を 1 つも
+/// 持たない launch も `reiny node list` に出すため。
+pub const LAUNCH_CHUNK: &str = "@launch";
 /// descriptor を名乗る queryable のチャンク(`…/<T>/@schema/<message>`)。
 pub const SCHEMA_CHUNK: &str = "@schema";
 
@@ -70,10 +70,10 @@ pub const SCHEMA_CHUNK: &str = "@schema";
 pub struct Key {
     /// 論理名前空間。
     pub domain: String,
-    /// 送信元 grain id。`None` = 全部(`*`)。
+    /// 送信元 launch id。`None` = 全部(`*`)。
     pub source: Option<String>,
-    /// 型セグメント([`Topic::TYPE`](crate::Topic::TYPE))。`None` = 全部(`*`)。grain の
-    /// トークンは型の位置に verbatim の `@grain` を置く(`*` にはマッチしない)。
+    /// 型セグメント([`Topic::TYPE`](crate::Topic::TYPE))。`None` = 全部(`*`)。launch の
+    /// トークンは型の位置に verbatim の `@launch` を置く(`*` にはマッチしない)。
     pub ty: Option<String>,
     /// 型の後ろの verbatim チャンク(`@service` / `@schema/<message>`)。`*` にも `**` にも
     /// マッチしない —— 型のトピックを汚さないための隔離。パターンでも完全一致。
@@ -92,13 +92,13 @@ impl Key {
         }
     }
 
-    /// grain の presence トークン `reiny/<domain>/<id>/@grain`(`id: None` は全 grain)。
+    /// launch の presence トークン `reiny/<domain>/<id>/@launch`(`id: None` は全 launch)。
     #[must_use]
-    pub fn grain(domain: &str, id: Option<&str>) -> Self {
+    pub fn launch(domain: &str, id: Option<&str>) -> Self {
         Self {
             domain: domain.to_string(),
             source: id.map(str::to_string),
-            ty: Some(GRAIN_CHUNK.to_string()),
+            ty: Some(LAUNCH_CHUNK.to_string()),
             chunk: None,
         }
     }
@@ -114,7 +114,7 @@ impl Key {
         }
     }
 
-    /// 型の位置が verbatim(`@grain`)か。
+    /// 型の位置が verbatim(`@launch`)か。
     #[must_use]
     pub fn is_verbatim_type(&self) -> bool {
         self.ty.as_deref().is_some_and(|t| t.starts_with('@'))
@@ -149,7 +149,7 @@ impl Key {
     }
 
     /// `self` をパターンとして `key` がマッチするか。`None` のセグメントは `*` で、型の `*` は
-    /// verbatim(`@grain`)にマッチしない。chunk は完全一致。
+    /// verbatim(`@launch`)にマッチしない。chunk は完全一致。
     #[must_use]
     pub fn matches(&self, key: &Key) -> bool {
         let ty_ok = match (&self.ty, &key.ty) {
@@ -326,8 +326,8 @@ mod tests {
             "reiny/lab/ctrl/RobotState",
             "reiny/lab/*/RobotState",
             "reiny/lab/*/*",
-            "reiny/lab/ctrl/@grain",
-            "reiny/lab/*/@grain",
+            "reiny/lab/ctrl/@launch",
+            "reiny/lab/*/@launch",
             "reiny/lab/*/Add/@service",
             "reiny/lab/ctrl/RobotState/@schema/hs.RobotState",
         ] {
@@ -343,8 +343,8 @@ mod tests {
         );
         assert_eq!(Key::parse("reiny/lab/*/RobotState").unwrap().source, None);
         assert_eq!(
-            Key::parse("reiny/lab/ctrl/@grain").unwrap(),
-            Key::grain("lab", Some("ctrl"))
+            Key::parse("reiny/lab/ctrl/@launch").unwrap(),
+            Key::launch("lab", Some("ctrl"))
         );
         assert_eq!(
             Key::parse("reiny/lab/*/*/@service").unwrap(),
@@ -368,11 +368,11 @@ mod tests {
         assert!(!any.matches(&Key::topic("lab", Some("a"), "U")));
         assert!(!any.matches(&Key::topic("other", Some("a"), "T")));
         assert!(!any.matches(&Key::topic("lab", Some("a"), "T").with_chunk(SERVICE_CHUNK)));
-        assert!(Key::grain("lab", None).matches(&Key::grain("lab", Some("a"))));
+        assert!(Key::launch("lab", None).matches(&Key::launch("lab", Some("a"))));
         let all = Key::all("lab");
         assert_eq!(all.to_string(), "reiny/lab/*/*");
         assert!(all.matches(&Key::topic("lab", Some("a"), "T")));
-        assert!(!all.matches(&Key::grain("lab", Some("a"))), "verbatim");
+        assert!(!all.matches(&Key::launch("lab", Some("a"))), "verbatim");
         assert!(!all.matches(&Key::topic("lab", Some("a"), "T").with_chunk(SERVICE_CHUNK)));
         let services = all.with_chunk(SERVICE_CHUNK);
         assert!(services.matches(&Key::topic("lab", Some("a"), "T").with_chunk(SERVICE_CHUNK)));

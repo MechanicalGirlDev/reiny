@@ -6,7 +6,7 @@
 #
 #   reiny ping-pong.toml
 #
-[grain]
+[launch]
 pong-1 = { bin = "pong", on_exit = "respawn" }
 pong-2 = { bin = "pong", on_exit = "respawn" }
 pong-3 = { bin = "pong", on_exit = "respawn" }

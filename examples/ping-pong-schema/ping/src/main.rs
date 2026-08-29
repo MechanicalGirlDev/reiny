@@ -2,7 +2,7 @@
 //!
 //! 共有スキーマ版: 型は `[schema].crate`(pingpong-schema)が 1 度だけ生成したものを
 //! `crate::internals::*` として再エクスポートで受け取る(../ping-pong-workspace と書き味は
-//! 同じだが、この grain では proto を再コンパイルしない)。
+//! 同じだが、この launch では proto を再コンパイルしない)。
 
 use reiny::prelude::*;
 

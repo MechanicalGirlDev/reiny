@@ -1,6 +1,6 @@
 //! `reiny compress` — 動かすのに要るものだけを 1 ディレクトリに束ねる(ランチャ込みで完結)。
 //!
-//! launch config を辿り、到達可能な grain bin・実際にリンクしている共有ライブラリ・launch config・
+//! launch config を辿り、到達可能な launch bin・実際にリンクしている共有ライブラリ・launch config・
 //! **ランチャ reiny 本体**を `<out>/` に集める。`--launcher <name>` で reiny を `<name>` に
 //! リネームし、launch config も `<name>.toml` に揃えると、`./<name>` だけで起動できる。
 
@@ -40,17 +40,17 @@ pub(crate) fn compress(
     copy_file(config, &cfg_dst)?;
     println!("  config    {} -> {}", config.display(), cfg_dst.display());
 
-    // 3. 各 grain bin を集めつつ、リンクしている共有ライブラリを収集する。
+    // 3. 各 launch bin を集めつつ、リンクしている共有ライブラリを収集する。
     let cfg_dir = config_dir(config);
     let dirs = search_dirs(&cfg_dir, &plan, None, true);
     let mut libs: Vec<PathBuf> = Vec::new();
-    for g in &plan.grains {
+    for g in &plan.launches {
         let bin = find_bin(&dirs, &g.bin).ok_or_else(|| {
             anyhow::anyhow!("binary '{}' not found — run `reiny build` first", g.bin)
         })?;
         let dst = out.join(format!("{}{}", g.bin, std::env::consts::EXE_SUFFIX));
         copy_file(&bin, &dst)?;
-        println!("  grain     {} -> {}", bin.display(), dst.display());
+        println!("  launch     {} -> {}", bin.display(), dst.display());
         collect_libs(&bin, include_system, &mut libs);
     }
 

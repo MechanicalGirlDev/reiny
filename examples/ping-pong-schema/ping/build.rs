@@ -1,4 +1,4 @@
-//! 消費 grain の codegen。
+//! 消費 launch の codegen。
 //!
 //! `reiny_build::compile()` は上方の Reiny.toml を見つけ、このパッケージ名(`ping`)が
 //! `[schema].crate` ではなく `[projects.ping]` 側なので **消費モード**で動く: proto は

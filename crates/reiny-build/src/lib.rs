@@ -1,4 +1,4 @@
-//! reiny の build 補助。各 grain の `build.rs` から [`compile`] を呼ぶ。
+//! reiny の build 補助。各 launch の `build.rs` から [`compile`] を呼ぶ。
 //!
 //! `Reiny.toml` を読み、必要な proto を prost でコンパイルし、`$OUT_DIR/reiny_generated.rs` に
 //!
@@ -69,7 +69,7 @@ struct ServiceDef {
 /// `[schema]` の 2 形。`crate` はキーワードなので rename で受ける。
 ///
 /// - **単一形**(0.2)`[schema] crate = "myapp-schema"` —— `[internals]` 全部を 1 クレートが
-///   prost コンパイル + `impl Topic` し、grain は Cargo 依存として再エクスポートする。
+///   prost コンパイル + `impl Topic` し、launch は Cargo 依存として再エクスポートする。
 /// - **多クレート形**(0.3)`[schema.<name>] crate/protos/depends` —— スキーマを独立に公開可能な
 ///   複数クレートへ割る。所属は proto パスから決まり、リーフ型は `extern_path` で 1 度しか
 ///   生成されない。
@@ -225,17 +225,17 @@ impl Entry {
 pub enum Mode {
     /// per-project(`[project]`)。自分の publications + 依存先の公開型を生成する。
     PerProject,
-    /// workspace 共有(`[internals]`/`[projects]`、`[schema]` 無し)。各 grain が
+    /// workspace 共有(`[internals]`/`[projects]`、`[schema]` 無し)。各 launch が
     /// `[internals]` を自前で prost コンパイルする(従来どおり)。
     Workspace,
     /// workspace + `[schema]`。自分が **スキーマクレート本体**で、担当分を prost コンパイル +
-    /// `impl Topic` する。grain はこれを Cargo 依存として共有する。
+    /// `impl Topic` する。launch はこれを Cargo 依存として共有する。
     Schema {
         /// 多クレート形(`[schema.<name>]`)での担当区画名。単一 `[schema]` なら `None`
         /// (= `[internals]` 全部を持つ)。
         part: Option<String>,
     },
-    /// workspace + `[schema]`。自分はスキーマを **消費する grain**。proto は再コンパイルせず、
+    /// workspace + `[schema]`。自分はスキーマを **消費する launch**。proto は再コンパイルせず、
     /// スキーマクレート群の型を `internals` として再エクスポートするだけ。
     SchemaConsumer {
         /// 依存するスキーマクレートの extern ident(`myapp-schema` → `myapp_schema`)。
@@ -423,7 +423,7 @@ pub fn compile_with(customize: impl FnOnce(&mut prost_build::Config)) -> Result<
     let resolution = resolve_for(&manifest_dir, &pkg_name)?;
     report_verbose(&resolution);
 
-    // スキーマ消費 grain は proto を再コンパイルせず、スキーマクレート群を再エクスポートするだけ。
+    // スキーマ消費 launch は proto を再コンパイルせず、スキーマクレート群を再エクスポートするだけ。
     // それ以外は担当分の proto をコンパイルして完全な生成物を出す。
     let generated = if let Mode::SchemaConsumer { crate_idents } = &resolution.mode {
         render_consumer(crate_idents)
@@ -620,7 +620,7 @@ fn resolve_per_project(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
 
 /// workspace 共有: [internals] を全部 `internals::*` へ。トピックは型名から決まるので、
 /// どのプロジェクトが公開するかには依らない。`[schema]` があれば、自分がスキーマクレート本体か
-/// 消費 grain かでモードが分かれる。build.rs(`compile`)からパッケージ視点で呼ぶ。
+/// 消費 launch かでモードが分かれる。build.rs(`compile`)からパッケージ視点で呼ぶ。
 #[cfg(feature = "compile")]
 fn resolve_workspace(
     manifest: &Manifest,
@@ -646,7 +646,7 @@ fn resolve_workspace(
             part: mine.name.clone(),
         }
     } else if in_projects {
-        // 消費 grain は [projects.<pkg>] に居る必要がある。internals は全区画の和。
+        // 消費 launch は [projects.<pkg>] に居る必要がある。internals は全区画の和。
         Mode::SchemaConsumer {
             crate_idents: parts.iter().map(SchemaPart::crate_ident).collect(),
         }
@@ -1489,7 +1489,7 @@ fn service_impls(resolution: &Resolution, plan_entries: &[&Entry]) -> Vec<(Strin
         .collect()
 }
 
-/// スキーマ消費 grain 向けの薄い生成物。proto は再コンパイルせず、スキーマクレートの
+/// スキーマ消費 launch 向けの薄い生成物。proto は再コンパイルせず、スキーマクレートの
 /// `internals` をそのまま `crate::internals` として見せるだけ(`Topic`/`Message` impl は
 /// スキーマクレート側に 1 つだけあり、coherence でグローバルに効く)。
 #[cfg(feature = "compile")]

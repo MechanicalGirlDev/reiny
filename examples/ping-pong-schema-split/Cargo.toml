@@ -3,7 +3,7 @@
 #
 #   geometry/  … リーフ型(Point)だけを持つ。他に依存しない。
 #   msg/       … Ping/Pong を持ち、geometry の Point を参照する。
-#   ping/ pong/… grain。両方のスキーマクレートを Cargo 依存にして型を受け取る。
+#   ping/ pong/… launch。両方のスキーマクレートを Cargo 依存にして型を受け取る。
 #
 # 要点は「Point が 1 度しか生成されない」こと。msg は geometry の proto を import するので、
 # 素直にやると msg 側にも Point が生成されて別の型になってしまう。reiny-build は geometry が
@@ -23,7 +23,7 @@ authors = ["nop <noplab90@gmail.com>"]
 [workspace.dependencies]
 reiny = { path = "../../crates/reiny" }
 reiny-build = { path = "../../crates/reiny-build" }
-# スキーマクレート 2 つ。grain は両方を依存にする(internals はこの和になる)。
+# スキーマクレート 2 つ。launch は両方を依存にする(internals はこの和になる)。
 pingpong-geometry = { path = "geometry" }
 pingpong-msg = { path = "msg" }
 # prost は **スキーマクレートだけ**が要る(生成 prost 型を持つのはそちら)。

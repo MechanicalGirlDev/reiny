@@ -17,7 +17,7 @@ use clap::{Args, Subcommand};
 use reiny::zenoh::{self, Wait};
 
 use crate::bus::{
-    BusArgs, GRAIN_CHUNK, KEY_ROOT, KeyParts, SERVICE_CHUNK, alive_keys, attachment_u64,
+    BusArgs, KEY_ROOT, KeyParts, LAUNCH_CHUNK, SERVICE_CHUNK, alive_keys, attachment_u64,
     collect_schemas, key_source,
 };
 use crate::codec::{Codec, hex};
@@ -34,7 +34,7 @@ pub(crate) struct TopicArgs {
 
 #[derive(Subcommand)]
 enum TopicCommand {
-    /// 生きている型ごとに、publisher と server の grain id を並べる。
+    /// 生きている型ごとに、publisher と server の launch id を並べる。
     List(ListArgs),
     /// 1 型の受信レート(送信元ごと)。Ctrl+C か `--duration` で終了。
     Hz(RateArgs),
@@ -48,7 +48,7 @@ enum TopicCommand {
 struct EchoArgs {
     /// 型名(キーの型セグメント。例 `RobotState`)。
     ty: String,
-    /// この grain id からのものだけ。
+    /// この launch id からのものだけ。
     #[arg(long)]
     from: Option<String>,
     /// この件数で終了する。
@@ -74,7 +74,7 @@ struct ListArgs {
 struct RateArgs {
     /// 型名(キーの型セグメント。例 `RobotState`)。
     ty: String,
-    /// この grain id からのものだけを数える(既定は全 publisher、送信元ごとに集計)。
+    /// この launch id からのものだけを数える(既定は全 publisher、送信元ごとに集計)。
     #[arg(long)]
     from: Option<String>,
     /// 統計の窓(秒)。
@@ -476,11 +476,11 @@ pub(crate) struct NodeArgs {
 
 #[derive(Subcommand)]
 enum NodeCommand {
-    /// 生きている grain id を並べる。
+    /// 生きている launch id を並べる。
     List(ListArgs),
-    /// 1 grain が publish / serve している型。
+    /// 1 launch が publish / serve している型。
     Info {
-        /// grain id。
+        /// launch id。
         id: String,
         #[command(flatten)]
         bus: BusArgs,
@@ -497,9 +497,10 @@ pub(crate) fn run_node(args: NodeArgs) -> Result<()> {
 fn node_list(args: &ListArgs) -> Result<()> {
     let (session, domain) = args.bus.open()?;
     let mut ids: BTreeSet<String> = BTreeSet::new();
-    // 0.4 の grain は @grain を名乗る。0.3 の grain も publisher / server のトークンから拾う。
+    // 0.5 の launch は @launch を名乗る。それ以前(@grain / トークン無し)も
+    // publisher / server のトークンから拾う。
     for pattern in [
-        format!("{KEY_ROOT}/{domain}/*/{GRAIN_CHUNK}"),
+        format!("{KEY_ROOT}/{domain}/*/{LAUNCH_CHUNK}"),
         format!("{KEY_ROOT}/{domain}/*/*"),
         format!("{KEY_ROOT}/{domain}/*/*/{SERVICE_CHUNK}"),
     ] {
@@ -511,7 +512,7 @@ fn node_list(args: &ListArgs) -> Result<()> {
         }
     }
     if ids.is_empty() {
-        println!("(no live grains in domain {domain})");
+        println!("(no live launches in domain {domain})");
     }
     for id in ids {
         println!("{id}");
@@ -521,8 +522,11 @@ fn node_list(args: &ListArgs) -> Result<()> {
 
 fn node_info(id: &str, bus: &BusArgs) -> Result<()> {
     let (session, domain) = bus.open()?;
-    let alive =
-        !alive_keys(&session, &format!("{KEY_ROOT}/{domain}/{id}/{GRAIN_CHUNK}"))?.is_empty();
+    let alive = !alive_keys(
+        &session,
+        &format!("{KEY_ROOT}/{domain}/{id}/{LAUNCH_CHUNK}"),
+    )?
+    .is_empty();
     let pubs: Vec<String> = alive_keys(&session, &format!("{KEY_ROOT}/{domain}/{id}/*"))?
         .iter()
         .filter_map(|k| KeyParts::parse(k).map(|p| p.ty.to_string()))
@@ -543,7 +547,7 @@ fn node_info(id: &str, bus: &BusArgs) -> Result<()> {
         if alive {
             ""
         } else {
-            "  (no @grain token: pre-0.4 grain)"
+            "  (no @launch token: pre-0.5)"
         }
     );
     println!(

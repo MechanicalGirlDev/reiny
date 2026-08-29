@@ -1,4 +1,4 @@
-//! 走っている grain が `@schema` で名乗る descriptor から、payload ↔ JSON を組む。
+//! 走っている launch が `@schema` で名乗る descriptor から、payload ↔ JSON を組む。
 //!
 //! `reiny topic echo` / `reiny service call` の中身。`prost-reflect` を CLI に入れる唯一の場所 ——
 //! bag は「ファイルの動的 decode は `mcap cat --json` がやる」として締め出したが、**生きている

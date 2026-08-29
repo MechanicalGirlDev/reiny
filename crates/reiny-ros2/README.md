@@ -2,7 +2,7 @@
 
 A bridge library between [reiny](https://github.com/MechanicalGirlDev/reiny)
 and ROS 2, on pure-Rust DDS ([ros2-client](https://crates.io/crates/ros2-client))
-— no ROS installation, no `colcon`. You write a small bridge grain and say,
+— no ROS installation, no `colcon`. You write a small bridge launch and say,
 per type, how a reiny message becomes a ROS message and back:
 
 ```rust

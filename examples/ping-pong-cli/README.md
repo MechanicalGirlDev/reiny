@@ -40,12 +40,12 @@ ping-pong-cli/
 
 | コマンド | 相当 | 期待する挙動 |
 | --- | --- | --- |
-| `reiny new <path> --publish <T>` | `cargo new` | `<path>` を**新規作成**し、grain 雛形一式(`Cargo.toml` / `Reiny.toml` / `build.rs` / `proto/<t>.proto` / `src/main.rs`)を書き出す。`--publish` で公開型 `T` の proto・`[publications]`・publish 行まで用意。省略で sink 雛形。 |
+| `reiny new <path> --publish <T>` | `cargo new` | `<path>` を**新規作成**し、launch 雛形一式(`Cargo.toml` / `Reiny.toml` / `build.rs` / `proto/<t>.proto` / `src/main.rs`)を書き出す。`--publish` で公開型 `T` の proto・`[publications]`・publish 行まで用意。省略で sink 雛形。 |
 | `reiny init [path] --publish <T>` | `cargo init` | ディレクトリを作らず、**既存ディレクトリにその場で**雛形を足す。既存 `Cargo.toml` には reiny 依存と `build.rs` を**追記**し壊さない。`--name` 省略時はディレクトリ名を `[project].name` に。 |
-| `reiny add <path>` | `cargo add --path` | カレント grain の `Reiny.toml` `[dependencies]` に相手を追記。相手の公開型が `reiny::dependencies::<name>::<T>` として subscribe 可能になる。src は変えない。 |
+| `reiny add <path>` | `cargo add --path` | カレント launch の `Reiny.toml` `[dependencies]` に相手を追記。相手の公開型が `reiny::dependencies::<name>::<T>` として subscribe 可能になる。src は変えない。 |
 | `reiny build` | `cargo build` + codegen | `Reiny.toml` を読み、`[publications]` の proto → `reiny::publications::*`、`[dependencies]` → `reiny::dependencies::*` を生成して「型 → トピック」を埋め、bin をビルド。 |
-| `reiny run <launch.toml>` | (ランチャ) | launch config の `[grain]` 節を読み、`depends_on` 順に各 grain を子プロセス起動。`reiny <launch.toml>`(位置引数)/ 現状の `reiny --config <launch.toml>` も同義。 |
-| `reiny compress <launch.toml> --out <dir> [--launcher <name>]` | (配布) | launch config を辿り、**動かすのに要るものだけ**(到達可能な grain の bin + 実際にリンクしている `.so`/`.dll`/`.dylib` + launch config + **ランチャ reiny 本体**)を `<dir>/` に束ねる。`target/` 全体やシステムライブラリは入れない。**reiny ごと入るので `<dir>` 単体で完結**し、reiny 未インストールのマシンでもコピーするだけで動く。`--launcher <name>` で同梱する reiny を `<name>` にリネーム+`<name>.toml` に揃え、`./<name>` だけで起動できる(下記)。 |
+| `reiny run <launch.toml>` | (ランチャ) | launch config の `[launch]` 節を読み、`depends_on` 順に各 launch を子プロセス起動。`reiny <launch.toml>`(位置引数)/ 現状の `reiny --config <launch.toml>` も同義。 |
+| `reiny compress <launch.toml> --out <dir> [--launcher <name>]` | (配布) | launch config を辿り、**動かすのに要るものだけ**(到達可能な launch の bin + 実際にリンクしている `.so`/`.dll`/`.dylib` + launch config + **ランチャ reiny 本体**)を `<dir>/` に束ねる。`target/` 全体やシステムライブラリは入れない。**reiny ごと入るので `<dir>` 単体で完結**し、reiny 未インストールのマシンでもコピーするだけで動く。`--launcher <name>` で同梱する reiny を `<name>` にリネーム+`<name>.toml` に揃え、`./<name>` だけで起動できる(下記)。 |
 
 ## 手順(将来像)
 
@@ -77,10 +77,10 @@ chmod +x *.sh        # 初回のみ
 # → dist/
 #   ├── ping-pong        ← reiny をリネームして同梱(エントリポイント)
 #   ├── ping-pong.toml   ← ↑が自分の名前から自動で読む launch config
-#   ├── ping  pong       ← grain bin
+#   ├── ping  pong       ← launch bin
 #   └── lib/             ← 要る共有ライブラリだけ
 
-cd dist && ./ping-pong  # reiny 未インストールのマシンでも、これだけで全 grain 起動
+cd dist && ./ping-pong  # reiny 未インストールのマシンでも、これだけで全 launch 起動
 ```
 
 ### リネームしたランチャが「自分の名前」から config を読む
@@ -97,7 +97,7 @@ basename を見て、**同じディレクトリの `<basename>.toml`** を launc
 
 - basename が `reiny` のまま(リネームなし)のときは自動読みせず、従来通り
   `reiny run <launch.toml>` / `reiny <launch.toml>` を要求する。
-- grain bin は実行ファイルと同じディレクトリから探す(`--bin-dir` 既定)。
+- launch bin は実行ファイルと同じディレクトリから探す(`--bin-dir` 既定)。
 
 ### `new` と `init` の違いだけ覚える
 

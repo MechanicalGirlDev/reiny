@@ -1,4 +1,4 @@
-//! grain ランタイムの起動オプションと入口。
+//! launch ランタイムの起動オプションと入口。
 //!
 //! `#[reiny::main]` は [`RuntimeOptions::from_args`] → [`run_with`] を呼ぶだけなので、
 //! 自前でオプションを組めば同じ入口をライブラリとして使える。tokio runtime を自分で持つ
@@ -49,7 +49,7 @@ impl ZenohSource {
     }
 }
 
-/// grain ランタイムの起動オプション。
+/// launch ランタイムの起動オプション。
 pub struct RuntimeOptions {
     /// インスタンス id。キーの `<id>` セグメントになる。
     pub id: String,
@@ -67,7 +67,7 @@ pub struct RuntimeOptions {
     pub zenoh_overrides: Vec<(String, String)>,
     /// reiny が `tracing_subscriber` をグローバル登録するか。
     ///
-    /// 自前の subscriber(ログ収集レイヤなど)を持つ grain は `false` にする。`true` のまま
+    /// 自前の subscriber(ログ収集レイヤなど)を持つ launch は `false` にする。`true` のまま
     /// 先を越されると reiny 側は黙って何もしない(`try_init` は後勝ちしない)ため、
     /// 「reiny より先に入れる」順序依存を抱え込むことになる。
     pub install_tracing: bool,
@@ -105,8 +105,8 @@ impl RuntimeOptions {
     ///
     /// 解釈するのは `--id` / `--name` / `--log-level` / `--config` / `--domain` /
     /// `--zenoh-config` / `--connect` / `--zenoh-mode` だけ。**未知の引数はエラーにせず**
-    /// [`RuntimeOptions::extra_args`] へ落とす —— grain 固有の引数を reiny は知りようがなく、
-    /// 厳格化すると既存の grain が全部落ちる。タイポ検出は grain 側の引数パーサの仕事。
+    /// [`RuntimeOptions::extra_args`] へ落とす —— launch 固有の引数を reiny は知りようがなく、
+    /// 厳格化すると既存の launch が全部落ちる。タイポ検出は launch 側の引数パーサの仕事。
     /// zenoh 抜きのビルドでは zenoh 系の引数は警告して無視する。
     #[must_use]
     pub fn from_args(default_id: &str) -> Self {
@@ -150,7 +150,7 @@ impl RuntimeOptions {
                         let _ = value;
                         tracing::warn!(
                             arg,
-                            "ignored: this grain was built without the zenoh engine"
+                            "ignored: this launch was built without the zenoh engine"
                         );
                     }
                 }
@@ -173,7 +173,7 @@ impl RuntimeOptions {
 
     /// `zenoh` の出どころに `zenoh_overrides` を重ねた zenoh 設定を組む。
     ///
-    /// [`Cloudy::open`] がセッションを開く直前に通るのと同じ経路。grain ではないが grain と同じ
+    /// [`Cloudy::open`] がセッションを開く直前に通るのと同じ経路。launch ではないが launch と同じ
     /// fabric に乗りたいツール(`reiny bag` など)が、`--zenoh-config` / `--connect` の
     /// 解釈を写さずに済むための口。
     #[cfg(feature = "zenoh")]
@@ -218,14 +218,14 @@ impl Cloudy {
     /// オプションからエンジンを開き(または `opts.engine` を受け取り)、`Cloudy` を組む。
     ///
     /// tokio runtime の中で呼ぶ。シグナルは見ない —— `#[tokio::test]` の中で
-    /// [`crate::engine::Local`] を挿して grain を回す入口であり、bridge が 2 本目を開く入口。
+    /// [`crate::engine::Local`] を挿して launch を回す入口であり、bridge が 2 本目を開く入口。
     /// プロセスの入口は [`run_with`]。
     pub async fn open(mut opts: RuntimeOptions) -> Result<Self> {
         validate_segment("--id", &opts.id)?;
         validate_segment("--domain", &opts.domain)?;
         let config = load_config(opts.config_path.as_deref());
         let engine = opts.take_engine().await?;
-        tracing::info!(id = %opts.id, domain = %opts.domain, "reiny grain up");
+        tracing::info!(id = %opts.id, domain = %opts.domain, "reiny launch up");
         Self::new(
             engine,
             opts.id,
@@ -327,7 +327,7 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> RuntimeOptions {
-        RuntimeOptions::from_arg_list("grain", args.iter().map(|s| (*s).to_string()))
+        RuntimeOptions::from_arg_list("launch", args.iter().map(|s| (*s).to_string()))
     }
 
     #[test]

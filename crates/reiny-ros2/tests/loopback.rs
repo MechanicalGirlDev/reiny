@@ -157,7 +157,7 @@ async fn bridge_round_trips_with_a_ros_node() {
 
     let bus = Local::new();
     let cloudy = open(bus.clone(), "bridge").await;
-    let grain = open(bus, "g").await;
+    let launch = open(bus, "g").await;
 
     // --- ROS 役 ---
     let ros_ctx = loopback_context(domain_id);
@@ -254,10 +254,10 @@ async fn bridge_round_trips_with_a_ros_node() {
     )
     .unwrap();
 
-    // --- reiny 側の grain ---
-    let states = grain.publish::<State>().unwrap();
-    let mut cmds = grain.subscribe::<Cmd>().unwrap();
-    let mut add = grain.serve::<Add>().unwrap();
+    // --- reiny 側の launch ---
+    let states = launch.publish::<State>().unwrap();
+    let mut cmds = launch.subscribe::<Cmd>().unwrap();
+    let mut add = launch.serve::<Add>().unwrap();
     tokio::spawn(async move {
         while let Some(req) = add.recv().await {
             let sum = req.value.a + req.value.b;
@@ -301,7 +301,7 @@ async fn bridge_round_trips_with_a_ros_node() {
 
     // reiny の caller → ROS の service。bridge の DDS client が ROS の server を見つけるまでは
     // request が消えるので、短い期限で撃ち直す。
-    let caller = grain
+    let caller = launch
         .caller::<Echo>()
         .timeout(Duration::from_secs(2))
         .build();

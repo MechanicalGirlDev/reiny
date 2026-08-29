@@ -1,7 +1,7 @@
 //! `reiny bridge serial|udp|iceoryx2` —— zenoh と別エンジンの間に raw bridge を 1 本立てる。
 //!
 //! zenoh の `Cloudy` と、もう 1 つのエンジン(リンク / iceoryx2)の `Cloudy` を同じ id / domain
-//! で組み、`reiny::bridge::forward` に渡す。MCU や iceoryx2 の grain が `reiny node list` /
+//! で組み、`reiny::bridge::forward` に渡す。MCU や iceoryx2 の launch が `reiny node list` /
 //! `topic hz` / `bag record` にそのまま出るのはこれのおかげ。CLI 自体は zenoh のまま。
 //!
 //! 唯一 tokio が要るサブコマンド(`Cloudy::open` と `Host` が async)。
@@ -22,7 +22,7 @@ use crate::bus::BusArgs;
 pub(crate) struct BridgeArgs {
     #[command(flatten)]
     bus: BusArgs,
-    /// bridge の grain id(両側の `@grain` に立つ)。
+    /// bridge の launch id(両側の `@launch` に立つ)。
     #[arg(long, default_value = "bridge")]
     id: String,
     #[command(subcommand)]

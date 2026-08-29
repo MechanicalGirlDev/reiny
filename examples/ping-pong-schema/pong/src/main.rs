@@ -1,7 +1,7 @@
 //! pong — Ping を受け取るたびに、同じ seq の Pong を返す。
 //!
 //! 共有スキーマ版: 型は `[schema].crate`(pingpong-schema)が 1 度だけ生成したものを
-//! `crate::internals::*` として再エクスポートで受け取る(この grain では proto を再コンパイル
+//! `crate::internals::*` として再エクスポートで受け取る(この launch では proto を再コンパイル
 //! しない)。
 
 use reiny::prelude::*;

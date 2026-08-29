@@ -1,7 +1,7 @@
 # reiny-build
 
 Build-time code generation helper for
-[reiny](https://github.com/MechanicalGirlDev/reiny). Call it from each grain's
+[reiny](https://github.com/MechanicalGirlDev/reiny). Call it from each launch's
 `build.rs`.
 
 ```rust,ignore

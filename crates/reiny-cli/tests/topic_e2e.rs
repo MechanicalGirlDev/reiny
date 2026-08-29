@@ -1,7 +1,7 @@
 //! `reiny topic / node / service` の通し試験 —— 本物の zenoh fabric に対して、ビルド済み
 //! `reiny` バイナリで list / hz / echo / node / service call を回す。
 //!
-//! `bag_e2e` と同じ流儀: テスト側が「grain 役」の zenoh セッションを 1 本張り、publisher /
+//! `bag_e2e` と同じ流儀: テスト側が「launch 役」の zenoh セッションを 1 本張り、publisher /
 //! presence / `@schema` / service の queryable を素の zenoh で演じる。descriptor は
 //! `prost-types` で手組みする(protoc 無し)。ループバック TCP 固定ポート・マルチキャスト off。
 
@@ -142,18 +142,18 @@ fn schema_queryable(fab: &zenoh::Session, key: &str, fqn: &str) -> zenoh::query:
 
 #[test]
 #[allow(clippy::too_many_lines)] // 1 本で通す(ポートを増やさない)ので長い。
-fn topic_node_service_against_live_grain() {
+fn topic_node_service_against_live_launch() {
     let fab = fabric();
     let fp = reiny_build::message_fingerprint(&file_set(), "e2e.Probe")
         .unwrap()
         .unwrap();
 
-    // --- grain 役 ctrl: @grain、Probe の publisher + presence + @schema ---
-    let _grain = fab
+    // --- launch 役 ctrl: @launch、Probe の publisher + presence + @schema ---
+    let _launch = fab
         .liveliness()
-        .declare_token("reiny/lab/ctrl/@grain")
+        .declare_token("reiny/lab/ctrl/@launch")
         .wait()
-        .expect("grain token");
+        .expect("launch token");
     let probe_key = "reiny/lab/ctrl/Probe";
     let probe_pub = Arc::new(fab.declare_publisher(probe_key).wait().expect("probe pub"));
     let _probe_token = fab

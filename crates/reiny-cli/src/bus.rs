@@ -1,6 +1,6 @@
 //! `reiny bag` / `reiny topic` / `reiny node` / `reiny service` が共有する、バスの語彙。
 //!
-//! キーの形(`reiny/<domain>/<id>/<TYPE>` と脇道 `@schema` / `@service` / `@grain`)、grain と
+//! キーの形(`reiny/<domain>/<id>/<TYPE>` と脇道 `@schema` / `@service` / `@launch`)、launch と
 //! 同じ経路でのセッション構築、走っている publisher / server が名乗る descriptor の収集。
 //! ここに置くのは「reiny / zenoh の約束事を知らないと書けない」部分だけで、統計や表示は
 //! 各サブコマンド側にある。
@@ -19,9 +19,9 @@ use reiny::{RuntimeOptions, ZenohSource};
 pub(crate) const KEY_ROOT: &str = "reiny";
 pub(crate) const SCHEMA_CHUNK: &str = "@schema";
 pub(crate) const SERVICE_CHUNK: &str = "@service";
-pub(crate) const GRAIN_CHUNK: &str = "@grain";
+pub(crate) const LAUNCH_CHUNK: &str = "@launch";
 
-/// grain と同じ綴りの fabric 引数。全サブコマンドで共通。
+/// launch と同じ綴りの fabric 引数。全サブコマンドで共通。
 #[derive(Args, Clone)]
 pub(crate) struct BusArgs {
     /// 論理名前空間(既定: `--domain` > `REINY_DOMAIN` > "default")。
@@ -39,8 +39,8 @@ pub(crate) struct BusArgs {
 }
 
 impl BusArgs {
-    /// fabric 引数を grain と同じ `RuntimeOptions` に写す(既定値・`REINY_DOMAIN`・`--connect`
-    /// の json5 化が grain と同じ経路になる)。tracing は CLI 側で入れるので off。
+    /// fabric 引数を launch と同じ `RuntimeOptions` に写す(既定値・`REINY_DOMAIN`・`--connect`
+    /// の json5 化が launch と同じ経路になる)。tracing は CLI 側で入れるので off。
     pub(crate) fn runtime_options(&self, id: &str) -> RuntimeOptions {
         let mut opts = RuntimeOptions::new(id);
         opts.install_tracing = false;
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn key_source_is_third_segment() {
         assert_eq!(key_source("reiny/lab/ctrl/RobotState"), "ctrl");
-        assert_eq!(key_source("reiny/lab/ctrl/@grain"), "ctrl");
+        assert_eq!(key_source("reiny/lab/ctrl/@launch"), "ctrl");
         assert_eq!(key_source("reiny"), "");
     }
 }

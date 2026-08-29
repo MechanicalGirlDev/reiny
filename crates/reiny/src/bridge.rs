@@ -3,8 +3,8 @@
 //! [`forward`] は同じ id / domain の 2 つの [`Cloudy`] —— `a` と `b`、2 本目は
 //! [`Cloudy::with_engine`] で組む —— を受け、両方向に:
 //!
-//! - **presence**: A に立った publisher / service / grain のトークンを、**同じキー(source も
-//!   同じ)**で B に立てる。B から見ると A の grain がそのまま居る。
+//! - **presence**: A に立った publisher / service / launch のトークンを、**同じキー(source も
+//!   同じ)**で B に立てる。B から見ると A の launch がそのまま居る。
 //! - **sample**: トークンが見えた型を A で購読し、B に同じキーで publish する(attachment =
 //!   指紋もそのまま)。
 //! - **query**: B に写したトークンごとに B で responder を立て、届いた query を A の**その
@@ -141,7 +141,7 @@ impl Flow {
         for pattern in [
             Key::all(&domain),
             Key::all(&domain).with_chunk(SERVICE_CHUNK),
-            Key::grain(&domain, None),
+            Key::launch(&domain, None),
         ] {
             let tx = ops.clone();
             watchers.push(from.engine().watch_alive(
@@ -232,7 +232,7 @@ impl Flow {
             ..key.clone()
         };
         if key.is_verbatim_type() {
-            return; // @grain: トークンだけ
+            return; // @launch: トークンだけ
         }
         if key.chunk.is_none() {
             // publisher トークン: その型を from で購読する(初めての型なら)。
@@ -430,13 +430,13 @@ mod tests {
             Some(PresenceEvent::Joined("a1".to_string()))
         );
         assert_eq!(b1.publishers::<Probe>().await.expect("publishers"), ["a1"]);
-        // 自分の grain も B に写っている。
-        let grains = bridge_b
+        // 自分の launch も B に写っている。
+        let launches = bridge_b
             .engine()
-            .alive(&Key::grain(DOMAIN, None), PATIENCE)
+            .alive(&Key::launch(DOMAIN, None), PATIENCE)
             .await
             .expect("alive");
-        assert!(grains.iter().any(|k| k.source.as_deref() == Some("a1")));
+        assert!(launches.iter().any(|k| k.source.as_deref() == Some("a1")));
 
         let mut plain = b1.subscribe::<Probe>().expect("subscriber");
         tokio::time::sleep(SETTLE).await;

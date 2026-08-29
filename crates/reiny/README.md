@@ -1,6 +1,6 @@
 # reiny
 
-The core of the [reiny](https://github.com/MechanicalGirlDev/reiny) SDK. Grains
+The core of the [reiny](https://github.com/MechanicalGirlDev/reiny) SDK. Launches
 publish and subscribe over Zenoh **just by passing a type**. The type → topic
 mapping is generated at build time by `reiny-build`, which implements `Topic`
 for each type to embed the topic string.
@@ -21,6 +21,6 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
 `#[reiny::main]` is re-exported from
 [`reiny-macros`](https://crates.io/crates/reiny-macros). Build-time code
 generation is done by [`reiny-build`](https://crates.io/crates/reiny-build),
-called from each grain's `build.rs`.
+called from each launch's `build.rs`.
 
 License: MIT

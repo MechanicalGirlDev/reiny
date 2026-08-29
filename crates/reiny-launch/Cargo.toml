@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
-description = "reiny launcher: spawn grain processes from a launch config's [grain] section"
+description = "reiny launcher: spawn launch processes from a launch config's [launch] section"
 keywords = ["reiny", "launcher", "process", "supervisor"]
 categories = ["development-tools", "command-line-utilities"]
 

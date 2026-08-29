@@ -1,4 +1,4 @@
-//! `reiny` — grain 雛形生成(`new`/`init`/`add`)・`build`・`run`・`compress` を束ねる CLI。
+//! `reiny` — launch 雛形生成(`new`/`init`/`add`)・`build`・`run`・`compress` を束ねる CLI。
 //!
 //! 後方互換: `reiny --config <launch.toml>` と `reiny <launch.toml>`(位置引数)は
 //! `reiny run <launch.toml>` と同義。さらに自分の実行ファイル名が `reiny` 以外(= `compress
@@ -26,7 +26,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "reiny",
     version,
-    about = "reiny grain CLI: new / init / add / check / build / run / compress / bag / topic / node / service / bridge"
+    about = "reiny launch CLI: new / init / add / check / build / run / compress / bag / topic / node / service / bridge"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -35,7 +35,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// 新規ディレクトリに grain 雛形を作る(cargo new 相当)。
+    /// 新規ディレクトリに launch 雛形を作る(cargo new 相当)。
     New {
         /// 作成するプロジェクトのパス。
         path: PathBuf,
@@ -46,7 +46,7 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
     },
-    /// 既存ディレクトリにその場で grain 雛形を足す(cargo init 相当)。
+    /// 既存ディレクトリにその場で launch 雛形を足す(cargo init 相当)。
     Init {
         /// 対象ディレクトリ(省略時はカレント)。
         path: Option<PathBuf>,
@@ -57,7 +57,7 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
     },
-    /// カレント grain の Reiny.toml [dependencies] に相手を追記する(cargo add --path 相当)。
+    /// カレント launch の Reiny.toml [dependencies] に相手を追記する(cargo add --path 相当)。
     Add {
         /// 依存先プロジェクトへのパス。
         path: PathBuf,
@@ -76,18 +76,18 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// launch config から grain 群をまとめて起動する。
+    /// launch config から launch 群をまとめて起動する。
     Run {
-        /// launch config(`[grain]` 節)へのパス。
+        /// launch config(`[launch]` 節)へのパス。
         config: PathBuf,
-        /// grain bin を探すディレクトリ(既定は launch config 基準で自動探索)。
+        /// launch bin を探すディレクトリ(既定は launch config 基準で自動探索)。
         #[arg(long)]
         bin_dir: Option<PathBuf>,
         /// ランチャ既定のログレベル。
         #[arg(long, default_value = "info")]
         log_level: String,
     },
-    /// 動かすのに要るものだけ(grain + 依存ライブラリ + config + ランチャ)を 1 ディレクトリへ束ねる。
+    /// 動かすのに要るものだけ(launch + 依存ライブラリ + config + ランチャ)を 1 ディレクトリへ束ねる。
     Compress {
         /// launch config へのパス。
         config: PathBuf,
@@ -105,7 +105,7 @@ enum Command {
     Bag(bagcmd::BagArgs),
     /// 生きている型の一覧・受信レート・帯域(`ros2 topic` 相当)。
     Topic(topiccmd::TopicArgs),
-    /// 生きている grain の一覧・詳細(`ros2 node` 相当)。
+    /// 生きている launch の一覧・詳細(`ros2 node` 相当)。
     Node(topiccmd::NodeArgs),
     /// 生きている service の一覧・JSON での呼び出し(`ros2 service` 相当)。
     Service(servicecmd::ServiceArgs),

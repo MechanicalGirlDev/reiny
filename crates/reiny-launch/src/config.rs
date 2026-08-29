@@ -1,64 +1,64 @@
-//! launch config の `[grain]` テーブル — reiny ランチャの唯一のエントリポイント。
+//! launch config の `[launch]` テーブル — reiny ランチャの唯一のエントリポイント。
 //!
 //! Cargo の `[dependencies]` と同じ書式で、各値は
 //!
-//! - **文字列** = grain config ファイルパスのショートハンド
+//! - **文字列** = launch 固有 config ファイルパスのショートハンド
 //!   (`gui = "configs/gui.toml"` ≡ `gui = { config = "configs/gui.toml" }`)、または
 //! - **インラインテーブル** = launch override 付きの詳細形
 //!   (`monitor = { bin = "...", on_exit = "respawn" }`)。
 //!
 //! `HumanoidSystem` の `[component]` と違い、**既知種別(control/gui/policy/physics)も
-//! プラグインという区別も無い**。すべてのキーは対等な「grain」で、キー名 = インスタンス名 =
-//! 既定 bin 名。ランチャは各 grain を同一ワークスペースの子プロセスとして起動する。
+//! プラグインという区別も無い**。すべてのキーは対等な「launch」で、キー名 = インスタンス名 =
+//! 既定 bin 名。ランチャは各 launch を同一ワークスペースの子プロセスとして起動する。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-/// grain がプロセス終了したときの振る舞い(ランチャが解釈)。
+/// launch がプロセス終了したときの振る舞い(ランチャが解釈)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OnExit {
-    /// 落ちても記録のみで他は継続する(既定。grain は対等なので privileged な
-    /// `control` のような全体停止既定は持たない)。全 grain が終了したらランチャも終わる。
+    /// 落ちても記録のみで他は継続する(既定。launch は対等なので privileged な
+    /// `control` のような全体停止既定は持たない)。全 launch が終了したらランチャも終わる。
     #[default]
     Ignore,
-    /// 落ちたら同じ grain を再起動する。
+    /// 落ちたら同じ launch を再起動する。
     Respawn,
     /// 1つでも落ちたら全体を停止する。
     ShutdownAll,
 }
 
-/// launch config のルート。`[grain]` テーブルと、その全体に効く既定値。
+/// launch config のルート。`[launch]` テーブルと、その全体に効く既定値。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct LaunchConfig {
     /// この launch 全体の論理名前空間(`--domain`)。同じ LAN / マシン上の別の launch と
     /// 混ざらなくなる —— 実機とログ再生、ロボット 2 体、CI の並列ジョブが同じ理由で救われる。
-    /// grain 側の `domain` が指定されていればそちらが勝つ。
+    /// launch 側の `domain` が指定されていればそちらが勝つ。
     pub domain: Option<String>,
-    /// 起動する grain 群。キー = インスタンス名 = 既定 bin 名。`BTreeMap` でキー順を
+    /// 起動する launch 群。キー = インスタンス名 = 既定 bin 名。`BTreeMap` でキー順を
     /// 決定的にし、起動順(依存が無いとき)を安定させる。
     #[serde(default)]
-    pub grain: BTreeMap<String, GrainSpec>,
+    pub launch: BTreeMap<String, LaunchSpec>,
 }
 
-/// 1 grain の宣言。Cargo 依存と同じく、文字列(config パスのショートハンド)
+/// 1 launch の宣言。Cargo 依存と同じく、文字列(config パスのショートハンド)
 /// またはインラインテーブル(launch override 付き)。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
-pub enum GrainSpec {
+pub enum LaunchSpec {
     /// ショートハンド: config ファイルパスのみ(= `{ config = "..." }`)。
     Config(PathBuf),
     /// 詳細形: launch override を伴う。
-    Detailed(GrainEntry),
+    Detailed(LaunchEntry),
 }
 
-/// `GrainSpec` の詳細形フィールド(全て任意)。
+/// `LaunchSpec` の詳細形フィールド(全て任意)。
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
-pub struct GrainEntry {
-    /// grain 固有 config ファイルへの、launch config ディレクトリ基準のパス。
+pub struct LaunchEntry {
+    /// launch 固有 config ファイルへの、launch config ディレクトリ基準のパス。
     /// 指定すると起動引数に `--config <abs>` を付与する。
     pub config: Option<PathBuf>,
     /// 起動 bin 名の override(未指定はキー名)。
@@ -72,17 +72,17 @@ pub struct GrainEntry {
     /// ログレベルの override。
     pub log_level: Option<String>,
     /// 論理名前空間の override(未指定は launch config の `domain`)。
-    /// 別 domain の grain 同士は通信しないので、通常は launch 全体で揃える。
+    /// 別 domain の launch 同士は通信しないので、通常は launch 全体で揃える。
     pub domain: Option<String>,
     /// zenoh セッション設定ファイル(JSON5)への、launch config ディレクトリ基準のパス。
     /// 指定すると起動引数に `--zenoh-config <abs>` を付与する。
     pub zenoh_config: Option<PathBuf>,
-    /// false で当該 grain を起動対象から外す(既定 true)。
+    /// false で当該 launch を起動対象から外す(既定 true)。
     pub enabled: Option<bool>,
 }
 
-impl GrainSpec {
-    /// grain config ファイルへのパス(launch config dir 基準)。
+impl LaunchSpec {
+    /// launch 固有 config ファイルへのパス(launch config dir 基準)。
     #[must_use]
     pub fn config(&self) -> Option<&Path> {
         match self {
@@ -177,11 +177,11 @@ mod tests {
     fn shorthand_string_is_config_path() {
         let c = config(
             r#"
-            [grain]
+            [launch]
             gui = "configs/gui.toml"
         "#,
         );
-        let g = &c.grain["gui"];
+        let g = &c.launch["gui"];
         assert_eq!(g.config(), Some(Path::new("configs/gui.toml")));
         assert_eq!(g.bin(), None);
         assert_eq!(g.on_exit(), OnExit::Ignore);
@@ -193,11 +193,11 @@ mod tests {
     fn detailed_form_overrides() {
         let c = config(
             r#"
-            [grain]
+            [launch]
             monitor = { bin = "reiny-monitor", on_exit = "respawn", depends_on = ["gui"], args = ["--fast"] }
         "#,
         );
-        let g = &c.grain["monitor"];
+        let g = &c.launch["monitor"];
         assert_eq!(g.bin(), Some("reiny-monitor"));
         assert_eq!(g.on_exit(), OnExit::Respawn);
         assert_eq!(g.depends_on(), ["gui".to_string()]);
@@ -210,29 +210,29 @@ mod tests {
             r#"
             domain = "lab"
 
-            [grain]
+            [launch]
             gui = { config = "configs/gui.toml", zenoh_config = "z.json5" }
             solo = { bin = "solo", domain = "other" }
         "#,
         );
         assert_eq!(c.domain.as_deref(), Some("lab"));
-        assert_eq!(c.grain["gui"].zenoh_config(), Some(Path::new("z.json5")));
+        assert_eq!(c.launch["gui"].zenoh_config(), Some(Path::new("z.json5")));
         assert_eq!(
-            c.grain["gui"].domain(),
+            c.launch["gui"].domain(),
             None,
-            "grain 未指定なら launch 既定に委ねる"
+            "エントリ未指定なら launch 既定に委ねる"
         );
-        assert_eq!(c.grain["solo"].domain(), Some("other"));
+        assert_eq!(c.launch["solo"].domain(), Some("other"));
     }
 
     #[test]
     fn disabled_flag_parses() {
         let c = config(
             r#"
-            [grain]
+            [launch]
             gui = { config = "configs/gui.toml", enabled = false }
         "#,
         );
-        assert!(!c.grain["gui"].enabled());
+        assert!(!c.launch["gui"].enabled());
     }
 }

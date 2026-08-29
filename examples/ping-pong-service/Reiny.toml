@@ -1,7 +1,7 @@
 # Reiny.toml — ワークスペース共有の reiny マニフェスト(../ping-pong-workspace と同じ配置)に
 # `[services]` を足したもの。
 #
-# service は **request 型がサービスの住所**: `Add` を serve する grain は
+# service は **request 型がサービスの住所**: `Add` を serve する launch は
 # `reiny/<domain>/<id>/Add` に queryable を置き、`call::<Add>(…)` は `reiny/<domain>/*/Add` へ
 # 撃って `Sum` を受け取る。`[services]` は「どの request 型にどの response 型が対応するか」
 # (= `impl reiny::Service for Add { type Response = Sum; }`)を生成させるだけで、トピックは

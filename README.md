@@ -3,17 +3,17 @@
 This project is reiny.
 The way the data flows is just like rain.
 
-reiny is a Rust SDK for distributed "grains" (processes) that communicate over
+reiny is a Rust SDK for distributed "launches" (processes) that communicate over
 [Zenoh](https://zenoh.io) pub/sub. The organizing principle is **type = topic**:
-grains publish and subscribe by **Rust type**, never by topic string.
+launches publish and subscribe by **Rust type**, never by topic string.
 
 - Publishing type `T` goes to `reiny/<domain>/<id>/T`
 - Subscribing to type `T` receives `reiny/<domain>/*/T` (the same type from every publisher)
 
 The type → topic mapping is generated at build time by `reiny-build` (each
-grain's `build.rs`) from a `Reiny.toml`, so user code never names a topic string.
+launch's `build.rs`) from a `Reiny.toml`, so user code never names a topic string.
 `<domain>` is a logical namespace (`--domain` / `REINY_DOMAIN`, default
-`"default"`): grains in different domains never see each other, even on one LAN.
+`"default"`): launches in different domains never see each other, even on one LAN.
 
 ```rust,ignore
 use reiny::prelude::*;
@@ -50,22 +50,22 @@ zenoh major bump is a reiny breaking change.
 | --- | --- |
 | [`reiny`](crates/reiny) | The SDK itself: `Cloudy` (the pub/sub handle) and the `#[reiny::main]` runtime |
 | [`reiny-core`](crates/reiny-core) | The type vocabulary (`Topic` / `Service` / `Descriptor` / `Qos`), `no_std`; re-exported by `reiny`, used directly by MCU firmware |
-| [`reiny-iceoryx2`](crates/reiny-iceoryx2) | `Engine` on iceoryx2 — grains on one host over shared memory (needs libclang to build on Windows / macOS; not in `default-members`) |
-| [`reiny-ros2`](crates/reiny-ros2) | ROS 2 bridge library on pure-Rust DDS (`ros2-client`): typed `export` / `import` of topics and services from a bridge grain, no ROS install |
+| [`reiny-iceoryx2`](crates/reiny-iceoryx2) | `Engine` on iceoryx2 — launches on one host over shared memory (needs libclang to build on Windows / macOS; not in `default-members`) |
+| [`reiny-ros2`](crates/reiny-ros2) | ROS 2 bridge library on pure-Rust DDS (`ros2-client`): typed `export` / `import` of topics and services from a bridge launch, no ROS install |
 | [`reiny-link`](crates/reiny-link) | reiny over anything that moves bytes: a `no_std` sans-I/O `Link` plus host-side serial / UDP transports, a tokio `Host`, and `LinkEngine` to put a `Cloudy` on the link |
 | [`reiny-macros`](crates/reiny-macros) | The `#[reiny::main]` proc-macro (used via `reiny`) |
 | [`reiny-build`](crates/reiny-build) | `build.rs` helper: compiles protos from `Reiny.toml` and generates types/topics |
-| [`reiny-launch`](crates/reiny-launch) | Launcher library: spawns grain processes from a launch config's `[grain]` section |
+| [`reiny-launch`](crates/reiny-launch) | Launcher library: spawns launch processes from a launch config's `[launch]` section |
 | [`reiny-cli`](crates/reiny-cli) | The `reiny` command: scaffold (new/init/add), check, build, run, compress, bag, topic / node / service introspection, `bridge serial\|udp\|iceoryx2` |
 
 ## Getting started
 
-Use the `reiny` CLI to scaffold a grain project.
+Use the `reiny` CLI to scaffold a launch project.
 
 ```sh
 cargo install reiny-cli   # installs the `reiny` command
-reiny new my-grain
-reiny check my-grain       # show the type → topic map (no build)
+reiny new my-launch
+reiny check my-launch       # show the type → topic map (no build)
 ```
 
 Record and replay the bus, `ros2 bag`-style (format is [MCAP](https://mcap.dev),
@@ -83,17 +83,17 @@ Design and the split of what reiny records vs. what the `mcap` CLI is left to do
 Look at a live bus, `ros2 topic / node / service`-style:
 
 ```sh
-reiny node list                       # live grain ids
+reiny node list                       # live launch ids
 reiny topic list                      # type → publishers / servers
 reiny topic hz RobotState             # rate per source (Ctrl+C to stop)
-reiny topic echo RobotState --count 3 # JSON, decoded from the schema the grain serves
+reiny topic echo RobotState --count 3 # JSON, decoded from the schema the launch serves
 reiny service call CalibrationCommand '{"start":{}}' --to hs-control
 ```
 
 See [`examples/`](examples) for runnable demos (each is its own cargo workspace).
 For larger workspaces, [`examples/ping-pong-schema`](examples/ping-pong-schema)
 shows the `[schema]` shared-schema crate that compiles the message catalog once
-instead of per grain, and
+instead of per launch, and
 [`examples/ping-pong-schema-split`](examples/ping-pong-schema-split) splits that
 catalog across several independently publishable schema crates without
 generating shared leaf types twice.

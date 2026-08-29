@@ -1,4 +1,4 @@
-//! `reiny new` / `reiny init` / `reiny add` — grain 雛形の生成と依存配線。
+//! `reiny new` / `reiny init` / `reiny add` — launch 雛形の生成と依存配線。
 //!
 //! `new` と `init` の違いはディレクトリを新規に作るかどうかだけで、生成する中身
 //! (`Cargo.toml` / `Reiny.toml` / `build.rs` / `proto/` / `src/main.rs`)は同じ。
@@ -20,7 +20,7 @@ pub(crate) fn new(path: &Path, publish: Option<&str>, name: Option<&str>) -> Res
     std::fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
     scaffold(path, publish, name)?;
     println!(
-        "created grain '{}' at {}",
+        "created launch '{}' at {}",
         project_name(path, name)?,
         path.display()
     );
@@ -36,7 +36,7 @@ pub(crate) fn init(path: Option<&Path>, publish: Option<&str>, name: Option<&str
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     scaffold(&dir, publish, name)?;
     println!(
-        "initialized grain '{}' in {}",
+        "initialized launch '{}' in {}",
         project_name(&dir, name)?,
         dir.display()
     );
@@ -65,13 +65,13 @@ fn scaffold(dir: &Path, publish: Option<&str>, name: Option<&str>) -> Result<()>
     Ok(())
 }
 
-/// `reiny add <path>`。カレント grain の `Reiny.toml` の `[dependencies]` に相手を追記する。
+/// `reiny add <path>`。カレント launch の `Reiny.toml` の `[dependencies]` に相手を追記する。
 pub(crate) fn add(dep_path: &Path) -> Result<()> {
     let cwd = std::env::current_dir().context("resolving current dir")?;
     let my_manifest = cwd.join("Reiny.toml");
     if !my_manifest.is_file() {
         bail!(
-            "no Reiny.toml in {} — run this inside a grain project",
+            "no Reiny.toml in {} — run this inside a launch project",
             cwd.display()
         );
     }
@@ -341,7 +341,7 @@ fn main_rs(publish: Option<&str>) -> String {
         Some(ty) => {
             let lower = ty.to_lowercase();
             format!(
-                "//! {lower} — 公開型 `{ty}` を一定間隔で流す grain。\n\
+                "//! {lower} — 公開型 `{ty}` を一定間隔で流す launch。\n\
                  //!\n\
                  //! 他プロジェクトの型を購読するには `reiny add <path>` で依存を足し、\n\
                  //! `cloudy.subscribe::<T>()` をこの main に書き足す。\n\

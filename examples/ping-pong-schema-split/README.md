@@ -6,7 +6,7 @@
 ```
 proto/geometry/geometry.proto   →  pingpong-geometry   (Point)
 proto/msg/pingpong.proto        →  pingpong-msg        (Ping / Pong、Point を参照)
-ping/ pong/                     →  grain(両方を Cargo 依存にする)
+ping/ pong/                     →  launch(両方を Cargo 依存にする)
 ```
 
 ## 何が難しくて、reiny が何をしているか

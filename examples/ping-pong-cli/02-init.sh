@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 02-init.sh — `reiny init` で「既存ディレクトリ」を grain プロジェクトにする。
+# 02-init.sh — `reiny init` で「既存ディレクトリ」を launch プロジェクトにする。
 #
 # `reiny init [path] --publish <Type>` は cargo init 相当。ディレクトリを新規作成
 # せず、いまある(空でも、既存 Cargo プロジェクトでも)ディレクトリにその場で
@@ -23,5 +23,5 @@ mkdir -p pong
 ( cd pong && reiny init --publish Pong )
 
 echo
-echo "    pong/ が grain プロジェクトになった(publications = Pong)。"
+echo "    pong/ が launch プロジェクトになった(publications = Pong)。"
 echo "    次は 03-add.sh(ping ↔ pong の購読を配線)。"

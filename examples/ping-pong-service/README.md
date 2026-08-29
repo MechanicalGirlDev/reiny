@@ -5,7 +5,7 @@ reiny 0.4.0 の **型付き request/response(service)** を示すサンプル。
 `Reiny.toml` に `[services]` を 1 節足しただけ。
 
 > **service は request 型がサービスの住所。** ROS 2 の service が名前(`/add`)で
-> アドレスするところを、reiny は型でアドレスする —— `Add` を serve する grain は
+> アドレスするところを、reiny は型でアドレスする —— `Add` を serve する launch は
 > `reiny/<domain>/<id>/Add` に queryable を置き、`call::<Add>(…)` は `reiny/<domain>/*/Add` へ
 > 撃って `Sum` を受け取る。トピック文字列は相変わらず出てこない。
 

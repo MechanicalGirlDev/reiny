@@ -2,7 +2,7 @@
 //! (`docs/design/0.5.0.md` §4)。
 //!
 //! ROS 2 は `.msg` で型付けされるので protobuf の生バイトを流しても `RViz` は読めない。だから
-//! 利用側が bridge grain を書き、型ごとにクロージャで変換する:
+//! 利用側が bridge launch を書き、型ごとにクロージャで変換する:
 //!
 //! ```ignore
 //! use reiny_ros2::ros2_client::{MessageTypeName, ServiceTypeName};

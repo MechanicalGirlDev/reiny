@@ -76,7 +76,7 @@ const DOMAIN: &str = "conf";
 const SETTLE: Duration = Duration::from_millis(600);
 const PATIENCE: Duration = Duration::from_secs(5);
 
-/// `engine` の上に grain `id`(domain は `conf`)を組む。
+/// `engine` の上に launch `id`(domain は `conf`)を組む。
 pub async fn cloudy(engine: Arc<dyn Engine>, id: &str) -> Cloudy {
     Cloudy::new(
         engine,
@@ -90,18 +90,18 @@ pub async fn cloudy(engine: Arc<dyn Engine>, id: &str) -> Cloudy {
     .expect("cloudy")
 }
 
-/// 適合テスト本体。`a` / `b` は同じバスに乗った別の grain(id `a` / `b`)。通らなければ panic。
+/// 適合テスト本体。`a` / `b` は同じバスに乗った別の launch(id `a` / `b`)。通らなければ panic。
 #[allow(clippy::too_many_lines)] // 1 本で通す(エンジンごとに 1 回)ので長い。
 pub async fn exercise(a: Cloudy, b: Cloudy) {
     tokio::time::sleep(SETTLE).await;
 
-    // --- grain presence: Cloudy::new が @grain を立てている ---
-    let grains = a
+    // --- launch presence: Cloudy::new が @launch を立てている ---
+    let launches = a
         .engine()
-        .alive(&Key::grain(DOMAIN, None), PATIENCE)
+        .alive(&Key::launch(DOMAIN, None), PATIENCE)
         .await
         .expect("alive");
-    let mut ids: Vec<String> = grains.into_iter().filter_map(|k| k.source).collect();
+    let mut ids: Vec<String> = launches.into_iter().filter_map(|k| k.source).collect();
     ids.sort();
     assert_eq!(ids, ["a", "b"]);
 

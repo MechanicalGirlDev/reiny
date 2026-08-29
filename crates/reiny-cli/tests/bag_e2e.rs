@@ -2,7 +2,7 @@
 //! record → info → play を回す。
 //!
 //! reiny-cli は bin 専用クレート(lib ターゲットが無い)なので、`bagcmd` を直接呼べない。
-//! そこで `CARGO_BIN_EXE_reiny` の実体をサブプロセスで起動し、テスト側は「grain 役」の
+//! そこで `CARGO_BIN_EXE_reiny` の実体をサブプロセスで起動し、テスト側は「launch 役」の
 //! zenoh セッションを 1 本張って publisher / latched / presence を演じる —— reiny の e2e と
 //! 同じく、ループバック TCP 固定ポート・マルチキャスト off で決定的に繋ぐ。
 //!
@@ -23,7 +23,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_reiny");
 /// 記録対象の型の指紋(実機の attachment を手で再現)。
 const PROBE_FP: u64 = 0xA1B2_C3D4_E5F6_0718;
 
-/// grain 役: この 1 本が ENDPOINT を listen し、他(record / play のサブプロセス)は client で繋ぐ。
+/// launch 役: この 1 本が ENDPOINT を listen し、他(record / play のサブプロセス)は client で繋ぐ。
 fn fabric() -> zenoh::Session {
     let mut config = zenoh::Config::default();
     for (k, v) in [
@@ -54,7 +54,7 @@ fn record_info_play_round_trip_and_live_guard() {
 
     let fab = fabric();
 
-    // --- grain 役の口を用意する ---
+    // --- launch 役の口を用意する ---
     // 1) ライブの型 ctrl/Probe: publisher + liveliness トークン(presence と guard 用)。
     let probe_key = "reiny/lab/ctrl/Probe";
     let probe_pub = fab.declare_publisher(probe_key).wait().expect("probe pub");

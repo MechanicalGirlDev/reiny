@@ -7,6 +7,6 @@
 #
 # このファイルだけは手書きでコミットしておく。ping/ pong/ の中身は
 # 05-build.sh までで生成されるので .gitignore 済み。
-[grain]
+[launch]
 pong = { bin = "pong" }
 ping = { bin = "ping", depends_on = ["pong"] }

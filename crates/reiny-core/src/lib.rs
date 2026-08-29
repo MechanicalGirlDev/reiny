@@ -1,6 +1,6 @@
 //! reiny の型語彙 —— `#![no_std]`。
 //!
-//! reiny の組織原理は **type = topic**: grain は型を渡すだけで publish / subscribe する。
+//! reiny の組織原理は **type = topic**: launch は型を渡すだけで publish / subscribe する。
 //! その「型」を名乗るための trait([`Topic`] / [`Service`])と descriptor([`Descriptor`])、
 //! それに `QoS` の語彙([`Qos`])だけをここに置く。`reiny` 本体(tokio / zenoh)は std 前提なので、zenoh が走らない場所
 //! (MCU 上の `reiny-link`)でも型 = トピックを共有できるよう、語彙を下に切り出した。
@@ -52,7 +52,7 @@ pub trait Topic {
     ///
     /// `Some` の型を publish すると、publisher は自分のキーの脇
     /// `reiny/<domain>/<id>/<TYPE>/@schema/<message>` に queryable を 1 本立て、問い合わせに
-    /// この descriptor set を返す。走っている grain が自分の型を**バス上で名乗る**ための口で、
+    /// この descriptor set を返す。走っている launch が自分の型を**バス上で名乗る**ための口で、
     /// `reiny bag record` はこれを拾って MCAP にスキーマを同梱し、Foxglove がそのまま decode
     /// できる bag を作る(`docs/design/bag.md` §5)。
     ///

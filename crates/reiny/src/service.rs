@@ -203,7 +203,7 @@ impl<'a, S> CallerBuilder<'a, S> {
         }
     }
 
-    /// 特定の grain id の server だけに撃つ。未指定は同 domain の全 server に撃ち、
+    /// 特定の launch id の server だけに撃つ。未指定は同 domain の全 server に撃ち、
     /// **最初の応答を採る** —— server が 2 つ以上居る構成ではこちらで選ぶこと。
     pub fn to(mut self, id: impl Into<String>) -> Self {
         self.to = Some(id.into());

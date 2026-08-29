@@ -62,7 +62,7 @@ let mut pongs = cloudy.subscribe::<Pong>()?; // [projects.ping].dependencies →
 ping-pong-workspace/
 ├── Cargo.toml          # cargo ワークスペース(members = ping, pong)
 ├── Reiny.toml          # ★ 共有マニフェスト([internals] + [projects.*])
-├── ping-pong.toml      # launch config(reiny ランチャ用 / [grain])
+├── ping-pong.toml      # launch config(reiny ランチャ用 / [launch])
 ├── proto/              # ★ 共有 proto
 │   ├── ping.proto
 │   └── pong.proto
@@ -83,7 +83,7 @@ ping-pong-workspace/
 cargo run -p pong   # pong を起動(Ping を待ち受け)
 cargo run -p ping   # ping を起動(Ping を送信開始)
 
-# または、ランチャでまとめて(launch config の [grain] を起動)
+# または、ランチャでまとめて(launch config の [launch] を起動)
 #   ※ あらかじめ cargo build してから、bin の置き場を --bin-dir で指す
 reiny --config ping-pong.toml --bin-dir target/debug
 ```

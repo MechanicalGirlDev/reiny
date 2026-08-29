@@ -6,6 +6,6 @@
 #
 #   reiny ping-pong.toml
 #
-[grain]
+[launch]
 pong = { bin = "pong", config = "pong.config.toml", on_exit = "respawn" }
 ping = { bin = "ping", depends_on = ["pong"] }

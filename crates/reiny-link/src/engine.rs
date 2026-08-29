@@ -8,7 +8,7 @@
 //! | --- | --- |
 //! | subscribe `reiny/<d>/*/<T>` | 相手からの Data(hash = T)。source は相手の id、attachment は Hello の指紋 |
 //! | publish `reiny/<d>/<id>/<T>` | `send_raw(hash(T))`。相手が subscribe していなければ捨てる |
-//! | presence | 相手の Hello から: `@grain`、PUB 型のトークン、SERVE 型の `@service`。Disconnected で全部 Left。自分のトークンはローカルにだけ立つ(相手には伝わらない) |
+//! | presence | 相手の Hello から: `@launch`、PUB 型のトークン、SERVE 型の `@service`。Disconnected で全部 Left。自分のトークンはローカルにだけ立つ(相手には伝わらない) |
 //! | query(payload あり) | `call_raw(hash(S))` → Reply / Error |
 //! | query(payload なし = latched) | 相手の LATCHED な型の直近 Data を engine が覚えていて返す |
 //! | respond | 相手からの Request(hash = S)を、型 `S` の responder へ。応えずに drop すると相手には `Error("no reply")` |
@@ -68,7 +68,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// 相手の Hello が意味する presence キー。
 fn peer_keys(domain: &str, peer: &PeerInfo) -> Vec<Key> {
-    let mut keys = vec![Key::grain(domain, Some(&peer.id))];
+    let mut keys = vec![Key::launch(domain, Some(&peer.id))];
     for t in &peer.types {
         let topic = Key::topic(domain, Some(&peer.id), &t.name);
         if t.flags & flags::PUB != 0 {

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# 01-new.sh — `reiny new` で「新しいディレクトリ」に grain プロジェクトを作る。
+# 01-new.sh — `reiny new` で「新しいディレクトリ」に launch プロジェクトを作る。
 #
 # `reiny new <path> --publish <Type>` は cargo new 相当。<path> ディレクトリを
-# 新規作成し、その中に reiny grain の雛形一式を書き出す。
+# 新規作成し、その中に reiny launch の雛形一式を書き出す。
 #
 #   reiny new ping --publish Ping
 #

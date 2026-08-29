@@ -56,9 +56,11 @@ piece that does not depend on it.
   now too. Design: `docs/design/0.5.0.md` §1.
 - **`engine::Zenoh`** (feature `zenoh`, on by default) — the 0.4 behavior
   moved behind the trait; the wire (key shape, attachment, verbatim chunks)
-  is unchanged, so 0.4 and 0.5 grains interoperate.
+  is unchanged except for the presence token renamed `@grain` → `@launch`
+  (see *Changed*), so 0.4 and 0.5 interoperate for pub/sub and services but
+  not for presence.
 - **`engine::Local`** — an in-process bus with no network, ports or config.
-  Clone one into several `Cloudy::open` calls and a grain's publish /
+  Clone one into several `Cloudy::open` calls and a launch's publish /
   subscribe / call runs inside a `#[tokio::test]`. It is also the reference
   implementation the conformance test is written against.
 - **`Cloudy::open(RuntimeOptions)`** — the async entry (no tokio runtime, no
@@ -73,7 +75,7 @@ piece that does not depend on it.
   (`reiny::engine::conformance::{cloudy, exercise}`), so an engine crate
   passes by adding one test that calls it.
 - **`reiny-iceoryx2`** — the `Engine` on
-  [iceoryx2](https://github.com/eclipse-iceoryx/iceoryx2) 0.9: grains on one
+  [iceoryx2](https://github.com/eclipse-iceoryx/iceoryx2) 0.9: launches on one
   host over shared memory. One pub-sub service per type (`reiny/<d>/<T>`,
   the source id in a fixed user header), one request-response service per
   type for latched / services / `@schema`, presence as a `reiny-alive/<key>`
@@ -107,16 +109,16 @@ piece that does not depend on it.
   peer's Hello is the presence, its LATCHED types are cached to answer
   latched queries, its requests reach the responder of that type, and a
   request dropped unanswered is turned into an error reply (links have no
-  finalize). `Cloudy::open` with `engine = LinkEngine` puts a grain directly
+  finalize). `Cloudy::open` with `engine = LinkEngine` puts a launch directly
   on a serial / UDP link — covered by `tests/engine.rs`.
 - **`reiny bridge serial <port> | udp <bind> | iceoryx2`** — the CLI's only
   tokio subcommand: a zenoh `Cloudy` plus the other engine, joined by
-  `bridge::forward`, so MCU and iceoryx2 grains show up in `reiny node list`
+  `bridge::forward`, so MCU and iceoryx2 launches show up in `reiny node list`
   / `topic hz` / `bag record`. `iceoryx2` is behind the CLI feature of the
   same name (libclang on Windows / macOS).
 
 - **`reiny-ros2`** — a ROS 2 bridge *library* on pure-Rust DDS
-  (`ros2-client` 0.10 / RustDDS; no ROS installation). A bridge grain builds
+  (`ros2-client` 0.10 / RustDDS; no ROS installation). A bridge launch builds
   a `Ros` (one ROS node, spinner on tokio; `ROS_DOMAIN_ID` and
   `ROS_LOCALHOST_ONLY=1` honoured) and adds routes per type with closures:
   `export::<T, R>` (reiny → ROS topic), `import::<R, T>` (ROS → reiny, source
@@ -130,13 +132,24 @@ piece that does not depend on it.
 
 ### Changed
 
+- **Breaking (naming):** the word **grain** is gone — a reiny process is a
+  **launch**. This renames three surfaces at once, with no compatibility
+  shim: the launch config table `[grain]` → **`[launch]`**, the zenoh
+  presence token `reiny/<domain>/<id>/@grain` → **`@launch`**, and the Rust
+  names `GrainSpec` / `GrainEntry` / `ResolvedGrain` / `LaunchPlan::grains` /
+  `LaunchConfig::grain` / `engine::GRAIN_CHUNK` / `engine::Key::grain` →
+  `LaunchSpec` / `LaunchEntry` / `ResolvedLaunch` / `LaunchPlan::launches` /
+  `LaunchConfig::launch` / `engine::LAUNCH_CHUNK` / `engine::Key::launch`.
+  Pub/sub and services still interoperate with 0.4 (the data key shape is
+  unchanged); presence does not — a 0.4 process holds `@grain` and shows up
+  in `reiny node list` only through its publisher / server tokens.
 - `reiny::{Topic, Descriptor, Service}` are now re-exports of `reiny-core`
   (same paths; no source change downstream).
 - `reiny_link::Host::recv` takes `&self` (the receiver sits behind a tokio
   mutex) so a `Host` can be shared in an `Arc`; `wire::hello_write` gained
   the `bridge` argument and `wire::Hello` the `bridge` field.
-- `engine::Key` renders a grain token as `ty = "@grain"` (verbatim in the
-  type slot; `Key::grain`, `Key::all`, `Key::is_verbatim_type`), so
+- `engine::Key` renders a launch token as `ty = "@launch"` (verbatim in the
+  type slot; `Key::launch`, `Key::all`, `Key::is_verbatim_type`), so
   `reiny/<d>/*/*/@service` and `reiny/<d>/*/*` are expressible patterns and
   `Key::matches` never lets `*` match a verbatim type.
 - **Breaking:** `Cloudy::session()` returns `Option<&zenoh::Session>` (`None`
@@ -177,7 +190,7 @@ piece that does not depend on it.
   runs with `--release --include-ignored`. Linux (CI) is unaffected.
 - ROS 2 actions / parameters are not bridged (0.4.0 §2.6: services + topics
   + latched express them; parameters are not a bridge's job).
-- Publishers now default to `Reliable` (see *Changed*); a grain that relied on
+- Publishers now default to `Reliable` (see *Changed*); a launch that relied on
   zenoh's `Drop` default for high-rate data should say `Qos::SENSOR`.
 
 ## 0.4.0 — 2026-08-28

@@ -4,7 +4,7 @@
 #
 #   reiny ping-pong.toml
 #
-[grain]
+[launch]
 ping = { bin = "ping" }
 relay = { bin = "relay", depends_on = ["ping"] }
 pong = { bin = "pong", depends_on = ["relay"] }

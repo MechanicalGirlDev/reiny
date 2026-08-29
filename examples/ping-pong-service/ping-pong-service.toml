@@ -2,6 +2,6 @@
 #
 #   reiny ping-pong-service.toml --bin-dir target/debug
 #
-[grain]
+[launch]
 calc = { bin = "calc", on_exit = "respawn" }
 asker = { bin = "asker", depends_on = ["calc"] }
