@@ -1,31 +1,31 @@
-//! reiny を **バイトを運べるものなら何でも**の上に載せる —— 点対点リンク。
+//! reiny on top of **anything that can carry bytes** — a point-to-point link.
 //!
-//! 芯は [`Link`]: `#![no_std]` の **sans-I/O** 状態機械。I/O も時計も持たず、受け取った
-//! バイトを [`Link::feed`] で食い、送るべきバイトを [`Link::drain`] / [`Link::drain_frame`]
-//! で吐き、[`Link::tick`] で時を進める。UART / USB CDC / RS-485 / UDP / TCP / pty /
-//! `tokio::io::duplex` —— どれに繋ぐかは呼び出し側の数行で決まり、MCU(embassy / RTIC /
-//! 割り込み)でもホストでも同じ `Link` を使う。
+//! The core is [`Link`]: a `#![no_std]` **sans-I/O** state machine. It owns neither I/O nor a clock;
+//! it eats the bytes you received through [`Link::feed`], emits the bytes to send through
+//! [`Link::drain`] / [`Link::drain_frame`], and advances time through [`Link::tick`]. UART / USB CDC
+//! / RS-485 / UDP / TCP / pty / `tokio::io::duplex` — which one it sits on is a few lines on the
+//! caller's side, and the same `Link` runs on an MCU (embassy / RTIC / interrupts) and on a host.
 //!
-//! 型は reiny 本体と同じ [`Topic`] / [`Service`](`reiny-core`)。ワイヤには
-//! `Topic::TYPE` の 32 bit ハッシュだけが載り([`wire::type_hash`])、型名と指紋は接続時の
-//! Hello で 1 回交換する。
+//! The types are the same [`Topic`] / [`Service`] reiny proper uses (`reiny-core`). Only a 32-bit
+//! hash of `Topic::TYPE` rides on the wire ([`wire::type_hash`]); type names and fingerprints are
+//! exchanged once, in the Hello, at connection time.
 //!
 //! ```ignore
-//! // MCU 側(#![no_std]、alloc あり)
+//! // On the MCU (#![no_std], with alloc)
 //! let mut link = Link::<_, 8>::new("motor-board", [0u8; 512], [0u8; 512])?;
 //! link.publishes::<MotorState>()?;
 //! link.subscribes::<MotorCommand>()?;
 //! link.serves::<Calibrate>()?;
 //!
 //! loop {
-//!     link.feed(&uart_rx_bytes());                         // 届いた分をそのまま
+//!     link.feed(&uart_rx_bytes());                         // whatever arrived, as it arrived
 //!     while let Some(ev) = link.next() {
 //!         match ev {
 //!             Event::Data(f) => if let Some(cmd) = link.decode::<MotorCommand>(&f) { apply(cmd) },
 //!             Event::Request(f) => if let Some(req) = link.decode::<Calibrate>(&f) {
 //!                 link.reply::<Calibrate>(f.seq, &calibrate(req))?;
 //!             },
-//!             Event::Connected(_) => { /* latched な型はここで送り直す */ }
+//!             Event::Connected(_) => { /* re-send latched types here */ }
 //!             _ => {}
 //!         }
 //!     }
@@ -35,12 +35,13 @@
 //! }
 //! ```
 //!
-//! feature `std`(既定)でホスト側が付く: 「バイトを送れる者」の trait [`transport::Transport`]、
-//! `AsyncRead + AsyncWrite` を包む [`transport::Stream`]、[`transport::Udp`]、シリアルの
-//! [`transport::serial::open`](feature `serial`)、そしてそれらの上で `Link` を回す [`Host`]。
+//! Feature `std` (on by default) adds the host side: the "can send bytes" trait
+//! [`transport::Transport`], [`transport::Stream`] wrapping anything `AsyncRead + AsyncWrite`,
+//! [`transport::Udp`], [`transport::serial::open`] for serial ports (feature `serial`), and [`Host`],
+//! which drives a `Link` over any of them.
 //!
 //! ```ignore
-//! // ホスト側
+//! // On the host
 //! let mut link = HostLink::host("pc")?;
 //! link.subscribes::<MotorState>()?;
 //! link.publishes::<MotorCommand>()?;
@@ -51,10 +52,10 @@
 //! }
 //! ```
 //!
-//! feature `engine`(既定)で [`LinkEngine`] が付く: `Host` を reiny の `Engine` にして、
-//! `Cloudy` をリンクの上に置く(`reiny bridge serial …` の中身)。
+//! Feature `engine` (on by default) adds [`LinkEngine`], which turns a `Host` into a reiny `Engine`
+//! and so puts a `Cloudy` on top of a link (the innards of `reiny bridge serial …`).
 //!
-//! 設計と wire 形式の理由は `docs/design/0.5.0.md` §3。
+//! The design and the reasoning behind the wire format are in `docs/design/0.5.0.md` §3.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 

@@ -1,29 +1,29 @@
-//! `QoS` —— reiny の語彙。
+//! `QoS` — reiny's vocabulary.
 //!
-//! ROS 2 / DDS の語彙(reliability / history / durability)を採るのは、ROS 2 bridge が `QoS` を
-//! **双方向に写す**ため。zenoh 固有の `CongestionControl` は公開 API に出さない —— エンジン
-//! ごとに何へ落ちるかは `docs/design/0.5.0.md` §2.3 の表。
+//! The ROS 2 / DDS vocabulary (reliability / history / durability) was adopted because the ROS 2
+//! bridge maps `QoS` **in both directions**. zenoh's own `CongestionControl` is kept out of the
+//! public API — what each engine lowers these to is tabulated in `docs/design/0.5.0.md` §2.3.
 
-/// publisher の QoS。builder の `.qos(Qos::…)` にまとめて渡すか、糖衣(`.reliability()` 等)で
-/// 1 項目ずつ。
+/// A publisher's `QoS`. Pass the whole thing to the builder's `.qos(Qos::…)`, or set one field at a
+/// time through the sugar (`.reliability()` and friends).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Qos {
-    /// 輻輳時に捨てるか(`BestEffort`)、待つか(`Reliable`)。
+    /// Under congestion, drop (`BestEffort`) or wait (`Reliable`).
     pub reliability: Reliability,
-    /// 送信優先度。
+    /// Send priority.
     pub priority: Priority,
-    /// 履歴。publisher で意味を持つのは `KeepAll` と `KeepLast(1)` だけ
-    /// (`KeepLast(1)` + `TransientLocal` = latched)。`KeepLast(n > 1)` は build 時にエラー ——
-    /// n 件のリングは購読側の `.latest(n)` の仕事。
+    /// History. The only values meaningful on a publisher are `KeepAll` and `KeepLast(1)`
+    /// (`KeepLast(1)` + `TransientLocal` = latched). `KeepLast(n > 1)` is a build-time error — an
+    /// n-deep ring is the subscriber's job, via `.latest(n)`.
     pub history: History,
-    /// `TransientLocal` = latched(直近 1 件を、遅れて来た購読者に配る)。
+    /// `TransientLocal` = latched (the most recent sample is delivered to late subscribers).
     pub durability: Durability,
-    /// バッチングを飛ばして即時送信する(低レイテンシ・低スループット)。
+    /// Skip batching and send immediately (lower latency, lower throughput).
     pub express: bool,
 }
 
 impl Qos {
-    /// 既定 = [`Qos::COMMAND`]: `Reliable` / `Normal` / `KeepAll` / `Volatile` / express なし。
+    /// The default = [`Qos::COMMAND`]: `Reliable` / `Normal` / `KeepAll` / `Volatile`, no express.
     pub const DEFAULT: Qos = Qos {
         reliability: Reliability::Reliable,
         priority: Priority::Normal,
@@ -32,19 +32,19 @@ impl Qos {
         express: false,
     };
 
-    /// センサ値: `BestEffort` / `KeepLast(1)` / `Volatile` —— ROS 2 の `SensorDataQoS` 相当。
-    /// 古い値を待つより新しい値を出す。
+    /// Sensor readings: `BestEffort` / `KeepLast(1)` / `Volatile` — the equivalent of ROS 2's
+    /// `SensorDataQoS`. Emit the newer value rather than waiting on the older one.
     pub const SENSOR: Qos = Qos {
         reliability: Reliability::BestEffort,
         history: History::KeepLast(1),
         ..Self::DEFAULT
     };
 
-    /// 指令: 既定そのもの。落とさない、全部届ける。
+    /// Commands: the default itself. Drop nothing, deliver everything.
     pub const COMMAND: Qos = Self::DEFAULT;
 
-    /// 状態: `Reliable` / `KeepLast(1)` / `TransientLocal` —— latched。起動時に 1 回配れば
-    /// 済む設定値や、変化したときだけ出す状態量。
+    /// State: `Reliable` / `KeepLast(1)` / `TransientLocal` — latched. For settings that only need
+    /// delivering once at startup, or state that is only emitted when it changes.
     pub const STATE: Qos = Qos {
         history: History::KeepLast(1),
         durability: Durability::TransientLocal,
@@ -58,49 +58,50 @@ impl Default for Qos {
     }
 }
 
-/// 輻輳時の振る舞い。「再送」の意味ではない —— どのエンジンでも効くのは「捨てる / 待つ」だけ。
+/// Behavior under congestion. Not a statement about retransmission — the only thing every engine
+/// honors is "drop" versus "wait".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Reliability {
-    /// 送信路が詰まっていたら捨てる。
+    /// Drop when the send path is congested.
     BestEffort,
-    /// 送信路が空くまで `send` が待つ。
+    /// `send` waits until the send path clears.
     #[default]
     Reliable,
 }
 
-/// 送信優先度。エンジンが持たなければ無視される(link / iceoryx2)。
+/// Send priority. Ignored by engines that have no notion of it (link / iceoryx2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Priority {
-    /// 制御ループの指令など、他の全てより先に。
+    /// Ahead of everything else — control-loop commands and the like.
     RealTime,
-    /// 対話的な操作。
+    /// Interactive operations.
     High,
-    /// 既定。
+    /// The default.
     #[default]
     Normal,
-    /// 大きなデータ、遅れてよいもの。
+    /// Bulk data; may arrive late.
     Low,
-    /// ログ、統計。
+    /// Logs and statistics.
     Background,
 }
 
-/// 履歴の深さ。
+/// How deep the history goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum History {
-    /// 直近 n 件。
+    /// The most recent n samples.
     KeepLast(usize),
-    /// 全部(バッファの許す限り)。
+    /// All of them (as far as the buffer allows).
     #[default]
     KeepAll,
 }
 
-/// 遅れて来た購読者に直近値を配るか。
+/// Whether the most recent value is delivered to late subscribers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Durability {
-    /// 配らない。購読を始めた後に出たものだけ届く。
+    /// It is not. Only samples emitted after the subscription started arrive.
     #[default]
     Volatile,
-    /// 配る(latched)。
+    /// It is (latched).
     TransientLocal,
 }
 
@@ -108,12 +109,61 @@ pub enum Durability {
 mod tests {
     use super::*;
 
+    /// The three named profiles, field by field. They are the documented contract of this module,
+    /// and each is spelled with `..Self::DEFAULT` — so a change to `DEFAULT` silently moves them.
     #[test]
     fn profiles() {
         assert_eq!(Qos::default(), Qos::COMMAND);
-        assert_eq!(Qos::STATE.durability, Durability::TransientLocal);
-        assert_eq!(Qos::STATE.history, History::KeepLast(1));
+        assert_eq!(Qos::COMMAND, Qos::DEFAULT);
+
+        // COMMAND / DEFAULT: drop nothing, deliver everything.
+        assert_eq!(Qos::DEFAULT.reliability, Reliability::Reliable);
+        assert_eq!(Qos::DEFAULT.priority, Priority::Normal);
+        assert_eq!(Qos::DEFAULT.history, History::KeepAll);
+        assert_eq!(Qos::DEFAULT.durability, Durability::Volatile);
+        assert!(!Qos::default().express);
+
+        // SENSOR: newest value wins, nothing is kept for late subscribers.
         assert_eq!(Qos::SENSOR.reliability, Reliability::BestEffort);
+        assert_eq!(Qos::SENSOR.history, History::KeepLast(1));
         assert_eq!(Qos::SENSOR.durability, Durability::Volatile);
+        assert_eq!(Qos::SENSOR.priority, Priority::Normal);
+
+        // STATE: latched, i.e. KeepLast(1) + TransientLocal, and still Reliable.
+        assert_eq!(Qos::STATE.reliability, Reliability::Reliable);
+        assert_eq!(Qos::STATE.history, History::KeepLast(1));
+        assert_eq!(Qos::STATE.durability, Durability::TransientLocal);
+    }
+
+    /// Latched is exactly `KeepLast(1)` + `TransientLocal`, and only `STATE` is latched — the
+    /// distinction every engine keys off when deciding whether to answer late queries.
+    #[test]
+    fn only_state_is_latched() {
+        let latched = |q: Qos| {
+            q.history == History::KeepLast(1) && q.durability == Durability::TransientLocal
+        };
+        assert!(latched(Qos::STATE));
+        assert!(!latched(Qos::SENSOR));
+        assert!(!latched(Qos::COMMAND));
+    }
+
+    /// Every field's `Default` has to agree with `Qos::DEFAULT`; they are written independently
+    /// (`#[default]` on the variant vs. the const), so nothing but a test keeps them in step.
+    #[test]
+    fn field_defaults_match_the_default_profile() {
+        assert_eq!(Reliability::default(), Qos::DEFAULT.reliability);
+        assert_eq!(Priority::default(), Qos::DEFAULT.priority);
+        assert_eq!(History::default(), Qos::DEFAULT.history);
+        assert_eq!(Durability::default(), Qos::DEFAULT.durability);
+    }
+
+    /// `Priority`'s `Ord` is derived, so declaration order *is* the semantics: the most urgent
+    /// variant sorts first. Reordering the enum for readability would silently invert comparisons.
+    #[test]
+    fn priority_orders_most_urgent_first() {
+        assert!(Priority::RealTime < Priority::High);
+        assert!(Priority::High < Priority::Normal);
+        assert!(Priority::Normal < Priority::Low);
+        assert!(Priority::Low < Priority::Background);
     }
 }

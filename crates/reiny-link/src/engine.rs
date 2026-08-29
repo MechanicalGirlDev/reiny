@@ -1,19 +1,20 @@
-//! [`LinkEngine`] —— [`Host`] を reiny の [`Engine`] として。
+//! [`LinkEngine`] — a [`Host`] as reiny's [`Engine`].
 //!
-//! リンクの向こうは 1 台の相手(MCU)。相手が Hello で名乗った型が、この engine が見せる世界の
-//! 全部で、`Link` は bridge モード([`Link::as_bridge`](crate::Link::as_bridge))で回す ——
-//! 型を名乗らず、相手の宣言の鏡になる:
+//! Across the link there is exactly one peer (an MCU). The types that peer declared in its Hello are
+//! the entire world this engine shows, and the `Link` is run in bridge mode
+//! ([`Link::as_bridge`](crate::Link::as_bridge)) — declaring no types of its own and mirroring the
+//! peer's declarations instead:
 //!
 //! | reiny | link |
 //! | --- | --- |
-//! | subscribe `reiny/<d>/*/<T>` | 相手からの Data(hash = T)。source は相手の id、attachment は Hello の指紋 |
-//! | publish `reiny/<d>/<id>/<T>` | `send_raw(hash(T))`。相手が subscribe していなければ捨てる |
-//! | presence | 相手の Hello から: `@launch`、PUB 型のトークン、SERVE 型の `@service`。Disconnected で全部 Left。自分のトークンはローカルにだけ立つ(相手には伝わらない) |
-//! | query(payload あり) | `call_raw(hash(S))` → Reply / Error |
-//! | query(payload なし = latched) | 相手の LATCHED な型の直近 Data を engine が覚えていて返す |
-//! | respond | 相手からの Request(hash = S)を、型 `S` の responder へ。応えずに drop すると相手には `Error("no reply")` |
+//! | subscribe `reiny/<d>/*/<T>` | Data from the peer (hash = T). The source is the peer's id, the attachment is the fingerprint from the Hello |
+//! | publish `reiny/<d>/<id>/<T>` | `send_raw(hash(T))`. Dropped unless the peer subscribes |
+//! | presence | derived from the peer's Hello: `@launch`, a token per PUB type, `@service` per SERVE type. Disconnected retracts all of them. Our own tokens are local only (the peer never hears about them) |
+//! | query (with payload) | `call_raw(hash(S))` → Reply / Error |
+//! | query (no payload = latched) | the engine remembers the peer's most recent Data for LATCHED types and answers with it |
+//! | respond | a Request from the peer (hash = S) goes to the responder for the type `S`. Dropping it unanswered sends the peer `Error("no reply")` |
 //!
-//! `Caps.attachment = false`: 指紋は Hello で運ぶ(`put` の attachment は捨てる)。
+//! `Caps.attachment = false`: the fingerprint travels in the Hello (`put`'s attachment is dropped).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,7 +32,8 @@ use tokio::task::JoinHandle;
 use crate::host::{CallError, Host, HostEvent, PeerType};
 use crate::wire::{self, flags};
 
-/// [`Host`] の上の [`Engine`]。`Arc` に包んで `RuntimeOptions::engine` に渡す。
+/// The [`Engine`] on top of a [`Host`]. Wrap it in an `Arc` and hand it to
+/// `RuntimeOptions::engine`.
 pub struct LinkEngine {
     host: Arc<Host>,
     domain: String,
@@ -45,9 +47,9 @@ struct State {
     subscribers: Vec<(u64, Key, Callback<Sample>)>,
     responders: Vec<(u64, Key, QueryCallback)>,
     watchers: Vec<(u64, Key, Callback<Presence>)>,
-    /// 自分が立てたトークン。相手には伝わらないが、`alive` / `watch_alive` には見える。
+    /// The tokens we declared. The peer never hears about them, but `alive` / `watch_alive` do.
     tokens: Vec<(u64, Key)>,
-    /// 相手の LATCHED な型の直近 Data(hash → sample)。payload の無い query に答える。
+    /// The peer's most recent Data per LATCHED type (hash → sample). Answers payload-less queries.
     last: HashMap<u32, Sample>,
 }
 
@@ -66,7 +68,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// 相手の Hello が意味する presence キー。
+/// The presence keys implied by the peer's Hello.
 fn peer_keys(domain: &str, peer: &PeerInfo) -> Vec<Key> {
     let mut keys = vec![Key::launch(domain, Some(&peer.id))];
     for t in &peer.types {
@@ -97,7 +99,7 @@ impl State {
         }
     }
 
-    /// いま立っている全キー(自分のトークン + 相手の Hello)。
+    /// Every key currently up (our own tokens plus the peer's Hello).
     fn alive_keys(&self, domain: &str) -> Vec<Key> {
         let mut keys: Vec<Key> = self.tokens.iter().map(|(_, k)| k.clone()).collect();
         if let Some(peer) = &self.peer {
@@ -108,8 +110,8 @@ impl State {
 }
 
 impl LinkEngine {
-    /// `host` を回し始める。`domain` は上に乗る `Cloudy` と同じもの(リンクには domain が無い)。
-    /// tokio runtime の中で呼ぶ。
+    /// Start running `host`. `domain` is the same one the `Cloudy` above uses (a link has no domain
+    /// of its own). Call it inside a tokio runtime.
     #[must_use]
     pub fn spawn(host: Host, domain: &str) -> Self {
         let host = Arc::new(host);
@@ -127,7 +129,7 @@ impl LinkEngine {
         }
     }
 
-    /// 中の [`Host`]。
+    /// The [`Host`] inside.
     #[must_use]
     pub fn host(&self) -> &Host {
         &self.host
@@ -175,15 +177,7 @@ async fn run(host: Arc<Host>, domain: String, state: Arc<Mutex<State>>) {
                     st.emit(&Presence::Joined(key.clone()));
                 }
             }
-            HostEvent::Disconnected => {
-                let mut st = lock(&state);
-                if let Some(peer) = st.peer.take() {
-                    st.last.clear();
-                    for key in peer_keys(&domain, &peer) {
-                        st.emit(&Presence::Left(key));
-                    }
-                }
-            }
+            HostEvent::Disconnected => drop_peer(&domain, &state),
             HostEvent::Data { hash, payload, .. } => {
                 let mut st = lock(&state);
                 let Some(peer) = &st.peer else { continue };
@@ -208,7 +202,7 @@ async fn run(host: Arc<Host>, domain: String, state: Arc<Mutex<State>>) {
             HostEvent::Request { hash, seq, payload } => {
                 let st = lock(&state);
                 let Some(peer) = &st.peer else { continue };
-                // 相手が `calls` で名乗っていない型は名前が分からないので断る。
+                // A type the peer never announced with `calls` has no name here, so refuse it.
                 let Some(t) = peer.types.iter().find(|t| t.hash == hash) else {
                     let _ = host.reply_err_raw(
                         seq,
@@ -217,7 +211,7 @@ async fn run(host: Arc<Host>, domain: String, state: Arc<Mutex<State>>) {
                     );
                     continue;
                 };
-                // リンクの request に宛先は無い: 型 `S` の responder なら誰でもよい。
+                // A request on a link has no destination: any responder for the type `S` will do.
                 let pattern = Key::topic(&domain, None, &t.name);
                 let Some((_, _, cb)) = st.responders.iter().find(|(_, k, _)| pattern.matches(k))
                 else {
@@ -233,6 +227,21 @@ async fn run(host: Arc<Host>, domain: String, state: Arc<Mutex<State>>) {
                     answered: false,
                 }));
             }
+        }
+    }
+    // The driver stopped: the transport hit EOF or an error, so the peer is gone even though no
+    // `Disconnected` (which is the link's own silence timer) was ever reported. Retract its presence
+    // here too, or watchers would keep believing in a peer nothing can reach.
+    drop_peer(&domain, &state);
+}
+
+/// Forget the peer and retract every presence key its Hello implied.
+fn drop_peer(domain: &str, state: &Mutex<State>) {
+    let mut st = lock(state);
+    if let Some(peer) = st.peer.take() {
+        st.last.clear();
+        for key in peer_keys(domain, &peer) {
+            st.emit(&Presence::Left(key));
         }
     }
 }
@@ -282,7 +291,7 @@ impl Engine for LinkEngine {
     fn watch_alive(&self, key: &Key, on_event: Callback<Presence>) -> Result<Guard> {
         let id = next_id();
         let mut st = lock(&self.state);
-        // 宣言済みは Joined で先に流す(zenoh の `history(true)`)。
+        // Replay what is already declared as Joined first (zenoh's `history(true)`).
         for alive in st.alive_keys(&self.domain) {
             if key.matches(&alive) {
                 on_event(Presence::Joined(alive));
@@ -304,7 +313,7 @@ impl Engine for LinkEngine {
         let ty = type_of(key)?.to_string();
         let hash = wire::type_hash(&ty);
         let Some(payload) = params.payload else {
-            // latched の問い合わせ: 相手の直近値を engine が覚えている。
+            // A latched query: the engine is holding the peer's most recent value.
             let hit = lock(&self.state)
                 .last
                 .get(&hash)
@@ -318,7 +327,7 @@ impl Engine for LinkEngine {
             .as_deref()
             .is_some_and(|s| peer_id.as_deref() != Some(s))
         {
-            return Ok(Box::new(Ready(None))); // 宛先が相手ではない: 応答ゼロ
+            return Ok(Box::new(Ready(None))); // addressed at someone other than the peer: no replies
         }
         let host = Arc::clone(&self.host);
         let domain = self.domain.clone();
@@ -332,7 +341,7 @@ impl Engine for LinkEngine {
                     timestamp: now_unix_ns(),
                 })),
                 Err(CallError::Remote(message)) => Some(Err(message.into_bytes())),
-                Err(_) => None, // NoPeerService / Timeout / Closed = 応答ゼロ
+                Err(_) => None, // NoPeerService / Timeout / Closed = no replies
             };
             let _ = tx.send(result);
         });
@@ -382,7 +391,7 @@ struct LinkPublisher {
 
 impl RawPublisher for LinkPublisher {
     fn put(&self, payload: Vec<u8>, _attachment: Option<Vec<u8>>) -> Result<()> {
-        // 相手が subscribe していなければ `Ok(false)` = 捨てるだけ(publish は fire and forget)。
+        // `Ok(false)` when the peer does not subscribe = simply dropped (publish is fire and forget).
         self.host
             .send_raw(self.hash, &payload)
             .map(|_| ())
@@ -434,15 +443,15 @@ impl RawQuery for LinkQuery {
 
 impl Drop for LinkQuery {
     fn drop(&mut self) {
-        // リンクに finalize は無い: 応えずに落とされた request は、相手を待たせないよう
-        // エラーにして返す(zenoh の「応答ゼロ = NoReply」に当たる)。
+        // A link has no finalize: a request dropped without an answer is turned into an error so
+        // the peer is not left waiting (the counterpart of zenoh's "no replies = NoReply").
         if !self.answered {
             let _ = self.host.reply_err_raw(self.seq, self.hash, "no reply");
         }
     }
 }
 
-/// 手持ちの 1 件(または 0 件)で終わる応答列。
+/// A reply stream that ends after the one (or zero) result it already holds.
 struct Ready(Option<ReplyResult>);
 
 impl RawReplies for Ready {
@@ -451,7 +460,8 @@ impl RawReplies for Ready {
     }
 }
 
-/// `call_raw` の結果を 1 件返して終わる応答列。cancel-safe(受け手を `&mut` で poll する)。
+/// A reply stream that yields `call_raw`'s single result and ends. Cancel-safe (the receiver is
+/// polled through `&mut`).
 struct Once {
     rx: Option<oneshot::Receiver<Option<ReplyResult>>>,
 }

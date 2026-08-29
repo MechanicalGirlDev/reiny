@@ -1,8 +1,8 @@
-//! ホスト側の「バイトを運ぶ者」—— [`Transport`]。
+//! The host side's "thing that carries bytes" — [`Transport`].
 //!
-//! [`Link`](crate::Link) が知らない I/O をここで足す。stream(シリアル / TCP / pty /
-//! `tokio::io::duplex`)は [`Stream`] で包むだけ、datagram は [`Udp`]。自前の運び手は
-//! `send` / `recv` の 2 メソッドで参加できる。
+//! This is where the I/O that [`Link`](crate::Link) knows nothing about gets attached. A stream
+//! (serial / TCP / pty / `tokio::io::duplex`) only needs wrapping in [`Stream`]; datagrams use
+//! [`Udp`]. A carrier of your own joins by implementing the two methods `send` and `recv`.
 
 use std::future::Future;
 use std::io;
@@ -11,22 +11,22 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{ToSocketAddrs, UdpSocket};
 
-/// バイトを送れる者。
+/// Something that can carry bytes.
 ///
-/// `DATAGRAM` が true なら `send` は 1 フレームを 1 datagram として送り、`recv` は
-/// 1 datagram を返す。false なら任意の切れ方の stream。
+/// When `DATAGRAM` is true, `send` sends one frame as one datagram and `recv` returns one datagram.
+/// When it is false, it is a stream that may be split anywhere.
 pub trait Transport: Send {
-    /// 境界を保つ運び手か(UDP)。
+    /// Whether the carrier preserves message boundaries (UDP).
     const DATAGRAM: bool;
 
-    /// バイトを送る。stream なら全部書き切る。
+    /// Send bytes. On a stream, write all of them.
     fn send(&mut self, bytes: &[u8]) -> impl Future<Output = io::Result<()>> + Send;
 
-    /// バイトを受ける。`Ok(0)` は stream では EOF、datagram では空の datagram。
+    /// Receive bytes. `Ok(0)` is EOF on a stream and an empty datagram on a datagram carrier.
     fn recv(&mut self, buf: &mut [u8]) -> impl Future<Output = io::Result<usize>> + Send;
 }
 
-/// `AsyncRead + AsyncWrite` なら何でも stream の運び手になる。
+/// Anything `AsyncRead + AsyncWrite` is a stream carrier.
 pub struct Stream<T>(pub T);
 
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Transport for Stream<T> {
@@ -42,18 +42,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Transport for Stream<T> {
     }
 }
 
-/// UDP の点対点。
+/// Point-to-point over UDP.
 ///
-/// 相手のアドレスは [`Udp::with_peer`] で固定するか、最初に届いた datagram の送り元で覚える。
-/// どちらの側も相手を知らなければ何も始まらないので、少なくとも片方は固定すること
-/// (MCU がホストのアドレスを知っている、が典型)。固定した相手以外からの datagram は捨てる。
+/// Either pin the peer's address with [`Udp::with_peer`], or let it be remembered from the source of
+/// the first datagram that arrives. Nothing starts if neither side knows the other, so pin at least
+/// one of them (the typical case being that the MCU knows the host's address). Once pinned,
+/// datagrams from anyone else are dropped.
 pub struct Udp {
     socket: UdpSocket,
     peer: Option<SocketAddr>,
 }
 
 impl Udp {
-    /// `local` に bind する。
+    /// Bind to `local`.
     pub async fn bind(local: impl ToSocketAddrs) -> io::Result<Self> {
         Ok(Self {
             socket: UdpSocket::bind(local).await?,
@@ -61,20 +62,20 @@ impl Udp {
         })
     }
 
-    /// 相手を固定する。
+    /// Pin the peer.
     #[must_use]
     pub fn with_peer(mut self, peer: SocketAddr) -> Self {
         self.peer = Some(peer);
         self
     }
 
-    /// いま送り先にしている相手。
+    /// The peer currently being sent to.
     #[must_use]
     pub fn peer(&self) -> Option<SocketAddr> {
         self.peer
     }
 
-    /// bind したアドレス。
+    /// The bound address.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
     }
@@ -86,7 +87,7 @@ impl Transport for Udp {
     async fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
         match self.peer {
             Some(peer) => self.socket.send_to(bytes, peer).await.map(|_| ()),
-            None => Ok(()), // 相手が分かるまでは捨てる(Hello は周期的に出し直される)
+            None => Ok(()), // drop until the peer is known (the Hello is re-sent periodically)
         }
     }
 
@@ -94,8 +95,9 @@ impl Transport for Udp {
         loop {
             let (n, from) = match self.socket.recv_from(buf).await {
                 Ok(x) => x,
-                // Windows は「相手のポートが閉じている」を ICMP 経由で recv のエラーにする
-                // (WSAECONNRESET)。相手がまだ起動していないだけなので、切断にしない。
+                // Windows reports "the peer's port is closed" via ICMP as a recv error
+                // (WSAECONNRESET). The peer has simply not started yet, so do not treat it as a
+                // disconnect.
                 Err(e)
                     if matches!(
                         e.kind(),
@@ -107,7 +109,7 @@ impl Transport for Udp {
                 Err(e) => return Err(e),
             };
             match self.peer {
-                Some(peer) if peer != from => {} // 固定した相手以外: 捨てて次を待つ
+                Some(peer) if peer != from => {} // anyone but the pinned peer: drop and wait
                 Some(_) => return Ok(n),
                 None => {
                     self.peer = Some(from);
@@ -118,7 +120,7 @@ impl Transport for Udp {
     }
 }
 
-/// シリアルポート(`tokio-serial`)。
+/// A serial port (`tokio-serial`).
 #[cfg(feature = "serial")]
 pub mod serial {
     use std::io;
@@ -128,10 +130,10 @@ pub mod serial {
 
     use super::Stream;
 
-    /// `path`(`/dev/ttyACM0` / `COM3`)を `baud` で開く。8N1、フロー制御なし。
+    /// Open `path` (`/dev/ttyACM0` / `COM3`) at `baud`. 8N1, no flow control.
     ///
-    /// 帯域の目安: 115200 baud ≈ 11 KB/s。40 バイトの状態量を 1 kHz なら足りないので、
-    /// USB CDC(baud は無視される)か 921600 以上を。
+    /// Bandwidth, roughly: 115200 baud ≈ 11 KB/s. That is not enough for a 40-byte state at 1 kHz,
+    /// so use USB CDC (where baud is ignored) or 921600 and up.
     pub fn open(path: &str, baud: u32) -> io::Result<Stream<SerialStream>> {
         let port = tokio_serial::new(path, baud)
             .open_native_async()

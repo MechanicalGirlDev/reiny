@@ -212,3 +212,104 @@ async fn cloudy_over_a_link() {
         "{err:?}"
     );
 }
+
+/// Wire an MCU-side `Host` to a `Cloudy` over a bridge-mode link, both ends on one duplex.
+async fn link_to_cloudy(mcu: HostLink, id: &str) -> (Arc<Host>, Cloudy) {
+    let (mcu_end, host_end) = tokio::io::duplex(4096);
+    let mcu = Arc::new(Host::spawn(mcu, Stream(mcu_end)));
+    let engine = LinkEngine::spawn(
+        Host::spawn(HostLink::host(id).unwrap().as_bridge(), Stream(host_end)),
+        "lab",
+    );
+    let mut opts = RuntimeOptions::new(id);
+    opts.domain = "lab".to_string();
+    opts.engine = Some(Arc::new(engine));
+    opts.install_tracing = false;
+    let cloudy = Cloudy::open(opts).await.expect("cloudy over link");
+    // Wait for the handshake: until the bridge's Hello lands, the MCU knows of no peer and every
+    // call would come back as `NoPeerService` for the wrong reason.
+    match timeout(WAIT, mcu.recv()).await.unwrap() {
+        Some(HostEvent::Connected { .. }) => {}
+        other => panic!("expected the mcu to connect, got {other:?}"),
+    }
+    (mcu, cloudy)
+}
+
+/// Presence on a link *is* the peer's Hello, so losing the peer has to retract it. That includes the
+/// transport simply ending (EOF), which never produces a `Disconnected` event — without the retract,
+/// `publishers()` would keep naming a peer nothing can reach.
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_loss_retracts_presence() {
+    let mut mcu_link = HostLink::host("mcu").unwrap();
+    mcu_link.publishes::<Pos>().unwrap();
+    mcu_link.serves::<Add>().unwrap();
+    let (mcu, cloudy) = link_to_cloudy(mcu_link, "loss").await;
+
+    let mut watch = cloudy.watch_publishers::<Pos>().unwrap();
+    assert_eq!(
+        timeout(WAIT, watch.recv()).await.unwrap(),
+        Some(PresenceEvent::Joined("mcu".to_string()))
+    );
+    assert_eq!(cloudy.publishers::<Pos>().await.unwrap(), ["mcu"]);
+
+    // Dropping the MCU host drops its transport, so the bridge side sees EOF.
+    drop(mcu);
+    assert_eq!(
+        timeout(WAIT, watch.recv()).await.unwrap(),
+        Some(PresenceEvent::Left("mcu".to_string()))
+    );
+    assert!(cloudy.publishers::<Pos>().await.unwrap().is_empty());
+    assert!(cloudy.servers::<Add>().await.unwrap().is_empty());
+}
+
+/// A request the MCU never announced with `calls()` reaches the bridge as a bare hash it cannot name,
+/// and it must come back as an error naming the fix — not hang, and not be routed to some other type.
+#[tokio::test(flavor = "multi_thread")]
+async fn request_type_the_peer_never_announced_is_refused() {
+    let mcu_link = HostLink::host("mcu").unwrap(); // note: no calls::<Echo>()
+    let (mcu, cloudy) = link_to_cloudy(mcu_link, "unannounced").await;
+    let _server = cloudy.serve::<Echo>().unwrap();
+
+    let err = mcu
+        .call::<Echo>(
+            &Echo {
+                text: "hi".to_string(),
+            },
+            WAIT,
+        )
+        .await;
+    match err {
+        Err(reiny_link::CallError::Remote(m)) => assert!(m.contains("calls()"), "{m}"),
+        other => panic!("expected a Remote error naming calls(), got {other:?}"),
+    }
+}
+
+/// A link has no finalize, so a responder that drops a request without answering would leave the MCU
+/// waiting for its whole timeout. The engine turns that drop into an error instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn dropped_request_answers_with_an_error() {
+    let mut mcu_link = HostLink::host("mcu").unwrap();
+    mcu_link.calls::<Echo>().unwrap();
+    let (mcu, cloudy) = link_to_cloudy(mcu_link, "dropped").await;
+
+    let mut server = cloudy.serve::<Echo>().unwrap();
+    tokio::spawn(async move {
+        // Take the request and drop it without replying.
+        drop(server.recv().await.unwrap());
+    });
+
+    let started = std::time::Instant::now();
+    let err = mcu
+        .call::<Echo>(
+            &Echo {
+                text: "hi".to_string(),
+            },
+            WAIT,
+        )
+        .await;
+    match err {
+        Err(reiny_link::CallError::Remote(m)) => assert_eq!(m, "no reply"),
+        other => panic!("expected Remote(\"no reply\"), got {other:?}"),
+    }
+    assert!(started.elapsed() < WAIT, "waited for the full timeout");
+}

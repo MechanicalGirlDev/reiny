@@ -1,8 +1,8 @@
-//! [`Host`] —— tokio で [`Link`] を [`Transport`] の上で回すドライバ。
+//! [`Host`] — the driver that runs a [`Link`] over a [`Transport`] on tokio.
 //!
-//! `Link` は sans-I/O なので、ホスト側ではこれが I/O と時計を供給する: 受信 → `feed` →
-//! `next`、送信要求 → `drain` / `drain_frame` → `transport.send`、100 ms ごとの `tick`。
-//! 利用側は型で `send` / `call` し、届いたものを `recv` で受ける。
+//! `Link` is sans-I/O, so on the host side this is what supplies the I/O and the clock: receive →
+//! `feed` → `next`, a send request → `drain` / `drain_frame` → `transport.send`, and a `tick` every
+//! 100 ms. Callers `send` / `call` by type and take what arrives out of `recv`.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -19,63 +19,63 @@ use crate::link::{Error, Event, Link};
 use crate::transport::Transport;
 use crate::wire;
 
-/// ホストで使う `Link`: ヒープのバッファ、型 64 個まで、フレーム 4 KiB。
+/// The `Link` used on a host: heap buffers, up to 64 types, 4 KiB frames.
 pub type HostLink = Link<Vec<u8>, 64, 4096>;
 
 impl HostLink {
-    /// ホスト用の既定サイズで作る(送受信バッファ各 16 KiB)。
+    /// Build one at the host's default sizes (16 KiB for each of the two buffers).
     pub fn host(id: &str) -> Result<Self, Error> {
         Self::new(id, vec![0; 16 * 1024], vec![0; 16 * 1024])
     }
 }
 
-/// 相手が Hello で名乗った型(名前付き)。
+/// A type the peer declared in its Hello, with its name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerType {
-    /// [`wire::type_hash`]。
+    /// See [`wire::type_hash`].
     pub hash: u32,
-    /// `Topic::TYPE`。
+    /// `Topic::TYPE`.
     pub name: String,
-    /// [`wire::flags`] の OR。
+    /// The OR of [`wire::flags`].
     pub flags: u8,
-    /// 相手の `Topic::SCHEMA`。
+    /// The peer's `Topic::SCHEMA`.
     pub schema: Option<u64>,
 }
 
-/// [`Host::recv`] が返す出来事。Reply / Error は [`Host::call`] が内部で消費する。
+/// What [`Host::recv`] reports. Reply / Error are consumed internally by [`Host::call`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostEvent {
-    /// 相手の Hello(初回、または相手の再起動)。latched な型はここで送り直す。
+    /// The peer's Hello (the first one, or the peer restarting). Re-send latched types here.
     Connected {
-        /// 相手の id。
+        /// The peer's id.
         id: String,
-        /// 相手が名乗った型。
+        /// The types the peer declared.
         types: Vec<PeerType>,
     },
-    /// 受信が途絶えた。
+    /// Nothing has been received for too long.
     Disconnected,
-    /// 購読している型の Data。[`HostEvent::decode`] で型にする。
+    /// Data of a subscribed type. Turn it into a type with [`HostEvent::decode`].
     Data {
-        /// 型ハッシュ。
+        /// The type hash.
         hash: u32,
-        /// 通し番号。
+        /// The running counter.
         seq: u8,
-        /// prost の bytes。
+        /// The prost bytes.
         payload: Vec<u8>,
     },
-    /// serve している型の Request。[`Host::reply`] / [`Host::reply_err`] に `seq` を渡す。
+    /// A Request for a served type. Pass `seq` to [`Host::reply`] / [`Host::reply_err`].
     Request {
-        /// request 型のハッシュ。
+        /// The request type's hash.
         hash: u32,
-        /// 相関 id。
+        /// The correlation id.
         seq: u8,
-        /// prost の bytes。
+        /// The prost bytes.
         payload: Vec<u8>,
     },
 }
 
 impl HostEvent {
-    /// Data / Request を型 `T` として decode する。型ハッシュが違えば `None`。
+    /// Decode a Data / Request as the type `T`. `None` if the type hash differs.
     #[must_use]
     pub fn decode<T: Topic + Message + Default>(&self) -> Option<T> {
         match self {
@@ -89,20 +89,20 @@ impl HostEvent {
     }
 }
 
-/// [`Host::call`] の失敗。
+/// A [`Host::call`] failure.
 #[derive(Debug)]
 pub enum CallError {
-    /// 相手がその request 型を serve していない(未接続を含む)。
+    /// The peer does not serve that request type (which includes not being connected).
     NoPeerService,
-    /// 期限までに応答が無かった。
+    /// No response arrived before the deadline.
     Timeout,
-    /// 相手が `reply_err` した。
+    /// The peer answered with `reply_err`.
     Remote(String),
-    /// 応答が `Response` として decode できない。
+    /// The response does not decode as `Response`.
     Decode(prost::DecodeError),
-    /// link 層の失敗(送信バッファ満杯など)。
+    /// A link-layer failure (a full send buffer, say).
     Link(Error),
-    /// ドライバが終了した(transport の EOF / エラー)。
+    /// The driver stopped (the transport hit EOF or an error).
     Closed,
 }
 
@@ -124,9 +124,10 @@ impl std::error::Error for CallError {}
 type Pending = Arc<Mutex<HashMap<(u32, u8), oneshot::Sender<Result<Vec<u8>, String>>>>>;
 type Peer = Arc<Mutex<Option<(String, Vec<PeerType>)>>>;
 
-/// 1 本のリンクのホスト側。drop するとドライバも止まる。
+/// The host side of one link. Dropping it stops the driver too.
 ///
-/// 全メソッドが `&self` なので `Arc` で共有できる(`recv` の受け手は tokio の mutex で 1 つ)。
+/// Every method takes `&self`, so it can be shared through an `Arc` (the one `recv` consumer is
+/// serialized by a tokio mutex).
 pub struct Host {
     link: Arc<Mutex<HostLink>>,
     wake: Arc<Notify>,
@@ -137,7 +138,7 @@ pub struct Host {
 }
 
 impl Host {
-    /// `link` を `transport` の上で回し始める。
+    /// Start running `link` over `transport`.
     pub fn spawn<T: Transport + 'static>(link: HostLink, transport: T) -> Self {
         let link = Arc::new(Mutex::new(link));
         let wake = Arc::new(Notify::new());
@@ -162,27 +163,27 @@ impl Host {
         }
     }
 
-    /// 次の出来事。ドライバが止まったら `None`。cancel-safe(取り出した出来事を await 地点に
-    /// 抱えない)。
+    /// The next event, or `None` once the driver has stopped. Cancel-safe (no event pulled from the
+    /// channel is ever held across an await point).
     pub async fn recv(&self) -> Option<HostEvent> {
         self.events.lock().await.recv().await
     }
 
-    /// 型 `T` を送る。相手が購読していなければ `Ok(false)`。
+    /// Send the type `T`. `Ok(false)` if the peer does not subscribe to it.
     pub fn send<T: Topic + Message>(&self, msg: &T) -> Result<bool, Error> {
         let sent = lock(&self.link).send(msg)?;
         self.wake.notify_one();
         Ok(sent)
     }
 
-    /// [`Host::send`] の encode 済み版(型ハッシュ + prost の bytes)。
+    /// The pre-encoded form of [`Host::send`] (type hash + prost bytes).
     pub fn send_raw(&self, hash: u32, payload: &[u8]) -> Result<bool, Error> {
         let sent = lock(&self.link).send_raw(hash, payload)?;
         self.wake.notify_one();
         Ok(sent)
     }
 
-    /// request 型 `S` を送って応答を待つ。
+    /// Send the request type `S` and wait for the response.
     pub async fn call<S: Service>(
         &self,
         req: &S,
@@ -194,7 +195,7 @@ impl Host {
         S::Response::decode(bytes.as_slice()).map_err(CallError::Decode)
     }
 
-    /// [`Host::call`] の encode 済み版。応答も prost の bytes のまま。
+    /// The pre-encoded form of [`Host::call`]. The response stays prost bytes too.
     pub async fn call_raw(
         &self,
         hash: u32,
@@ -203,8 +204,9 @@ impl Host {
     ) -> Result<Vec<u8>, CallError> {
         let (tx, rx) = oneshot::channel();
         let seq = {
-            // request を積むのと pending に登録するのを同じ lock の中でやる —— 間にドライバが
-            // 送って応答まで受け取ると、登録前の応答が捨てられる。
+            // Queuing the request and registering it in `pending` happen under the same lock — if
+            // the driver got to send it and take the reply in between, the reply would arrive
+            // before the registration and be thrown away.
             let mut link = lock(&self.link);
             let seq = link.request_raw(hash, &payload).map_err(|e| match e {
                 Error::NoPeerService => CallError::NoPeerService,
@@ -225,51 +227,52 @@ impl Host {
         }
     }
 
-    /// [`HostEvent::Request`] に応答する。
+    /// Answer a [`HostEvent::Request`].
     pub fn reply<S: Service>(&self, seq: u8, resp: &S::Response) -> Result<(), Error> {
         lock(&self.link).reply::<S>(seq, resp)?;
         self.wake.notify_one();
         Ok(())
     }
 
-    /// [`Host::reply`] の encode 済み版。`hash` は request 型のもの。
+    /// The pre-encoded form of [`Host::reply`]. `hash` is the *request* type's.
     pub fn reply_raw(&self, seq: u8, hash: u32, payload: &[u8]) -> Result<(), Error> {
         lock(&self.link).reply_raw(seq, hash, payload)?;
         self.wake.notify_one();
         Ok(())
     }
 
-    /// [`HostEvent::Request`] にエラーで応答する。
+    /// Answer a [`HostEvent::Request`] with an error.
     pub fn reply_err<S: Service>(&self, seq: u8, message: &str) -> Result<(), Error> {
         self.reply_err_raw(seq, wire::type_hash(S::TYPE), message)
     }
 
-    /// [`Host::reply_err`] の型ハッシュ版。
+    /// The type-hash form of [`Host::reply_err`].
     pub fn reply_err_raw(&self, seq: u8, hash: u32, message: &str) -> Result<(), Error> {
         lock(&self.link).reply_err_raw(seq, hash, message)?;
         self.wake.notify_one();
         Ok(())
     }
 
-    /// 相手と繋がっているか。
+    /// Whether the peer is connected.
     #[must_use]
     pub fn is_connected(&self) -> bool {
         lock(&self.link).is_connected()
     }
 
-    /// 繋がっている相手の id と型(直近の Hello から)。
+    /// The connected peer's id and types (from its most recent Hello).
     #[must_use]
     pub fn peer(&self) -> Option<(String, Vec<PeerType>)> {
         lock(&self.peer).clone()
     }
 
-    /// 中の `Link`。統計([`Link::stats`])や、ここに無い操作への逃げ道。
+    /// The `Link` inside. For statistics ([`Link::stats`]) and as an escape hatch to operations that
+    /// are not mirrored here.
     #[must_use]
     pub fn link(&self) -> &Mutex<HostLink> {
         &self.link
     }
 
-    /// ドライバを止める。drop でも止まる。
+    /// Stop the driver. Dropping the `Host` does the same.
     pub fn abort(&self) {
         self.task.abort();
     }
@@ -285,12 +288,13 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-#[allow(clippy::cast_possible_truncation)] // Link の時刻は u32 ms で wrap する前提
+#[allow(clippy::cast_possible_truncation)] // Link's clock is u32 ms and is expected to wrap
 fn now_ms(start: Instant) -> u32 {
     start.elapsed().as_millis() as u32
 }
 
-/// ドライバ本体。transport の EOF / エラー、または `Host` の drop(events の受け手消失)で戻る。
+/// The driver itself. Returns on transport EOF / error, or when the `Host` is dropped (the event
+/// receiver disappears).
 async fn drive<T: Transport>(
     link: Arc<Mutex<HostLink>>,
     mut transport: T,
@@ -317,7 +321,7 @@ async fn drive<T: Transport>(
         };
         for ev in out {
             if events.send(ev).await.is_err() {
-                return Ok(()); // Host が drop された
+                return Ok(()); // the Host was dropped
             }
         }
         flush::<T>(&link, &mut transport, &mut tx).await?;
@@ -337,7 +341,7 @@ async fn drive<T: Transport>(
                         rest = &rest[accepted..];
                         collect(&mut l, &mut out, &pending, &peer);
                         if accepted == 0 {
-                            break; // next() で空かなかった: フレームがバッファより長い
+                            break; // next() did not free anything: the frame is longer than the buffer
                         }
                     }
                     out
@@ -354,7 +358,7 @@ async fn drive<T: Transport>(
     }
 }
 
-/// 送信バッファを空になるまで transport へ流す。
+/// Push the send buffer out to the transport until it is empty.
 async fn flush<T: Transport>(
     link: &Mutex<HostLink>,
     transport: &mut T,
@@ -382,7 +386,8 @@ fn collect(l: &mut HostLink, out: &mut Vec<HostEvent>, pending: &Pending, peer: 
     }
 }
 
-/// `Link` の出来事を持ち出せる形に写す。Reply / Error は `call` の待ち手に渡して消える。
+/// Copy a `Link` event into a shape that can be handed out. Reply / Error go to whoever is waiting
+/// in `call` and disappear here.
 fn convert(l: &HostLink, ev: Event, pending: &Pending, peer: &Peer) -> Option<HostEvent> {
     match ev {
         Event::Connected(f) => {
@@ -426,5 +431,94 @@ fn convert(l: &HostLink, ev: Event, pending: &Pending, peer: &Peer) -> Option<Ho
             }
             None
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests may fail by panicking
+mod tests {
+    use super::*;
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct A {
+        #[prost(int32, tag = "1")]
+        v: i32,
+    }
+    impl Topic for A {
+        const TYPE: &'static str = "HostA";
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct B {
+        #[prost(int32, tag = "1")]
+        v: i32,
+    }
+    impl Topic for B {
+        const TYPE: &'static str = "HostB";
+    }
+
+    fn data(hash: u32, payload: Vec<u8>) -> HostEvent {
+        HostEvent::Data {
+            hash,
+            seq: 0,
+            payload,
+        }
+    }
+
+    /// `decode` is keyed on the type hash, not on whether the bytes happen to parse. `A` and `B`
+    /// have identical wire shapes, so without the hash check the wrong type would decode cleanly —
+    /// exactly the silent corruption the type-as-address rule exists to prevent.
+    #[test]
+    fn decode_matches_on_the_type_hash() {
+        let ev = data(wire::type_hash(A::TYPE), A { v: 7 }.encode_to_vec());
+        assert_eq!(ev.decode::<A>(), Some(A { v: 7 }));
+        assert_eq!(ev.decode::<B>(), None, "decoded as the wrong type");
+
+        // A Request decodes the same way; the other two events carry no payload at all.
+        let req = HostEvent::Request {
+            hash: wire::type_hash(A::TYPE),
+            seq: 3,
+            payload: A { v: 1 }.encode_to_vec(),
+        };
+        assert_eq!(req.decode::<A>(), Some(A { v: 1 }));
+        assert_eq!(HostEvent::Disconnected.decode::<A>(), None);
+        assert_eq!(
+            HostEvent::Connected {
+                id: "x".into(),
+                types: vec![],
+            }
+            .decode::<A>(),
+            None
+        );
+    }
+
+    /// Undecodable bytes are `None`, not a panic — the payload comes off a wire that anything can
+    /// write to.
+    #[test]
+    fn decode_rejects_garbage_payloads() {
+        let ev = data(wire::type_hash(A::TYPE), vec![0xff, 0xff, 0xff]);
+        assert_eq!(ev.decode::<A>(), None);
+    }
+
+    /// Every `CallError` says which of the failures it is; `Timeout` and `NoPeerService` in
+    /// particular are what callers branch on, and both are reported by different code paths.
+    #[test]
+    fn call_errors_describe_themselves() {
+        assert!(CallError::Timeout.to_string().contains("timed out"));
+        assert!(
+            CallError::NoPeerService
+                .to_string()
+                .contains("does not serve")
+        );
+        assert_eq!(
+            CallError::Remote("busy".into()).to_string(),
+            "peer replied with error: busy"
+        );
+        assert!(CallError::Closed.to_string().contains("stopped"));
+        assert!(
+            CallError::Link(Error::Full)
+                .to_string()
+                .contains("tx buffer full")
+        );
     }
 }

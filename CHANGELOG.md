@@ -188,6 +188,18 @@ piece that does not depend on it.
   (a publisher keeps at most the one latched value; rings belong to the
   subscriber's `.latest(n)`).
 
+### Fixed
+
+- **`reiny-link`** — `Link::decode` / `decode_reply` through a stale `Frame`
+  handle returned a default-valued message instead of `None`. `payload()`
+  answers a stale handle with an empty slice, and an empty slice is a valid
+  encoding of `T::default()`, so a caller holding an old handle silently read
+  zeros. Both now check the handle's generation before decoding.
+- **`reiny-link`** — `LinkEngine` did not retract the peer's presence when the
+  transport ended (EOF or error); only the link's own silence timeout
+  (`Disconnected`) did. After the far end went away, `publishers()` /
+  `servers()` kept naming a peer nothing could reach.
+
 ### Notes
 
 - An `embedded-io-async` adapter was left out; `feed` / `drain` is four

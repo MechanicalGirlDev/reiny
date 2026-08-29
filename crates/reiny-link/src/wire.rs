@@ -1,48 +1,50 @@
-//! ワイヤ形式 —— 1 フレーム = COBS(header + payload + CRC) + 区切り `0x00`。
+//! The wire format — one frame = COBS(header + payload + CRC) followed by the `0x00` delimiter.
 //!
 //! ```text
 //! raw    : [kind u8][type_hash u32 LE][seq u8][payload …][crc16 LE]
 //! on wire: COBS(raw) 0x00
 //! ```
 //!
-//! - **型はハッシュで運ぶ**([`type_hash`] = FNV-1a 32 bit of `Topic::TYPE`)。型名の文字列は
-//!   [`Kind::Hello`] にだけ載る。type = topic を 4 バイトで表す。
-//! - **COBS** は `0x00` を区切りとして再同期できる(途中から聞き始めても次の `0x00` から
-//!   揃う)。datagram(UDP)でも同じ形を使う —— 受信経路が 1 本で済む方が、1 バイトの節約より
-//!   価値がある。
-//! - **CRC-16/KERMIT** は header + payload に掛かる。シリアルの化けは CRC で落とし、
-//!   COBS は区切りの整合だけを見る。
-//! - `seq` は Data では欠落検出用の通し番号、Request / Reply / Error では相関 id。
+//! - **The type travels as a hash** ([`type_hash`] = FNV-1a 32-bit of `Topic::TYPE`). The type name
+//!   as a string rides only in [`Kind::Hello`]. type = topic in four bytes.
+//! - **COBS** allows resynchronization on `0x00` (start listening mid-stream and you are aligned
+//!   again from the next `0x00`). Datagrams (UDP) use the same shape — one receive path is worth
+//!   more than the byte it saves.
+//! - **CRC-16/KERMIT** covers header + payload. Serial corruption is caught by the CRC; COBS only
+//!   looks after delimiter consistency.
+//! - `seq` is a running counter for gap detection on Data, and a correlation id on Request / Reply
+//!   / Error.
 //!
-//! この module は `Link` の下請けで、フレームの組み立てと分解しか知らない(どの型を
-//! 購読しているか等の状態は持たない)。
+//! This module is `Link`'s subordinate: it knows how to assemble and take apart a frame and nothing
+//! else (it holds no state such as which types are subscribed).
 
 use core::fmt;
 
-/// header 長(kind 1 + hash 4 + seq 1)。
+/// Header length (kind 1 + hash 4 + seq 1).
 pub const HEADER: usize = 6;
-/// trailer 長(CRC-16)。
+/// Trailer length (CRC-16).
 pub const TRAILER: usize = 2;
-/// payload 以外の raw frame 長。
+/// The length of a raw frame excluding the payload.
 pub const OVERHEAD: usize = HEADER + TRAILER;
-/// フレーム区切り。COBS 符号化後のフレームには現れない。
+/// The frame delimiter. It never appears inside a COBS-encoded frame.
 pub const DELIMITER: u8 = 0;
 
-/// フレームの種別。
+/// The frame kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Kind {
-    /// 自分の id と名乗る型の一覧。link up 時に双方が送る(§ `hello_write`)。
+    /// Own id plus the list of types being declared. Both sides send it on link up
+    /// (§ `hello_write`).
     Hello = 0,
-    /// publish された 1 メッセージ。`hash` = 型、`seq` = 通し番号。
+    /// One published message. `hash` = the type, `seq` = the running counter.
     Data = 1,
-    /// service の呼び出し。`hash` = request 型、`seq` = 相関 id。
+    /// A service invocation. `hash` = the request type, `seq` = the correlation id.
     Request = 2,
-    /// [`Kind::Request`] への応答。`hash` / `seq` は request と同じ。
+    /// The response to a [`Kind::Request`]. `hash` / `seq` match the request's.
     Reply = 3,
-    /// [`Kind::Request`] へのエラー応答(payload は UTF-8 のメッセージ)。
+    /// An error response to a [`Kind::Request`] (the payload is a UTF-8 message).
     Error = 4,
-    /// 無音時の生存確認。payload 無し。
+    /// A liveness check sent while the link is silent. No payload.
     Ping = 5,
 }
 
@@ -60,31 +62,31 @@ impl Kind {
     }
 }
 
-/// raw frame の header。
+/// A raw frame's header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
-    /// 種別。
+    /// The kind.
     pub kind: Kind,
-    /// 型ハッシュ([`type_hash`])。Hello / Ping では 0。
+    /// The type hash ([`type_hash`]). Zero for Hello / Ping.
     pub hash: u32,
-    /// 通し番号 / 相関 id。
+    /// Running counter / correlation id.
     pub seq: u8,
 }
 
-/// フレームの組み立て・分解の失敗。
+/// A failure while assembling or taking apart a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireError {
-    /// バッファに収まらない。
+    /// Does not fit the buffer.
     TooLarge,
-    /// 短すぎて header + CRC が無い。
+    /// Too short to hold a header + CRC.
     Short,
-    /// CRC 不一致。
+    /// CRC mismatch.
     Crc,
-    /// COBS が壊れている。
+    /// The COBS encoding is broken.
     Cobs,
-    /// 未知の種別。
+    /// Unknown kind.
     Kind(u8),
-    /// Hello の payload が形になっていない。
+    /// The Hello payload is not shaped like one.
     Malformed,
 }
 
@@ -105,10 +107,11 @@ impl core::error::Error for WireError {}
 
 const CRC: crc::Crc<u16> = crc::Crc::<u16>::new(&crc::CRC_16_KERMIT);
 
-/// `Topic::TYPE` → ワイヤ上の型ハッシュ(FNV-1a 32 bit)。`const fn` なのでコンパイル時に出る。
+/// `Topic::TYPE` → the on-wire type hash (FNV-1a 32-bit). It is a `const fn`, so it is computed at
+/// compile time.
 ///
-/// 32 bit なのはフレームごとの固定費を抑えるため。衝突は Hello で名前ごと届くので link up 時に
-/// 検出できる(`Link` 側の仕事)。
+/// 32 bits keeps the per-frame fixed cost down. A collision is detectable at link up, because Hello
+/// carries the names as well (that is `Link`'s job, not this module's).
 #[must_use]
 pub const fn type_hash(name: &str) -> u32 {
     let bytes = name.as_bytes();
@@ -122,14 +125,15 @@ pub const fn type_hash(name: &str) -> u32 {
     h
 }
 
-/// raw frame `raw_len` バイトを COBS で包み区切りを付けたときの**上限**長。
+/// The **upper bound** on the length of a `raw_len`-byte raw frame once COBS-wrapped and
+/// delimited.
 #[must_use]
 pub const fn encoded_max(raw_len: usize) -> usize {
     cobs::max_encoding_length(raw_len) + 1
 }
 
-/// `buf[HEADER..HEADER + payload_len]` に payload を**書き終えた後**に呼び、header と CRC を
-/// 付けて raw frame 長を返す。
+/// Call this **after** writing the payload into `buf[HEADER..HEADER + payload_len]`; it fills in
+/// the header and the CRC and returns the raw frame length.
 pub fn seal(buf: &mut [u8], header: Header, payload_len: usize) -> Result<usize, WireError> {
     let raw_len = OVERHEAD + payload_len;
     if raw_len > buf.len() {
@@ -143,8 +147,8 @@ pub fn seal(buf: &mut [u8], header: Header, payload_len: usize) -> Result<usize,
     Ok(raw_len)
 }
 
-/// raw frame(COBS 復号済み)を header と payload に分ける。CRC 不一致・短すぎ・未知の
-/// kind は `Err`。
+/// Split a raw frame (already COBS-decoded) into its header and payload. A CRC mismatch, a frame
+/// that is too short, or an unknown kind are all `Err`.
 pub fn parse(frame: &[u8]) -> Result<(Header, &[u8]), WireError> {
     if frame.len() < OVERHEAD {
         return Err(WireError::Short);
@@ -166,7 +170,8 @@ pub fn parse(frame: &[u8]) -> Result<(Header, &[u8]), WireError> {
     ))
 }
 
-/// raw frame を COBS で包み、区切りを付けて `out` に書く。書いた長さを返す。
+/// COBS-wrap a raw frame, append the delimiter and write it into `out`. Returns how much was
+/// written.
 pub fn encode(raw: &[u8], out: &mut [u8]) -> Result<usize, WireError> {
     if out.len() < cobs::max_encoding_length(raw.len()) + 1 {
         return Err(WireError::TooLarge);
@@ -176,7 +181,7 @@ pub fn encode(raw: &[u8], out: &mut [u8]) -> Result<usize, WireError> {
     Ok(n + 1)
 }
 
-/// 区切りを除いた COBS 列をその場で復号し、raw frame 長を返す。
+/// Decode a COBS sequence (delimiter already stripped) in place and return the raw frame length.
 pub fn decode_in_place(buf: &mut [u8]) -> Result<usize, WireError> {
     cobs::decode_in_place(buf).map_err(|_| WireError::Cobs)
 }
@@ -185,43 +190,45 @@ pub fn decode_in_place(buf: &mut [u8]) -> Result<usize, WireError> {
 // Hello
 // ---------------------------------------------------------------------------
 
-/// Hello の先頭バイトのビット: 相手の Hello への応答である(応答に応答しないため)。
+/// Bit in Hello's first byte: this is a reply to the peer's Hello (so replies are not replied to).
 pub const HELLO_ACK: u8 = 0x01;
-/// Hello の先頭バイトのビット: 送り手は **bridge** —— 相手が publish する型は全部 subscribe し、
-/// 相手が subscribe する型は全部 publish でき、相手が呼ぶ request 型は全部 serve する。型を
-/// 名乗らずに相手の宣言を鏡写しにする側(zenoh への橋)のための印。
+/// Bit in Hello's first byte: the sender is a **bridge** — it subscribes to every type the peer
+/// publishes, can publish every type the peer subscribes to, and serves every request type the peer
+/// calls. The mark of a side that declares no types of its own and instead mirrors the peer's
+/// declarations (the bridge to zenoh).
 pub const HELLO_BRIDGE: u8 = 0x02;
 
-/// Hello の各型エントリのフラグ。
+/// Per-type flags in a Hello entry.
 pub mod flags {
-    /// この型を publish する。
+    /// Publishes this type.
     pub const PUB: u8 = 1;
-    /// この型を subscribe する。
+    /// Subscribes to this type.
     pub const SUB: u8 = 2;
-    /// この request 型を serve する。
+    /// Serves this request type.
     pub const SERVE: u8 = 4;
-    /// publish は latched(link up 時に直近値を再送する約束)。
+    /// The publication is latched (a promise to re-send the most recent value on link up).
     pub const LATCHED: u8 = 8;
-    /// `schema` が有効(`Topic::SCHEMA` が `Some`)。
+    /// `schema` is present (`Topic::SCHEMA` is `Some`).
     pub const SCHEMA: u8 = 16;
-    /// この request 型を呼ぶ(`Link::calls`)。相手が bridge のとき、型名を知らせるためだけの印。
+    /// Calls this request type (`Link::calls`). When the peer is a bridge, this exists purely to
+    /// tell it the type's name.
     pub const CALLS: u8 = 32;
 }
 
-/// Hello に載る型 1 つ分。
+/// One type's worth of a Hello.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HelloEntry<'a> {
-    /// [`type_hash`]。
+    /// See [`type_hash`].
     pub hash: u32,
-    /// [`flags`] の OR。
+    /// The OR of [`flags`].
     pub flags: u8,
-    /// `Topic::SCHEMA`。
+    /// `Topic::SCHEMA`.
     pub schema: Option<u64>,
-    /// `Topic::TYPE`。ハッシュの復元と衝突検出のためにここにだけ載る。
+    /// `Topic::TYPE`. It rides here and nowhere else, to recover the hash and to detect collisions.
     pub name: &'a str,
 }
 
-/// Hello の payload を `out` に書き、長さを返す。
+/// Write a Hello payload into `out` and return its length.
 ///
 /// ```text
 /// [flags u8][id_len u8][id …][count u8] { [hash u32][flags u8][schema u64][name_len u8][name …] } × count
@@ -250,21 +257,21 @@ pub fn hello_write<'a>(
     Ok(w.pos)
 }
 
-/// 分解済みの Hello。
+/// A parsed Hello.
 #[derive(Debug, Clone, Copy)]
 pub struct Hello<'a> {
-    /// 相手の Hello への応答か。
+    /// Whether this is a reply to the peer's Hello.
     pub ack: bool,
-    /// 相手は bridge か([`HELLO_BRIDGE`])。
+    /// Whether the peer is a bridge ([`HELLO_BRIDGE`]).
     pub bridge: bool,
-    /// 相手の id。
+    /// The peer's id.
     pub id: &'a str,
     count: usize,
     entries: &'a [u8],
 }
 
 impl<'a> Hello<'a> {
-    /// 型エントリの列。途中で形が崩れていたらそこで止まる。
+    /// The sequence of type entries. It stops wherever the shape breaks down.
     #[must_use]
     pub fn entries(&self) -> HelloEntries<'a> {
         HelloEntries {
@@ -277,7 +284,7 @@ impl<'a> Hello<'a> {
     }
 }
 
-/// [`Hello::entries`] のイテレータ。
+/// The iterator behind [`Hello::entries`].
 pub struct HelloEntries<'a> {
     r: Reader<'a>,
     remaining: usize,
@@ -297,7 +304,7 @@ impl<'a> Iterator for HelloEntries<'a> {
         let name = self.r.str()?;
         Some(HelloEntry {
             hash,
-            // SCHEMA ビットはワイヤ上の符号化の都合(`schema` の有無)。表には出さない。
+            // The SCHEMA bit is an encoding detail (whether `schema` is present). Do not surface it.
             flags: flags & !flags::SCHEMA,
             schema: (flags & flags::SCHEMA != 0).then_some(schema),
             name,
@@ -305,7 +312,7 @@ impl<'a> Iterator for HelloEntries<'a> {
     }
 }
 
-/// Hello の payload を分解する。
+/// Take a Hello payload apart.
 pub fn hello_parse(payload: &[u8]) -> Result<Hello<'_>, WireError> {
     let mut r = Reader {
         buf: payload,
@@ -386,21 +393,31 @@ impl<'a> Reader<'a> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)] // テストは panic で失敗を表現してよい
+#[allow(clippy::unwrap_used)] // tests may fail by panicking
 mod tests {
     use super::*;
 
     #[test]
     fn type_hash_is_fnv1a_32() {
-        // FNV-1a の既知ベクタ(空文字列と "a")。
+        // Known FNV-1a vectors (the empty string and "a").
         assert_eq!(type_hash(""), 0x811c_9dc5);
         assert_eq!(type_hash("a"), 0xe40c_292c);
         assert_ne!(type_hash("Ping"), type_hash("Pong"));
     }
 
+    /// The hash is the whole address, so it must depend on every byte of the name and on their
+    /// order — the two ways a weak hash aliases distinct types onto one topic.
+    #[test]
+    fn type_hash_separates_similar_names() {
+        assert_ne!(type_hash("MotorState"), type_hash("MotorStat"));
+        assert_ne!(type_hash("MotorState"), type_hash("MotorStates"));
+        assert_ne!(type_hash("ab"), type_hash("ba"));
+        assert_ne!(type_hash("Ping"), type_hash("ping"));
+    }
+
     #[test]
     fn encoded_max_bounds_real_encodings() {
-        // 最悪ケース(0 が無い列)を実際に符号化しても上限を超えない。
+        // Even the worst case (a run with no zeros) stays inside the bound when actually encoded.
         for n in [0usize, 1, 253, 254, 255, 508, 509, 4096] {
             let raw = vec![0x7fu8; n];
             let mut out = vec![0u8; encoded_max(n)];
@@ -412,7 +429,7 @@ mod tests {
     #[test]
     fn seal_encode_decode_parse_roundtrip() {
         let mut raw = [0u8; 64];
-        raw[HEADER..HEADER + 4].copy_from_slice(&[0, 1, 0, 255]); // 0 を含む payload
+        raw[HEADER..HEADER + 4].copy_from_slice(&[0, 1, 0, 255]); // a payload containing zeros
         let header = Header {
             kind: Kind::Data,
             hash: 0xdead_beef,
@@ -434,6 +451,35 @@ mod tests {
         assert_eq!(payload, &[0, 1, 0, 255]);
     }
 
+    /// Every kind survives the round trip. `Kind::from_u8` is a hand-written match, so a variant
+    /// added to the enum but forgotten there would decode as `WireError::Kind`.
+    #[test]
+    fn every_kind_roundtrips() {
+        for kind in [
+            Kind::Hello,
+            Kind::Data,
+            Kind::Request,
+            Kind::Reply,
+            Kind::Error,
+            Kind::Ping,
+        ] {
+            let mut raw = [0u8; 16];
+            let n = seal(
+                &mut raw,
+                Header {
+                    kind,
+                    hash: 1,
+                    seq: 2,
+                },
+                0,
+            )
+            .unwrap();
+            let (h, payload) = parse(&raw[..n]).unwrap();
+            assert_eq!(h.kind, kind);
+            assert!(payload.is_empty());
+        }
+    }
+
     #[test]
     fn parse_rejects_corruption() {
         let mut raw = [0u8; 16];
@@ -448,7 +494,7 @@ mod tests {
         )
         .unwrap();
         assert!(parse(&raw[..raw_len]).is_ok());
-        raw[5] ^= 1; // seq を化かす
+        raw[5] ^= 1; // corrupt seq
         assert_eq!(parse(&raw[..raw_len]), Err(WireError::Crc));
         assert_eq!(parse(&raw[..OVERHEAD - 1]), Err(WireError::Short));
 
@@ -468,6 +514,70 @@ mod tests {
         let crc = CRC.checksum(&raw[..HEADER]);
         raw[HEADER..n].copy_from_slice(&crc.to_le_bytes());
         assert_eq!(parse(&raw[..n]), Err(WireError::Kind(9)));
+    }
+
+    /// The CRC covers the payload too, not just the header — a single flipped payload bit has to
+    /// take the frame down rather than reaching the decoder as a plausible message.
+    #[test]
+    fn crc_covers_the_payload() {
+        let mut raw = [0u8; 32];
+        raw[HEADER..HEADER + 4].copy_from_slice(b"abcd");
+        let n = seal(
+            &mut raw,
+            Header {
+                kind: Kind::Data,
+                hash: 7,
+                seq: 1,
+            },
+            4,
+        )
+        .unwrap();
+        assert!(parse(&raw[..n]).is_ok());
+        raw[HEADER + 2] ^= 0x01;
+        assert_eq!(parse(&raw[..n]), Err(WireError::Crc));
+    }
+
+    /// Both directions refuse to run off the end of their buffer instead of panicking on a slice.
+    #[test]
+    fn buffers_that_are_too_small_are_reported() {
+        let mut tiny = [0u8; OVERHEAD - 1];
+        assert_eq!(
+            seal(
+                &mut tiny,
+                Header {
+                    kind: Kind::Ping,
+                    hash: 0,
+                    seq: 0
+                },
+                0
+            ),
+            Err(WireError::TooLarge)
+        );
+
+        let mut small = [0u8; 16];
+        let payload_len = small.len(); // a payload as long as the whole buffer cannot fit + OVERHEAD
+        assert_eq!(
+            seal(
+                &mut small,
+                Header {
+                    kind: Kind::Data,
+                    hash: 0,
+                    seq: 0
+                },
+                payload_len
+            ),
+            Err(WireError::TooLarge)
+        );
+
+        let mut out = [0u8; 4];
+        assert_eq!(encode(&[1, 2, 3, 4, 5], &mut out), Err(WireError::TooLarge));
+    }
+
+    /// A COBS sequence whose length byte points past the end is corruption, not a panic.
+    #[test]
+    fn decode_in_place_rejects_broken_cobs() {
+        let mut broken = [0xffu8, 1, 2];
+        assert_eq!(decode_in_place(&mut broken), Err(WireError::Cobs));
     }
 
     #[test]
@@ -495,6 +605,46 @@ mod tests {
         assert_eq!(got, entries);
     }
 
+    /// `ack` and `bridge` are independent bits in the same byte; the four combinations have to stay
+    /// distinguishable, because `ack` decides whether to answer and `bridge` decides whether the
+    /// peer's declarations get mirrored.
+    #[test]
+    fn hello_flag_bits_are_independent() {
+        for (ack, bridge) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut buf = [0u8; 32];
+            let n = hello_write(&mut buf, ack, bridge, "x", core::iter::empty()).unwrap();
+            let hello = hello_parse(&buf[..n]).unwrap();
+            assert_eq!(hello.ack, ack);
+            assert_eq!(hello.bridge, bridge);
+            assert_eq!(hello.entries().count(), 0);
+        }
+    }
+
+    /// The SCHEMA bit is purely an encoding device: it says whether the `schema` field is
+    /// meaningful and must never leak into the flags the caller sees.
+    #[test]
+    fn schema_bit_does_not_leak_into_flags() {
+        let mut buf = [0u8; 64];
+        let n = hello_write(
+            &mut buf,
+            false,
+            false,
+            "x",
+            [HelloEntry {
+                hash: 9,
+                flags: flags::PUB,
+                schema: Some(0),
+                name: "S",
+            }]
+            .into_iter(),
+        )
+        .unwrap();
+        let e = hello_parse(&buf[..n]).unwrap().entries().next().unwrap();
+        assert_eq!(e.flags, flags::PUB, "SCHEMA bit leaked into the flags");
+        // `Some(0)` is a real fingerprint, not "absent" — the bit is what distinguishes them.
+        assert_eq!(e.schema, Some(0));
+    }
+
     #[test]
     fn hello_stops_at_truncation() {
         let mut buf = [0u8; 128];
@@ -512,10 +662,65 @@ mod tests {
             .into_iter(),
         )
         .unwrap();
-        // エントリの途中で切れた Hello: id までは読め、エントリは 0 個で止まる。
+        // A Hello cut short mid-entry: the id still reads, and the entries stop at zero.
         let hello = hello_parse(&buf[..n - 3]).unwrap();
         assert_eq!(hello.id, "x");
         assert_eq!(hello.entries().count(), 0);
         assert!(hello_parse(&[]).is_err());
+    }
+
+    /// A name whose bytes are not UTF-8 stops the iteration rather than surfacing as a bad `&str`.
+    #[test]
+    fn hello_stops_at_invalid_utf8_name() {
+        let mut buf = [0u8; 64];
+        let n = hello_write(
+            &mut buf,
+            false,
+            false,
+            "x",
+            [HelloEntry {
+                hash: 1,
+                flags: flags::PUB,
+                schema: None,
+                name: "AB",
+            }]
+            .into_iter(),
+        )
+        .unwrap();
+        buf[n - 1] = 0xff; // wreck the last byte of the name
+        assert_eq!(hello_parse(&buf[..n]).unwrap().entries().count(), 0);
+    }
+
+    /// The writer refuses what the format cannot express, instead of writing a truncated length.
+    #[test]
+    fn hello_write_rejects_what_it_cannot_encode() {
+        let long = "n".repeat(256);
+        let mut buf = [0u8; 512];
+        // An id longer than 255 bytes: the length prefix is a u8.
+        assert_eq!(
+            hello_write(&mut buf, false, false, &long, core::iter::empty()),
+            Err(WireError::TooLarge)
+        );
+        // More than 255 entries: the count is a u8.
+        let entries = core::iter::repeat_n(
+            HelloEntry {
+                hash: 1,
+                flags: flags::PUB,
+                schema: None,
+                name: "",
+            },
+            256,
+        );
+        let mut big = [0u8; 8192];
+        assert_eq!(
+            hello_write(&mut big, false, false, "x", entries),
+            Err(WireError::TooLarge)
+        );
+        // An output buffer that cannot even hold the header.
+        let mut tiny = [0u8; 2];
+        assert_eq!(
+            hello_write(&mut tiny, false, false, "toolong", core::iter::empty()),
+            Err(WireError::TooLarge)
+        );
     }
 }

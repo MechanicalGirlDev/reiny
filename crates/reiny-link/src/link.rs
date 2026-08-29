@@ -1,22 +1,25 @@
-//! [`Link`] —— 点対点リンクの sans-I/O 状態機械。
+//! [`Link`] — the sans-I/O state machine of a point-to-point link.
 //!
-//! I/O を持たない。受け取ったバイトを [`Link::feed`] で食わせ、送るべきバイトを
-//! [`Link::drain`](stream)/ [`Link::drain_frame`](datagram)で取り出す。時計も持たないので、
-//! 生存確認は [`Link::tick`] に現在時刻(ms)を渡して進める。UART / USB CDC / UDP /
-//! embassy / RTIC / tokio のどれに繋ぐかは呼び出し側の数行で決まる。
+//! It owns no I/O. Feed the bytes you received to [`Link::feed`], take the bytes to send out of
+//! [`Link::drain`] (stream) / [`Link::drain_frame`] (datagram). It owns no clock either, so liveness
+//! is driven by handing the current time (ms) to [`Link::tick`]. Whether it sits on UART / USB CDC /
+//! UDP / embassy / RTIC / tokio is decided by a few lines on the caller's side.
 //!
-//! 接続の流儀:
+//! How a connection goes:
 //!
-//! 1. 双方が起動時に Hello(id + 名乗る型の一覧)を送る。相手の Hello を受けたら ack 付きの
-//!    Hello を返す(ack には返さない)。
-//! 2. Hello を受けた時点で `Connected`。相手が名乗った型の表(hash → flags / schema)を持ち、
-//!    相手が subscribe していない型の `send` はワイヤに出さない。
-//! 3. 無音が `ping_interval_ms` 続けば Ping、受信が `timeout_ms` 途絶えれば `Disconnected`。
-//!    切れている間は `ping_interval_ms` ごとに Hello を送り直す(相手が後から起動しても、
-//!    ケーブルを抜き差ししても、どちらかの Hello が届いた時点で繋がる)。
+//! 1. Both sides send a Hello (id + the list of types they declare) at startup. On receiving the
+//!    peer's Hello, a Hello with `ack` is sent back (an ack is never answered).
+//! 2. Receiving a Hello is what makes the link `Connected`. The peer's declared types are kept in a
+//!    table (hash → flags / schema), and `send` of a type the peer does not subscribe to never
+//!    reaches the wire.
+//! 3. After `ping_interval_ms` of silence a Ping goes out; after `timeout_ms` without receiving
+//!    anything the link goes `Disconnected`. While disconnected, a fresh Hello is re-sent every
+//!    `ping_interval_ms` (so whether the peer starts later or the cable is unplugged and back, the
+//!    link comes up the moment either Hello lands).
 //!
-//! スキーマ指紋(`Topic::SCHEMA`)は Hello で 1 回だけ照合し、不一致の型の Data は捨てる
-//! (reiny 本体と同じ「照合できるときだけ落とす」規則)。
+//! The schema fingerprint (`Topic::SCHEMA`) is checked exactly once, at Hello, and Data of a
+//! mismatching type is dropped (the same "only drop when we can actually compare" rule reiny
+//! proper uses).
 
 use core::fmt;
 
@@ -25,12 +28,14 @@ use reiny_core::{Service, Topic};
 
 use crate::wire::{self, DELIMITER, HEADER, HelloEntry, Kind, OVERHEAD, flags};
 
-/// 生存確認のノブ。物理層ごとに遅延が違うので、既定値は目安。
+/// The liveness knobs. Latency differs per physical layer, so the defaults are a starting point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkConfig {
-    /// これだけ送信が無ければ Ping を出す(切れている間は Hello を出し直す間隔)。
+    /// Send a Ping after this much silence on the send side (and, while disconnected, the interval
+    /// at which the Hello is re-sent).
     pub ping_interval_ms: u32,
-    /// これだけ受信が無ければ `Disconnected`。`ping_interval_ms` の 2〜3 倍が目安。
+    /// Go `Disconnected` after this long without receiving anything. Two to three times
+    /// `ping_interval_ms` is a reasonable choice.
     pub timeout_ms: u32,
 }
 
@@ -43,7 +48,8 @@ impl Default for LinkConfig {
     }
 }
 
-/// id の上限(バイト)。Hello の `id_len` が u8 なのでそれ以下、表の固定長としてこの値。
+/// The maximum id length in bytes. Hello's `id_len` is a u8, so it is at most that; this value is
+/// the fixed size used in the table.
 pub const ID_MAX: usize = 32;
 
 #[derive(Clone, Copy)]
@@ -64,7 +70,7 @@ impl IdBuf {
     }
 
     fn as_str(&self) -> &str {
-        // `&str` から丸ごとコピーしたので必ず UTF-8。
+        // Copied wholesale out of a `&str`, so it is always UTF-8.
         core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or("")
     }
 }
@@ -77,95 +83,98 @@ struct LocalType {
     flags: u8,
 }
 
-/// 相手が Hello で名乗った型 1 つ分。
+/// One type's worth of what the peer declared in its Hello.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RemoteType {
-    /// [`wire::type_hash`]。
+    /// See [`wire::type_hash`].
     pub hash: u32,
-    /// [`wire::flags`] の OR。
+    /// The OR of [`wire::flags`].
     pub flags: u8,
-    /// 相手の `Topic::SCHEMA`。
+    /// The peer's `Topic::SCHEMA`.
     pub schema: Option<u64>,
-    /// 自分の `SCHEMA` と両方 `Some` で不一致。この型の Data は捨てられる。
+    /// Both this and our own `SCHEMA` are `Some` and they differ. Data of this type is dropped.
     pub mismatch: bool,
 }
 
-/// 受信したフレームの取っ手。中身は [`Link::payload`] / [`Link::decode`] で読む。
+/// A handle on a received frame. Read the contents with [`Link::payload`] / [`Link::decode`].
 ///
-/// `Copy` なので持ち回れるが、指しているバイトは**次の [`Link::next`] / [`Link::feed`] まで**
-/// しか有効でない。古い取っ手で `payload` を読むと空スライスが返る。
+/// It is `Copy`, so it can be passed around, but the bytes it points at are only valid **until the
+/// next [`Link::next`] / [`Link::feed`]**. Reading `payload` through a stale handle returns an
+/// empty slice, and `decode` through one returns `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Frame {
-    /// 種別。
+    /// The kind.
     pub kind: Kind,
-    /// 型ハッシュ。
+    /// The type hash.
     pub hash: u32,
-    /// 通し番号 / 相関 id。
+    /// Running counter / correlation id.
     pub seq: u8,
     len: u16,
     generation: u16,
 }
 
-/// [`Link::next`] / [`Link::tick`] が返す出来事。
+/// What [`Link::next`] / [`Link::tick`] report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
-    /// 相手の Hello が届いた(初回、または相手が再起動した)。payload は Hello そのもの
-    /// (`wire::hello_parse` で型名まで読める)。latched な型はここで再送すること。
+    /// The peer's Hello arrived (the first one, or the peer restarted). The payload is the Hello
+    /// itself (`wire::hello_parse` reads it down to the type names). Latched types should be
+    /// re-sent here.
     Connected(Frame),
-    /// `timeout_ms` のあいだ受信が無かった。
+    /// Nothing was received for `timeout_ms`.
     Disconnected,
-    /// 購読している型の Data。
+    /// Data of a subscribed type.
     Data(Frame),
-    /// serve している request 型の Request。[`Link::reply`] / [`Link::reply_err`] で返す。
+    /// A Request for a served request type. Answer with [`Link::reply`] / [`Link::reply_err`].
     Request(Frame),
-    /// 自分の [`Link::request`] への応答。`hash` / `seq` で突き合わせる。
+    /// The response to our own [`Link::request`]. Match it up by `hash` / `seq`.
     Reply(Frame),
-    /// 自分の [`Link::request`] へのエラー応答([`Link::error_message`])。
+    /// An error response to our own [`Link::request`] (see [`Link::error_message`]).
     Error(Frame),
 }
 
-/// 捨てたものの数。デバッグ用。
+/// How much was thrown away. For debugging.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Stats {
-    /// COBS / CRC / 種別が壊れていたフレーム。
+    /// Frames whose COBS / CRC / kind was broken.
     pub bad_frames: u32,
-    /// スキーマ指紋の不一致で捨てた Data。
+    /// Data dropped because the schema fingerprints did not match.
     pub dropped_schema: u32,
-    /// 購読していない型の Data、serve していない型の Request。
+    /// Data of an unsubscribed type, or a Request for an unserved type.
     pub dropped_unwanted: u32,
-    /// 受信バッファより長いフレーム(区切りが来る前に満杯)。
+    /// Frames longer than the receive buffer (it filled before a delimiter arrived).
     pub rx_overflow: u32,
-    /// 相手が名乗った型のうち表(`N`)に入らなかった数。
+    /// How many of the peer's declared types did not fit the table (`N`).
     pub remote_overflow: u32,
-    /// 送信バッファ満杯で送れなかったフレーム。
+    /// Frames that could not be sent because the send buffer was full.
     pub tx_full: u32,
 }
 
-/// [`Link`] の失敗。
+/// A [`Link`] failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
-    /// id が [`ID_MAX`] を超える。
+    /// The id is longer than [`ID_MAX`].
     IdTooLong,
-    /// 名乗る型が `N` を超えた。
+    /// More than `N` types were declared.
     TableFull,
-    /// 2 つの型名が同じハッシュになった。どちらかの `TYPE` を変えること。
+    /// Two type names hashed to the same value. Change one of their `TYPE`s.
     HashCollision {
-        /// 先に登録されていた型名。
+        /// The type name that was registered first.
         existing: &'static str,
-        /// 衝突した型名。
+        /// The colliding type name.
         new: &'static str,
     },
-    /// 送受信を始めた後に型を宣言した。宣言は Hello より前でなければ相手に届かない。
+    /// A type was declared after I/O had started. Declarations must precede the Hello, or the peer
+    /// never hears about them.
     Started,
-    /// `publishes` していない型を `send` した。
+    /// `send` of a type that was never passed to `publishes`.
     NotDeclared,
-    /// 相手がその request 型を serve していない(未接続を含む)。
+    /// The peer does not serve that request type (which includes not being connected).
     NoPeerService,
-    /// フレームが `FRAME` に収まらない。
+    /// The frame does not fit `FRAME`.
     TooLarge,
-    /// 送信バッファに空きが無い。`drain` してから再試行。
+    /// No room left in the send buffer. `drain` and retry.
     Full,
-    /// prost の encode が失敗した。
+    /// prost failed to encode.
     Encode,
 }
 
@@ -189,15 +198,15 @@ impl fmt::Display for Error {
 
 impl core::error::Error for Error {}
 
-/// 点対点リンクの状態機械。
+/// The point-to-point link's state machine.
 ///
-/// - `B`: 送受信バッファの型。`[u8; N]` / `&mut [u8]` / `Vec<u8>` のどれでも。
-/// - `N`: 自分が名乗る型・相手が名乗る型それぞれの上限。
-/// - `FRAME`: raw frame(header + payload + CRC)の上限。payload は `FRAME - 8` まで。
+/// - `B`: the type of the send / receive buffers. `[u8; N]`, `&mut [u8]` or `Vec<u8>` all work.
+/// - `N`: the cap on how many types we declare, and separately on how many the peer declares.
+/// - `FRAME`: the cap on a raw frame (header + payload + CRC). The payload goes up to `FRAME - 8`.
 ///
-/// 送信バッファは [`wire::encoded_max`]`(FRAME)` 以上、受信バッファは相手の `FRAME` に
-/// 合わせて同じ以上を用意する。
-#[allow(clippy::struct_excessive_bools)] // started / connected / bridge / peer_bridge は直交する旗
+/// Make the send buffer at least [`wire::encoded_max`]`(FRAME)`, and the receive buffer at least
+/// that much again, sized to the peer's `FRAME`.
+#[allow(clippy::struct_excessive_bools)] // started / connected / bridge / peer_bridge are orthogonal
 pub struct Link<B, const N: usize, const FRAME: usize = 256> {
     id: IdBuf,
     peer: Option<IdBuf>,
@@ -207,18 +216,20 @@ pub struct Link<B, const N: usize, const FRAME: usize = 256> {
     tx_len: usize,
     rx: B,
     rx_len: usize,
-    /// 直前の `next` が返したフレームのバイト数。次の `next` / `feed` で捨てる(遅延消費)。
+    /// How many bytes the frame returned by the previous `next` occupied. Dropped on the following
+    /// `next` / `feed` (deferred consumption).
     rx_consumed: usize,
-    /// 溢れの後、次の区切りまで捨てている最中。
+    /// After an overflow: currently discarding up to the next delimiter.
     rx_skip: bool,
     rx_generation: u16,
     scratch: [u8; FRAME],
     config: LinkConfig,
     started: bool,
     connected: bool,
-    /// 自分は bridge(相手の宣言を鏡写しにする側。[`wire::HELLO_BRIDGE`])。
+    /// We are the bridge (the side that mirrors the peer's declarations, see
+    /// [`wire::HELLO_BRIDGE`]).
     bridge: bool,
-    /// 相手が bridge と名乗った。
+    /// The peer declared itself a bridge.
     peer_bridge: bool,
     data_seq: u8,
     req_seq: u8,
@@ -229,11 +240,12 @@ pub struct Link<B, const N: usize, const FRAME: usize = 256> {
 }
 
 impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N, FRAME> {
-    /// COBS + 区切りを含めた 1 フレームの上限。`drain_frame` の `out` はこれ以上にする。
+    /// The cap on one frame including COBS and the delimiter. Make `drain_frame`'s `out` at least
+    /// this large.
     pub const MAX_ENCODED: usize = wire::encoded_max(FRAME);
 
-    /// 自分の id と送受信バッファを渡して作る。型の宣言([`Link::publishes`] 等)を済ませて
-    /// から I/O を始めること。
+    /// Build one from an id and the two buffers. Finish declaring types ([`Link::publishes`] and
+    /// friends) before starting any I/O.
     pub fn new(id: &str, tx: B, rx: B) -> Result<Self, Error> {
         Ok(Self {
             id: IdBuf::new(id)?,
@@ -262,63 +274,65 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         })
     }
 
-    /// 生存確認のノブを差し替える。
+    /// Replace the liveness knobs.
     #[must_use]
     pub fn with_config(mut self, config: LinkConfig) -> Self {
         self.config = config;
         self
     }
 
-    /// **bridge** として振る舞う: 型を名乗らず、相手が publish する型は全部受け、相手が
-    /// subscribe する型は全部送れ、相手が呼ぶ request 型は全部 serve する(相手の宣言の鏡)。
-    /// zenoh への橋(`reiny bridge serial …`)がこれ。宣言と同じく I/O を始める前に。
-    /// bridge は自分の型表を持たないので指紋は照合しない —— 相手の Hello の指紋を、橋の先
-    /// (zenoh の attachment)へそのまま運ぶ。
+    /// Behave as a **bridge**: declare no types, accept everything the peer publishes, be allowed to
+    /// send everything the peer subscribes to, and serve every request type the peer calls (a mirror
+    /// of the peer's declarations). This is the bridge to zenoh (`reiny bridge serial …`). Like a
+    /// declaration, set it before I/O starts. A bridge has no type table of its own, so it checks no
+    /// fingerprints — it carries the fingerprints from the peer's Hello straight across to the far
+    /// side (zenoh's attachment).
     #[must_use]
     pub fn as_bridge(mut self) -> Self {
         self.bridge = true;
         self
     }
 
-    /// 自分は bridge か。
+    /// Whether we are a bridge.
     #[must_use]
     pub fn is_bridge(&self) -> bool {
         self.bridge
     }
 
-    /// 自分の id。
+    /// Our own id.
     #[must_use]
     pub fn id(&self) -> &str {
         self.id.as_str()
     }
 
     // -----------------------------------------------------------------------
-    // 宣言
+    // Declarations
     // -----------------------------------------------------------------------
 
-    /// 型 `T` を publish する。
+    /// Publish the type `T`.
     pub fn publishes<T: Topic>(&mut self) -> Result<(), Error> {
         self.declare::<T>(flags::PUB)
     }
 
-    /// 型 `T` を latched で publish する —— `Connected` のたびに直近値を再送する約束。
-    /// 再送そのものは呼び出し側がやる(`Link` は値を保持しない)。
+    /// Publish the type `T` latched — a promise to re-send the most recent value on every
+    /// `Connected`. The re-sending itself is the caller's job (`Link` holds no values).
     pub fn publishes_latched<T: Topic>(&mut self) -> Result<(), Error> {
         self.declare::<T>(flags::PUB | flags::LATCHED)
     }
 
-    /// 型 `T` を subscribe する。
+    /// Subscribe to the type `T`.
     pub fn subscribes<T: Topic>(&mut self) -> Result<(), Error> {
         self.declare::<T>(flags::SUB)
     }
 
-    /// request 型 `S` を serve する。
+    /// Serve the request type `S`.
     pub fn serves<S: Service>(&mut self) -> Result<(), Error> {
         self.declare::<S>(flags::SERVE)
     }
 
-    /// request 型 `S` を呼ぶ、と名乗る。[`Link::request`] に宣言は要らないが、相手が bridge
-    /// (zenoh への橋)のときは、これで型名が伝わって初めて橋の先の service に届く。
+    /// Declare that we call the request type `S`. [`Link::request`] needs no declaration, but when
+    /// the peer is a bridge (to zenoh) this is what tells it the type's name, and only then can the
+    /// call reach the service on the far side.
     pub fn calls<S: Service>(&mut self) -> Result<(), Error> {
         self.declare::<S>(flags::CALLS)
     }
@@ -366,15 +380,15 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     // I/O
     // -----------------------------------------------------------------------
 
-    /// 受信したバイトを渡す。どんな切れ方でもよい。受け入れた長さを返す —— 受信バッファに
-    /// 取り出し待ちのフレームがあって入り切らないときだけ短くなるので、[`Link::next`] を
-    /// 回してから残りを渡す。
+    /// Hand over the bytes received. Any split is fine. Returns how much was accepted — which is
+    /// short only when the receive buffer holds a frame nobody has taken yet, so run [`Link::next`]
+    /// and hand over the rest afterwards.
     pub fn feed(&mut self, bytes: &[u8]) -> usize {
         self.rx_compact();
         let mut rest = bytes;
         while !rest.is_empty() {
             if self.rx_skip {
-                // 溢れの後: 次の区切りまで捨てて再同期する。
+                // After an overflow: discard up to the next delimiter to resynchronize.
                 match rest.iter().position(|&b| b == DELIMITER) {
                     Some(i) => {
                         rest = &rest[i + 1..];
@@ -387,10 +401,11 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
             let free = self.rx.as_ref().len() - self.rx_len;
             if free == 0 {
                 if self.rx.as_ref()[..self.rx_len].contains(&DELIMITER) {
-                    // 完成したフレームが取り出されていないだけ。呼び出し側が next() を回す。
+                    // Only a completed frame nobody has taken. The caller needs to run next().
                     return bytes.len() - rest.len();
                 }
-                // 区切りが来る前に満杯 = フレームがバッファより長い。捨てて再同期。
+                // Full before a delimiter arrived = the frame is longer than the buffer. Discard and
+                // resynchronize.
                 self.rx_len = 0;
                 self.rx_skip = true;
                 self.stats.rx_overflow = self.stats.rx_overflow.wrapping_add(1);
@@ -405,8 +420,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         bytes.len()
     }
 
-    /// 送るべきバイトを `out` に写して長さを返す(stream 向け: 切れ方は問わない)。
-    /// 0 なら送るものが無い。
+    /// Copy the bytes to send into `out` and return the length (for streams: any split will do).
+    /// Zero means there is nothing to send.
     pub fn drain(&mut self, out: &mut [u8]) -> usize {
         self.ensure_started();
         let n = self.tx_len.min(out.len());
@@ -415,9 +430,10 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         n
     }
 
-    /// 送るべきフレームを**丸ごと 1 つ** `out` に写して長さを返す(datagram 向け: 1 フレーム =
-    /// 1 datagram)。`None` なら送るものが無い。`out` が [`Link::MAX_ENCODED`] より短くて
-    /// 入らないフレームは捨てる(詰まらせない)。
+    /// Copy **exactly one whole frame** to send into `out` and return its length (for datagrams:
+    /// one frame = one datagram). `None` means there is nothing to send. A frame that does not fit
+    /// because `out` is shorter than [`Link::MAX_ENCODED`] is dropped (rather than blocking the
+    /// queue).
     pub fn drain_frame(&mut self, out: &mut [u8]) -> Option<usize> {
         self.ensure_started();
         let end = self.tx.as_ref()[..self.tx_len]
@@ -434,14 +450,14 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         Some(end)
     }
 
-    /// 送信待ちのバイト数。
+    /// How many bytes are waiting to be sent.
     #[must_use]
     pub fn tx_pending(&self) -> usize {
         self.tx_len
     }
 
-    /// 時計を進める。`now_ms` は単調な ms(wrap してよい)。Ping / Hello の再送と
-    /// `Disconnected` の判定はここでしか起きないので、定期的に呼ぶこと。
+    /// Advance the clock. `now_ms` is monotonic milliseconds (wrapping is fine). Ping / Hello
+    /// re-sending and the `Disconnected` decision happen nowhere else, so call it regularly.
     pub fn tick(&mut self, now_ms: u32) -> Option<Event> {
         self.now_ms = now_ms;
         if !self.started {
@@ -468,14 +484,16 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         None
     }
 
-    /// 受信バッファから次の出来事を取り出す。無ければ `None`。
+    /// Take the next event out of the receive buffer, or `None` if there is none.
     ///
-    /// Hello / Ping は内部で処理する(Hello は `Connected` として見える)。購読していない型の
-    /// Data・指紋不一致の Data・serve していない型の Request は捨てる(後者にはエラー応答を
-    /// 返す)。返ってきた [`Frame`] は次の `next` / `feed` まで有効。
+    /// Hello / Ping are handled internally (a Hello surfaces as `Connected`). Data of an
+    /// unsubscribed type, Data whose fingerprint mismatches, and Requests for an unserved type are
+    /// all dropped (the last of those gets an error response). The [`Frame`] returned is valid
+    /// until the next `next` / `feed`.
     ///
-    /// `Iterator` にしないのは、返す [`Frame`] の中身を読むのに `&self` が要る(取っ手方式、
-    /// 借用の都合)ためで、`for` で回せる形にはならない。名前だけ揃えている。
+    /// It is not an `Iterator` because reading the contents of the [`Frame`] it returns needs
+    /// `&self` (the handle scheme, a borrow-checker consequence), which cannot be shaped into
+    /// something a `for` loop drives. Only the name matches.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<Event> {
         self.rx_compact();
@@ -493,7 +511,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
                 self.rx_discard(consumed);
                 continue;
             };
-            // ここから先はフレームが有効。遅延消費にしておき、返すなら次回に捨てる。
+            // From here on the frame is valid. Consume it lazily: if we return it, it is dropped on
+            // the next call.
             self.rx_consumed = consumed;
             self.rx_generation = self.rx_generation.wrapping_add(1);
             self.last_rx_ms = self.now_ms;
@@ -508,7 +527,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         }
     }
 
-    /// `rx[..end]` を COBS 復号して header を読む。壊れていれば `None`。
+    /// COBS-decode `rx[..end]` and read the header. `None` if it is broken.
     fn decode_frame(&mut self, end: usize) -> Option<Frame> {
         let rx = self.rx.as_mut();
         let raw_len = wire::decode_in_place(&mut rx[..end]).ok()?;
@@ -522,13 +541,14 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         })
     }
 
-    /// 復号済みフレームを種別ごとに捌く。呼び出し側へ返すなら `Some`。
+    /// Handle a decoded frame according to its kind. `Some` if it goes back to the caller.
     fn dispatch(&mut self, frame: Frame) -> Option<Event> {
         match frame.kind {
             Kind::Hello => self.on_hello(frame),
             Kind::Ping => None,
             Kind::Data => {
-                // bridge は相手が publish するものを全部受ける(型表を持たないので指紋も見ない)。
+                // A bridge takes everything the peer publishes (it has no type table, so it checks
+                // no fingerprints either).
                 let wanted = self.bridge
                     || self
                         .local_type(frame.hash)
@@ -561,7 +581,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         }
     }
 
-    /// 相手の Hello: 相手の型表を作り直し、ack でなければ ack を返す。
+    /// The peer's Hello: rebuild the peer's type table and, unless this was an ack, answer with one.
     fn on_hello(&mut self, frame: Frame) -> Option<Event> {
         let (peer, remote, overflow, ack, bridge) = {
             let payload = &self.rx.as_ref()[HEADER..HEADER + usize::from(frame.len)];
@@ -598,16 +618,18 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         if !ack {
             let _ = self.queue_hello(true);
         }
-        // ack でない Hello は相手の(再)起動なので常に通知する。ack は握手の完了で、既に
-        // 繋がっていれば黙る(双方同時起動で Connected が 2 度鳴らないように)。
+        // A Hello without ack means the peer (re)started, so it is always reported. An ack is the
+        // completion of the handshake: stay quiet if we were already connected, so that two sides
+        // starting simultaneously do not fire Connected twice.
         (!ack || !was_connected).then_some(Event::Connected(frame))
     }
 
     // -----------------------------------------------------------------------
-    // 送信
+    // Sending
     // -----------------------------------------------------------------------
 
-    /// 型 `T` を送る。相手が `T` を subscribe していなければワイヤに出さず `Ok(false)`。
+    /// Send the type `T`. If the peer does not subscribe to `T` nothing reaches the wire and this
+    /// returns `Ok(false)`.
     pub fn send<T: Topic + Message>(&mut self, msg: &T) -> Result<bool, Error> {
         let hash = wire::type_hash(T::TYPE);
         self.check_publishes(hash)?;
@@ -618,8 +640,9 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         self.emit_data(hash, len)
     }
 
-    /// [`Link::send`] の encode 済み版: 型ハッシュと prost の bytes で送る(bridge が zenoh から
-    /// 受けたものをそのまま流す口)。bridge でなければ `publishes` 済みの型に限る。
+    /// The pre-encoded form of [`Link::send`]: send by type hash and prost bytes (the door through
+    /// which a bridge passes on what it took off zenoh). Unless we are a bridge, the type still has
+    /// to have been passed to `publishes`.
     pub fn send_raw(&mut self, hash: u32, payload: &[u8]) -> Result<bool, Error> {
         self.check_publishes(hash)?;
         if !self.peer_subscribes_hash(hash) {
@@ -629,7 +652,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         self.emit_data(hash, len)
     }
 
-    /// request 型 `S` を送り、相関 id(`seq`)を返す。応答は [`Event::Reply`] / [`Event::Error`]。
+    /// Send the request type `S` and return the correlation id (`seq`). The response comes back as
+    /// [`Event::Reply`] / [`Event::Error`].
     pub fn request<S: Service>(&mut self, req: &S) -> Result<u8, Error> {
         let hash = wire::type_hash(S::TYPE);
         if !self.peer_serves_hash(hash) {
@@ -639,7 +663,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         self.emit_request(hash, len)
     }
 
-    /// [`Link::request`] の encode 済み版。
+    /// The pre-encoded form of [`Link::request`].
     pub fn request_raw(&mut self, hash: u32, payload: &[u8]) -> Result<u8, Error> {
         if !self.peer_serves_hash(hash) {
             return Err(Error::NoPeerService);
@@ -648,24 +672,24 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         self.emit_request(hash, len)
     }
 
-    /// [`Event::Request`] に応答する。`seq` は request フレームのもの。
+    /// Answer an [`Event::Request`]. `seq` is the request frame's.
     pub fn reply<S: Service>(&mut self, seq: u8, resp: &S::Response) -> Result<(), Error> {
         let len = self.encode_payload(resp)?;
         self.emit(Kind::Reply, wire::type_hash(S::TYPE), seq, len)
     }
 
-    /// [`Link::reply`] の encode 済み版。`hash` は request 型のもの。
+    /// The pre-encoded form of [`Link::reply`]. `hash` is the *request* type's.
     pub fn reply_raw(&mut self, seq: u8, hash: u32, payload: &[u8]) -> Result<(), Error> {
         let len = self.copy_payload(payload)?;
         self.emit(Kind::Reply, hash, seq, len)
     }
 
-    /// [`Event::Request`] にエラーで応答する。
+    /// Answer an [`Event::Request`] with an error.
     pub fn reply_err<S: Service>(&mut self, seq: u8, message: &str) -> Result<(), Error> {
         self.emit_error(wire::type_hash(S::TYPE), seq, message)
     }
 
-    /// [`Link::reply_err`] の型ハッシュ版。
+    /// The type-hash form of [`Link::reply_err`].
     pub fn reply_err_raw(&mut self, seq: u8, hash: u32, message: &str) -> Result<(), Error> {
         self.emit_error(hash, seq, message)
     }
@@ -702,7 +726,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         self.emit(Kind::Error, hash, seq, len)
     }
 
-    /// prost で `scratch[HEADER..]` に encode し、payload 長を返す。
+    /// prost-encode into `scratch[HEADER..]` and return the payload length.
     fn encode_payload<M: Message>(&mut self, msg: &M) -> Result<usize, Error> {
         let len = msg.encoded_len();
         if len > FRAME.saturating_sub(OVERHEAD) {
@@ -713,7 +737,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         Ok(len)
     }
 
-    /// encode 済みの bytes を `scratch[HEADER..]` に写し、payload 長を返す。
+    /// Copy pre-encoded bytes into `scratch[HEADER..]` and return the payload length.
     fn copy_payload(&mut self, payload: &[u8]) -> Result<usize, Error> {
         if payload.len() > FRAME.saturating_sub(OVERHEAD) {
             return Err(Error::TooLarge);
@@ -722,7 +746,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         Ok(payload.len())
     }
 
-    /// `scratch` の payload を header + CRC で封じ、COBS で包んで送信バッファへ積む。
+    /// Seal the payload in `scratch` with a header and CRC, COBS-wrap it and push it onto the send
+    /// buffer.
     fn emit(&mut self, kind: Kind, hash: u32, seq: u8, payload_len: usize) -> Result<(), Error> {
         let raw_len = wire::seal(
             &mut self.scratch,
@@ -760,7 +785,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         self.emit(Kind::Hello, 0, 0, len)
     }
 
-    /// 最初の I/O で Hello を積む。宣言はこれより前に済んでいる(以後は `Started`)。
+    /// Queue the Hello on the first I/O. Declarations are done by then (afterwards they are
+    /// `Started`).
     fn ensure_started(&mut self) {
         if !self.started {
             self.started = true;
@@ -790,78 +816,89 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     }
 
     // -----------------------------------------------------------------------
-    // 読み出し
+    // Reading
     // -----------------------------------------------------------------------
 
-    /// フレームの payload。取っ手が古ければ空。
+    /// Whether the handle still points at the frame sitting in the receive buffer. Everything that
+    /// reads through a [`Frame`] goes through here — a stale handle must never be answered with
+    /// plausible-looking data.
+    fn is_fresh(&self, frame: &Frame) -> bool {
+        frame.generation == self.rx_generation
+    }
+
+    /// The frame's payload. Empty if the handle is stale.
     #[must_use]
     pub fn payload(&self, frame: &Frame) -> &[u8] {
-        if frame.generation != self.rx_generation {
+        if !self.is_fresh(frame) {
             return &[];
         }
         &self.rx.as_ref()[HEADER..HEADER + usize::from(frame.len)]
     }
 
-    /// Data / Request のフレームを型 `T` として decode する。型ハッシュが違う / decode
-    /// できない / 取っ手が古いなら `None`。
+    /// Decode a Data / Request frame as the type `T`. `None` if the type hash differs, if it does
+    /// not decode, or if the handle is stale.
     #[must_use]
     pub fn decode<T: Topic + Message + Default>(&self, frame: &Frame) -> Option<T> {
-        if frame.hash != wire::type_hash(T::TYPE) {
+        // Checked before the payload is read: an empty payload is a perfectly valid encoding of a
+        // default message, so without this a stale handle would decode to a plausible `T::default()`
+        // instead of failing.
+        if !self.is_fresh(frame) || frame.hash != wire::type_hash(T::TYPE) {
             return None;
         }
         T::decode(self.payload(frame)).ok()
     }
 
-    /// [`Event::Reply`] のフレームを request 型 `S` の応答として decode する。Reply は
-    /// request 型のハッシュを運ぶので、照合も `S` で行う。
+    /// Decode an [`Event::Reply`] frame as the response to the request type `S`. A Reply carries the
+    /// *request* type's hash, so that is what is checked.
     #[must_use]
     pub fn decode_reply<S: Service>(&self, frame: &Frame) -> Option<S::Response> {
-        if frame.hash != wire::type_hash(S::TYPE) {
+        if !self.is_fresh(frame) || frame.hash != wire::type_hash(S::TYPE) {
             return None;
         }
         S::Response::decode(self.payload(frame)).ok()
     }
 
-    /// [`Event::Error`] のメッセージ。
+    /// The message of an [`Event::Error`].
     #[must_use]
     pub fn error_message(&self, frame: &Frame) -> &str {
         core::str::from_utf8(self.payload(frame)).unwrap_or("")
     }
 
     // -----------------------------------------------------------------------
-    // 相手
+    // The peer
     // -----------------------------------------------------------------------
 
-    /// 相手の Hello を受けてから `timeout_ms` 以内に受信があるか。
+    /// Whether the peer's Hello has arrived and something has been received within `timeout_ms`.
     #[must_use]
     pub fn is_connected(&self) -> bool {
         self.connected
     }
 
-    /// 相手の id(接続中のみ)。
+    /// The peer's id (only while connected).
     #[must_use]
     pub fn peer_id(&self) -> Option<&str> {
         self.peer.as_ref().map(IdBuf::as_str)
     }
 
-    /// 相手が名乗った型。
+    /// The types the peer declared.
     pub fn peer_types(&self) -> impl Iterator<Item = &RemoteType> {
         self.remote.iter().flatten()
     }
 
-    /// 相手は bridge か(未接続なら false)。bridge は何でも subscribe / serve する。
+    /// Whether the peer is a bridge (false when disconnected). A bridge subscribes to and serves
+    /// anything.
     #[must_use]
     pub fn peer_is_bridge(&self) -> bool {
         self.connected && self.peer_bridge
     }
 
-    /// 相手が型 `T` を subscribe しているか(未接続なら false、bridge なら true)。
+    /// Whether the peer subscribes to the type `T` (false when disconnected, true for a bridge).
     #[must_use]
     pub fn peer_subscribes<T: Topic>(&self) -> bool {
         self.peer_subscribes_hash(wire::type_hash(T::TYPE))
     }
 
-    /// [`Link::peer_subscribes`] の型ハッシュ版。
+    /// The type-hash form of [`Link::peer_subscribes`].
     #[must_use]
     pub fn peer_subscribes_hash(&self, hash: u32) -> bool {
         self.connected
@@ -871,13 +908,13 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
                     .is_some_and(|t| t.flags & flags::SUB != 0))
     }
 
-    /// 相手が request 型 `T` を serve しているか(未接続なら false、bridge なら true)。
+    /// Whether the peer serves the request type `T` (false when disconnected, true for a bridge).
     #[must_use]
     pub fn peer_serves<T: Topic>(&self) -> bool {
         self.peer_serves_hash(wire::type_hash(T::TYPE))
     }
 
-    /// [`Link::peer_serves`] の型ハッシュ版。
+    /// The type-hash form of [`Link::peer_serves`].
     #[must_use]
     pub fn peer_serves_hash(&self, hash: u32) -> bool {
         self.connected
@@ -887,7 +924,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
                     .is_some_and(|t| t.flags & flags::SERVE != 0))
     }
 
-    /// 捨てたものの数。
+    /// How much was thrown away.
     #[must_use]
     pub fn stats(&self) -> Stats {
         self.stats
@@ -895,7 +932,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // テストは panic で失敗を表現してよい
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests may fail by panicking
 mod tests {
     use super::*;
 
@@ -909,7 +946,8 @@ mod tests {
         const SCHEMA: Option<u64> = Some(0xaa);
     }
 
-    /// `Pos` と同じ型名・別指紋(別プロジェクトの同名型)。
+    /// The same type name as `Pos` with a different fingerprint (a same-named type from another
+    /// project).
     #[derive(Clone, PartialEq, prost::Message)]
     struct PosV2 {
         #[prost(int32, tag = "1")]
@@ -957,7 +995,8 @@ mod tests {
         L::new(id, [0; 1024], [0; 1024]).unwrap()
     }
 
-    /// 双方の送信を相手に流し込む(stream 風: 1 バイトずつ)。何か流れたら true。
+    /// Pour each side's output into the other (stream-like: one byte at a time). True if anything
+    /// moved.
     fn pump(a: &mut L, b: &mut L) -> bool {
         fn one_way(from: &mut L, to: &mut L) -> bool {
             let mut buf = [0u8; 2048];
@@ -981,6 +1020,16 @@ mod tests {
         assert!(matches!(ea, Some(Event::Connected(_))), "{ea:?}");
         assert!(matches!(eb, Some(Event::Connected(_))), "{eb:?}");
         assert!(a.next().is_none() && b.next().is_none());
+    }
+
+    /// Run both sides until nothing moves and no events are left. `connect` returns with each side's
+    /// ack Hello still queued (it is only produced while handling the peer's Hello), so a test that
+    /// looks at what `drain` produces next has to flush that first.
+    fn settle(a: &mut L, b: &mut L) {
+        while pump(a, b) {
+            while a.next().is_some() {}
+            while b.next().is_some() {}
+        }
     }
 
     #[test]
@@ -1007,8 +1056,26 @@ mod tests {
         assert_eq!(pos.flags, flags::PUB | flags::LATCHED);
         assert_eq!(pos.schema, Some(0xaa));
         assert!(!pos.mismatch);
-        // 宣言は Hello の後には足せない。
+        // Declarations cannot be added after the Hello.
         assert_eq!(a.subscribes::<Cmd>(), Err(Error::Started));
+    }
+
+    /// `calls` is the only reason a request type's *name* ever reaches a bridge, which is what lets
+    /// the bridge route the call onward. It must ride in the Hello with the CALLS flag and must not
+    /// make us look like a server.
+    #[test]
+    fn calls_announces_the_request_type_without_serving_it() {
+        let mut a = link("a");
+        let mut b = link("b");
+        a.calls::<Add>().unwrap();
+        connect(&mut a, &mut b);
+
+        let add = b
+            .peer_types()
+            .find(|t| t.hash == wire::type_hash("Add"))
+            .expect("Add was announced");
+        assert_eq!(add.flags, flags::CALLS);
+        assert!(!b.peer_serves::<Add>(), "calls() is not serves()");
     }
 
     #[test]
@@ -1030,8 +1097,34 @@ mod tests {
         assert_eq!(b.decode::<Pos>(&f), Some(Pos { x: 42 }));
         assert_eq!(b.decode::<Cmd>(&f), None, "wrong type");
         assert!(b.next().is_none());
-        // 取っ手は次の next で古くなる。
+        // The handle goes stale on the next next().
         assert!(b.payload(&f).is_empty());
+    }
+
+    /// A stale handle must decode to `None`, not to a default-valued message. An empty payload is a
+    /// legal encoding of `T::default()`, so "stale" and "empty" have to be told apart before the
+    /// payload is decoded — otherwise a caller holding an old handle silently reads zeros.
+    #[test]
+    fn stale_handles_decode_to_none() {
+        let mut a = link("a");
+        let mut b = link("b");
+        a.publishes::<Pos>().unwrap();
+        a.publishes::<Cmd>().unwrap();
+        b.subscribes::<Pos>().unwrap();
+        b.subscribes::<Cmd>().unwrap();
+        connect(&mut a, &mut b);
+
+        a.send(&Pos { x: 42 }).unwrap();
+        a.send(&Cmd { v: 1 }).unwrap();
+        while pump(&mut a, &mut b) {}
+        let Some(Event::Data(first)) = b.next() else {
+            panic!("expected data")
+        };
+        assert_eq!(b.decode::<Pos>(&first), Some(Pos { x: 42 }));
+        // Pulling the next frame invalidates the previous handle.
+        assert!(matches!(b.next(), Some(Event::Data(_))));
+        assert!(b.payload(&first).is_empty());
+        assert_eq!(b.decode::<Pos>(&first), None, "stale handle decoded anyway");
     }
 
     #[test]
@@ -1075,20 +1168,41 @@ mod tests {
         assert_eq!(a.error_message(&err), "busy");
     }
 
+    /// The correlation id is a u8 that wraps. Two outstanding requests must not be told apart by
+    /// anything else, and the sequence has to advance by one per request.
+    #[test]
+    fn request_seq_advances_and_wraps() {
+        let mut a = link("a");
+        let mut b = link("b");
+        b.serves::<Add>().unwrap();
+        connect(&mut a, &mut b);
+
+        let mut sink = [0u8; 4096];
+        let mut previous = None;
+        for i in 0..300u32 {
+            let seq = a.request(&Add { a: 1, b: 1 }).unwrap();
+            if let Some(p) = previous {
+                assert_eq!(seq, u8::wrapping_add(p, 1), "at request {i}");
+            }
+            previous = Some(seq);
+            let _ = a.drain(&mut sink); // keep the send buffer from filling
+        }
+    }
+
     #[test]
     fn unserved_request_gets_error_reply() {
         let mut a = link("a");
         let mut b = link("b");
-        // b は Add を serve していないが、a には偽の表を持たせず直接フレームを送る:
-        // 相手の表が古い(再起動直後)状況の再現。
+        // b does not serve Add. Rather than fake a's table, send the frame directly: this recreates
+        // the situation where the peer's table is stale (right after a restart).
         b.serves::<Add>().unwrap();
         connect(&mut a, &mut b);
         let seq = a.request(&Add { a: 1, b: 1 }).unwrap();
-        // b を「Add を serve しない」個体に差し替える。
+        // Swap b for an instance that does not serve Add.
         let mut b2 = link("b");
         b2.subscribes::<Cmd>().unwrap();
         b2.tick(0);
-        // b2 が request を処理(エラー応答を積む)するには next() が要る。
+        // b2 needs next() to run before it queues the error response.
         loop {
             let moved = pump(&mut a, &mut b2);
             while b2.next().is_some() {}
@@ -1096,7 +1210,7 @@ mod tests {
                 break;
             }
         }
-        // a には b2 の Hello(Connected)と、request へのエラー応答が届く。
+        // a receives b2's Hello (Connected) plus the error response to the request.
         let mut got_error = false;
         while let Some(ev) = a.next() {
             if let Event::Error(f) = ev {
@@ -1113,7 +1227,7 @@ mod tests {
     fn schema_mismatch_drops_data_once_connected() {
         let mut a = link("a");
         let mut b = link("b");
-        a.publishes::<PosV2>().unwrap(); // 同名・別指紋
+        a.publishes::<PosV2>().unwrap(); // same name, different fingerprint
         b.subscribes::<Pos>().unwrap();
         connect(&mut a, &mut b);
         assert!(b.peer_types().any(|t| t.mismatch));
@@ -1123,12 +1237,42 @@ mod tests {
         assert_eq!(b.stats().dropped_schema, 1);
     }
 
+    /// A fingerprint is only enforced when both sides have one. A hand-written `impl Topic` (no
+    /// `SCHEMA`) has to keep interoperating with a generated type — that is the promise `SCHEMA`'s
+    /// default exists for.
+    #[test]
+    fn missing_fingerprint_passes_through() {
+        /// `Pos`'s name and shape without a fingerprint, as a hand-written impl would have it.
+        #[derive(Clone, PartialEq, prost::Message)]
+        struct PosNoSchema {
+            #[prost(int32, tag = "1")]
+            x: i32,
+        }
+        impl Topic for PosNoSchema {
+            const TYPE: &'static str = "Pos";
+        }
+
+        let mut a = link("a");
+        let mut b = link("b");
+        a.publishes::<PosNoSchema>().unwrap();
+        b.subscribes::<Pos>().unwrap(); // SCHEMA = Some(0xaa)
+        connect(&mut a, &mut b);
+        assert!(b.peer_types().all(|t| !t.mismatch));
+        a.send(&PosNoSchema { x: 3 }).unwrap();
+        while pump(&mut a, &mut b) {}
+        let Some(Event::Data(f)) = b.next() else {
+            panic!("expected data")
+        };
+        assert_eq!(b.decode::<Pos>(&f), Some(Pos { x: 3 }));
+        assert_eq!(b.stats().dropped_schema, 0);
+    }
+
     #[test]
     fn ping_keeps_alive_and_silence_disconnects() {
         let mut a = link("a");
         let mut b = link("b");
         connect(&mut a, &mut b);
-        // 1.5 s: a は Ping を出し、b はそれで生存を知る。
+        // 1.5 s: a sends Pings and b learns it is alive from them.
         for t in (100..=1500).step_by(100) {
             assert!(a.tick(t).is_none());
             assert!(b.tick(t).is_none());
@@ -1136,7 +1280,7 @@ mod tests {
             assert!(a.next().is_none() && b.next().is_none());
         }
         assert!(a.is_connected() && b.is_connected());
-        // b が黙る(a の送信は b に届くが b の送信を捨てる)。
+        // b goes quiet (a's traffic still reaches b, but b's is thrown away).
         for t in (1600..=6000).step_by(100) {
             let ev = a.tick(t);
             let mut sink = [0u8; 2048];
@@ -1146,7 +1290,7 @@ mod tests {
             b.feed(&buf[..n]);
             while b.next().is_some() {}
             if ev == Some(Event::Disconnected) {
-                // b の最後の送信は t=1000 の Ping。timeout 3000 を超えた最初の tick で切れる。
+                // b's last send was the Ping at t=1000; the first tick past timeout 3000 drops it.
                 assert_eq!(t, 4100, "disconnect at {t}");
                 break;
             }
@@ -1154,7 +1298,8 @@ mod tests {
         }
         assert!(!a.is_connected());
         assert_eq!(a.peer_id(), None);
-        // 切れている間は Hello を出し直し、b が(next() で)答えれば繋がり直す。
+        // While disconnected the Hello is re-sent, and once b answers (through next()) the link is
+        // back up.
         a.tick(8000);
         assert_eq!(b.tick(8000), Some(Event::Disconnected));
         loop {
@@ -1168,6 +1313,32 @@ mod tests {
         assert!(a.is_connected() && b.is_connected());
     }
 
+    /// The timeouts are knobs, not constants: a link over a slow physical layer sets its own, and
+    /// both the Ping interval and the disconnect deadline have to follow them.
+    #[test]
+    fn config_drives_the_ping_and_timeout_deadlines() {
+        let config = LinkConfig {
+            ping_interval_ms: 50,
+            timeout_ms: 120,
+        };
+        let mut a = link("a").with_config(config);
+        let mut b = link("b").with_config(config);
+        connect(&mut a, &mut b);
+
+        // No Ping before the interval elapses, one after.
+        let mut sink = [0u8; 512];
+        let _ = a.drain(&mut sink);
+        assert!(a.tick(40).is_none());
+        assert_eq!(a.tx_pending(), 0, "pinged too early");
+        assert!(a.tick(60).is_none());
+        assert!(a.tx_pending() > 0, "no ping after the interval");
+
+        // Silence past timeout_ms disconnects. The last receive was at t=0, so 100 is still inside
+        // the 120 ms window and 130 is past it — with the default 3000 neither would be.
+        assert!(a.tick(100).is_none(), "disconnected inside the window");
+        assert_eq!(a.tick(130), Some(Event::Disconnected));
+    }
+
     #[test]
     fn peer_restart_reconnects_and_reannounces() {
         let mut a = link("a");
@@ -1175,7 +1346,7 @@ mod tests {
         b.publishes_latched::<Pos>().unwrap();
         a.subscribes::<Pos>().unwrap();
         connect(&mut a, &mut b);
-        // b が再起動: 新しい Link が Hello(no ack)を送る → a は Connected を再度受ける。
+        // b restarts: the new Link sends a Hello with no ack → a sees Connected again.
         let mut b2 = link("b");
         b2.publishes::<Pos>().unwrap();
         b2.tick(0);
@@ -1201,12 +1372,12 @@ mod tests {
         a.send(&Pos { x: 7 }).unwrap();
         let mut buf = [0u8; 256];
         let n = a.drain(&mut buf);
-        // 前にゴミ、途中で分割、後ろに壊れたフレーム。
+        // Garbage in front, a split in the middle, a broken frame behind.
         b.feed(&[0x55, 0xaa, 0x01]);
         b.feed(&buf[..n / 2]);
         assert!(b.next().is_none(), "half a frame is not a frame");
         b.feed(&buf[n / 2..n]);
-        b.feed(&[0x03, 0x01, 0x02, 0x00]); // COBS としては通るが短すぎる
+        b.feed(&[0x03, 0x01, 0x02, 0x00]); // valid COBS but far too short
         let Some(Event::Data(f)) = b.next() else {
             panic!("expected data after resync")
         };
@@ -1222,7 +1393,7 @@ mod tests {
         a.publishes::<Pos>().unwrap();
         b.subscribes::<Pos>().unwrap();
         connect(&mut a, &mut b);
-        // 区切りの無い 1500 バイト(受信バッファ 1024 より長い)。
+        // 1500 bytes with no delimiter (longer than the 1024-byte receive buffer).
         let junk = [0x11u8; 1500];
         assert_eq!(b.feed(&junk), 1500);
         assert_eq!(b.stats().rx_overflow, 1);
@@ -1235,16 +1406,97 @@ mod tests {
         assert_eq!(b.decode::<Pos>(&f), Some(Pos { x: 9 }));
     }
 
+    /// When the receive buffer is full of *complete* frames, `feed` accepts a short count instead of
+    /// dropping bytes on the floor — that short return is the caller's signal to run `next()` and
+    /// hand over the rest, so nothing is lost.
+    #[test]
+    fn feed_reports_backpressure_instead_of_dropping() {
+        let mut a = link("a");
+        // A deliberately tiny receiver: 64 bytes of rx.
+        let mut b = Link::<[u8; 64], 4>::new("b", [0; 64], [0; 64]).unwrap();
+        a.publishes::<Pos>().unwrap();
+        b.subscribes::<Pos>().unwrap();
+
+        // Hand-rolled handshake: the shared `pump` helper only works between two links of the same
+        // type, and this receiver is deliberately a different one.
+        a.tick(0);
+        b.tick(0);
+        let mut buf = [0u8; 2048];
+        for _ in 0..3 {
+            let n = a.drain(&mut buf);
+            b.feed(&buf[..n]);
+            while b.next().is_some() {}
+            let n = b.drain(&mut buf);
+            a.feed(&buf[..n]);
+            while a.next().is_some() {}
+        }
+        assert!(a.is_connected() && b.is_connected());
+
+        // Fill the receive buffer with data frames — without draining the events — until feed goes
+        // short.
+        let mut short = false;
+        for _ in 0..32 {
+            assert_eq!(a.send(&Pos { x: 1 }), Ok(true));
+            let n = a.drain(&mut buf);
+            if b.feed(&buf[..n]) < n {
+                short = true;
+                break;
+            }
+        }
+        assert!(short, "feed never reported backpressure");
+        // Draining the events makes room again, and no byte was silently dropped.
+        while b.next().is_some() {}
+        assert_eq!(b.stats().rx_overflow, 0, "backpressure is not overflow");
+    }
+
+    /// The datagram path: one call yields exactly one whole frame, and a frame that does not fit
+    /// `out` is dropped rather than wedging the queue behind it.
+    #[test]
+    fn drain_frame_emits_one_frame_at_a_time() {
+        let mut a = link("a");
+        let mut b = link("b");
+        a.publishes::<Pos>().unwrap();
+        b.subscribes::<Pos>().unwrap();
+        connect(&mut a, &mut b);
+        settle(&mut a, &mut b);
+
+        a.send(&Pos { x: 1 }).unwrap();
+        a.send(&Pos { x: 2 }).unwrap();
+        let mut out = [0u8; 256];
+        let first = a.drain_frame(&mut out).expect("first frame");
+        assert_eq!(out[first - 1], DELIMITER);
+        assert!(!out[..first - 1].contains(&DELIMITER), "exactly one frame");
+        let n = b.feed(&out[..first]);
+        assert_eq!(n, first);
+        let Some(Event::Data(f)) = b.next() else {
+            panic!("expected the first datagram")
+        };
+        assert_eq!(b.decode::<Pos>(&f), Some(Pos { x: 1 }));
+
+        // A too-small `out` drops that frame and counts it, and the next one still comes through.
+        a.send(&Pos { x: 3 }).unwrap();
+        let mut tiny = [0u8; 2];
+        assert_eq!(a.drain_frame(&mut tiny), None);
+        assert!(a.stats().tx_full >= 1);
+        let third = a.drain_frame(&mut out).expect("the queue is not wedged");
+        b.feed(&out[..third]);
+        let Some(Event::Data(f)) = b.next() else {
+            panic!("expected the frame after the dropped one")
+        };
+        assert_eq!(b.decode::<Pos>(&f), Some(Pos { x: 3 }));
+        assert_eq!(a.drain_frame(&mut out), None, "nothing left to send");
+    }
+
     #[test]
     fn tx_full_and_too_large_are_reported() {
         let mut small = Link::<[u8; 64], 2, 32>::new("s", [0; 64], [0; 64]).unwrap();
         small.publishes::<Cmd>().unwrap();
         let mut sink = [0u8; 64];
-        let _ = small.drain(&mut sink); // Hello を吐いて空にする
-        // 相手が居ないので send は Ok(false)。emit の経路は request で確かめる。
+        let _ = small.drain(&mut sink); // flush the Hello
+        // With no peer, send is Ok(false). The emit path is exercised through request instead.
         assert_eq!(small.send(&Cmd { v: 1 }), Ok(false));
         assert_eq!(small.reply_err::<Add>(0, "x"), Ok(()));
-        // 64 バイトの tx に 10 バイト級のフレームを詰めていくと満杯になる。
+        // Packing ~10-byte frames into a 64-byte tx fills it.
         let mut full = false;
         for _ in 0..16 {
             match small.reply_err::<Add>(0, "xxxxxxxxxx") {
@@ -1258,7 +1510,7 @@ mod tests {
         }
         assert!(full);
         assert!(small.stats().tx_full >= 1);
-        // FRAME = 32 に 40 バイトの payload は入らない。
+        // A 40-byte payload does not fit FRAME = 32.
         let long = "y".repeat(40);
         assert_eq!(small.reply_err::<Add>(0, &long), Err(Error::Full));
     }
@@ -1272,7 +1524,7 @@ mod tests {
         let mut bridge = link("bridge").as_bridge();
         connect(&mut mcu, &mut bridge);
         assert!(mcu.peer_is_bridge() && !bridge.peer_is_bridge());
-        // bridge は何でも受ける / 送れる / serve する。
+        // The bridge takes / sends / serves anything.
         assert!(mcu.peer_subscribes::<Pos>() && mcu.peer_serves::<Add>());
         assert!(bridge.peer_subscribes::<Cmd>() && !bridge.peer_subscribes::<Pos>());
 
@@ -1293,7 +1545,7 @@ mod tests {
         };
         assert_eq!(mcu.decode::<Cmd>(&f), Some(Cmd { v: 3 }));
 
-        // bridge → mcu の service 呼び出し(raw)。
+        // bridge → mcu service call (raw).
         let req = Add { a: 2, b: 3 }.encode_to_vec();
         let seq = bridge.request_raw(wire::type_hash("Add"), &req).unwrap();
         while pump(&mut mcu, &mut bridge) {}
@@ -1308,7 +1560,7 @@ mod tests {
         assert_eq!(rep.seq, seq);
         assert_eq!(Sum::decode(bridge.payload(&rep)), Ok(Sum { s: 5 }));
 
-        // mcu → bridge の service 呼び出し: bridge は serve していない型の request も受ける。
+        // mcu → bridge service call: a bridge accepts requests for types it does not serve.
         let seq = mcu.request(&Add { a: 1, b: 1 }).unwrap();
         while pump(&mut mcu, &mut bridge) {}
         let Some(Event::Request(r)) = bridge.next() else {
@@ -1327,7 +1579,68 @@ mod tests {
         assert_eq!(bridge.stats().dropped_unwanted, 0);
     }
 
-    /// `Pos` と同じ `TYPE`(同じハッシュ・同じ名前)。
+    /// A bridge holds no type table, so it never compares fingerprints: it carries the peer's across
+    /// to the far side untouched. Data that a normal subscriber would drop must reach the bridge.
+    #[test]
+    fn bridge_does_not_enforce_fingerprints() {
+        let mut mcu = link("mcu");
+        mcu.publishes::<PosV2>().unwrap(); // SCHEMA = Some(0xbb)
+        let mut bridge = link("bridge").as_bridge();
+        connect(&mut mcu, &mut bridge);
+
+        assert_eq!(mcu.send(&PosV2 { x: 8 }), Ok(true));
+        while pump(&mut mcu, &mut bridge) {}
+        let Some(Event::Data(f)) = bridge.next() else {
+            panic!("a bridge must not drop on fingerprints")
+        };
+        assert_eq!(f.hash, wire::type_hash("Pos"));
+        assert_eq!(bridge.stats().dropped_schema, 0);
+        // The peer's fingerprint is still visible, so it can be carried onward.
+        assert_eq!(
+            bridge
+                .peer_types()
+                .find(|t| t.hash == wire::type_hash("Pos"))
+                .and_then(|t| t.schema),
+            Some(0xbb)
+        );
+    }
+
+    /// `N` caps the peer's table too. Overflow is counted rather than silently truncating the link
+    /// into a state where it thinks the peer never declared the type.
+    #[test]
+    fn peer_table_overflow_is_counted() {
+        let mut small = Link::<[u8; 1024], 1>::new("small", [0; 1024], [0; 1024]).unwrap();
+        let mut big = link("big");
+        big.publishes::<Pos>().unwrap();
+        big.publishes::<Cmd>().unwrap();
+        big.serves::<Add>().unwrap();
+        small.subscribes::<Pos>().unwrap();
+
+        small.tick(0);
+        big.tick(0);
+        let mut buf = [0u8; 2048];
+        loop {
+            let n = big.drain(&mut buf);
+            if n == 0 {
+                break;
+            }
+            small.feed(&buf[..n]);
+            while small.next().is_some() {}
+            let n = small.drain(&mut buf);
+            if n == 0 {
+                break;
+            }
+            big.feed(&buf[..n]);
+            while big.next().is_some() {}
+        }
+        assert!(small.is_connected());
+        assert_eq!(small.peer_types().count(), 1);
+        // The table is rebuilt on every Hello (the peer's first one and its ack), so the two types
+        // that did not fit are counted once per Hello rather than once in total.
+        assert!(small.stats().remote_overflow >= 2);
+    }
+
+    /// The same `TYPE` (same hash, same name) as `Pos`.
     struct Alias;
     impl Topic for Alias {
         const TYPE: &'static str = "Pos";
@@ -1341,7 +1654,7 @@ mod tests {
     fn declaration_errors() {
         let mut l = Link::<[u8; 256], 1>::new("l", [0; 256], [0; 256]).unwrap();
         l.publishes::<Pos>().unwrap();
-        l.subscribes::<Pos>().unwrap(); // 同じ型の別フラグは 1 枠に畳まれる
+        l.subscribes::<Pos>().unwrap(); // the same type with another flag folds into one slot
         assert_eq!(l.subscribes::<Cmd>(), Err(Error::TableFull));
         assert!(L::new(&"x".repeat(ID_MAX + 1), [0; 1024], [0; 1024]).is_err());
         let mut l = Link::<[u8; 256], 2>::new("l", [0; 256], [0; 256]).unwrap();
@@ -1352,5 +1665,67 @@ mod tests {
             "same name, same hash: fine"
         );
         assert_eq!(l.subscribes::<Other>(), Ok(()));
+    }
+
+    /// Two different names hashing alike is the one failure a 32-bit type hash can produce, and it
+    /// has to be caught at declaration time with both names in the message — not left to corrupt
+    /// traffic at run time. ("costarring" / "liquid" is a documented FNV-1a 32 collision; the test
+    /// asserts that rather than trusting it.)
+    #[test]
+    fn hash_collision_is_rejected_at_declaration() {
+        struct Costarring;
+        impl Topic for Costarring {
+            const TYPE: &'static str = "costarring";
+        }
+        struct Liquid;
+        impl Topic for Liquid {
+            const TYPE: &'static str = "liquid";
+        }
+        assert_eq!(
+            wire::type_hash(Costarring::TYPE),
+            wire::type_hash(Liquid::TYPE),
+            "the fixture is only meaningful if these actually collide"
+        );
+
+        let mut l = Link::<[u8; 256], 4>::new("l", [0; 256], [0; 256]).unwrap();
+        l.publishes::<Costarring>().unwrap();
+        assert_eq!(
+            l.subscribes::<Liquid>(),
+            Err(Error::HashCollision {
+                existing: "costarring",
+                new: "liquid",
+            })
+        );
+    }
+
+    /// The id is bounded by [`ID_MAX`], and exactly `ID_MAX` still has to work — an off-by-one here
+    /// would reject a legitimate id or write past the fixed buffer.
+    #[test]
+    fn id_length_boundary() {
+        let exact = "x".repeat(ID_MAX);
+        let l = L::new(&exact, [0; 1024], [0; 1024]).unwrap();
+        assert_eq!(l.id(), exact);
+        assert_eq!(
+            L::new(&"x".repeat(ID_MAX + 1), [0; 1024], [0; 1024])
+                .err()
+                .unwrap(),
+            Error::IdTooLong
+        );
+    }
+
+    /// Nothing is known about the peer before the handshake, so every "can I send this?" question
+    /// answers no — a `send` before connection must not reach the wire.
+    #[test]
+    fn nothing_is_routable_before_the_handshake() {
+        let mut a = link("a");
+        a.publishes::<Pos>().unwrap();
+        a.serves::<Add>().unwrap();
+        assert!(!a.is_connected());
+        assert_eq!(a.peer_id(), None);
+        assert!(!a.peer_subscribes::<Pos>());
+        assert!(!a.peer_serves::<Add>());
+        assert!(!a.peer_is_bridge());
+        assert_eq!(a.send(&Pos { x: 1 }), Ok(false));
+        assert_eq!(a.request(&Add { a: 1, b: 1 }), Err(Error::NoPeerService));
     }
 }
