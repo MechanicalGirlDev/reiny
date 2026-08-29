@@ -254,6 +254,11 @@ that `*` and `**` never match, so no 0.4 subscriber, `bag record` capture or
   transport ended (EOF or error); only the link's own silence timeout
   (`Disconnected`) did. After the far end went away, `publishers()` /
   `servers()` kept naming a peer nothing could reach.
+- **`reiny-ros2`** — `export_auto` dropped fields left at their proto3 default.
+  prost-reflect omits them from JSON by default, and a ROS message is a struct
+  with every field required, so an ordinary message — a pose at the origin, a
+  zero velocity, an empty string — failed to deserialize as "missing field" and
+  the route discarded it silently. `skip_default_fields(false)` is now explicit.
 
 ### Notes
 - An `embedded-io-async` adapter was left out; `feed` / `drain` is four

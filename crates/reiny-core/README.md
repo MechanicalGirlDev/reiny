@@ -12,7 +12,7 @@ code `reiny-build` generates (`impl ::reiny::Topic for …`) resolves unchanged:
 
 ```toml
 [dependencies]
-reiny = { package = "reiny-core", version = "0.4" }
+reiny = { package = "reiny-core", version = "0.5" }
 ```
 
 License: MIT
