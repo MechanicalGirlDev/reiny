@@ -9,7 +9,7 @@
 //! | --- | --- |
 //! | subscribe `reiny/<d>/*/<T>` | Data from the peer (hash = T). The source is the peer's id, the attachment is the fingerprint from the Hello |
 //! | publish `reiny/<d>/<id>/<T>` | `send_raw(hash(T))`. Dropped unless the peer subscribes |
-//! | presence | derived from the peer's Hello: `@launch`, a token per PUB type, `@service` per SERVE type. Disconnected retracts all of them. Our own tokens are local only (the peer never hears about them) |
+//! | presence | derived from the peer's Hello: `@launch`, a token per PUB type, `@sub` per SUB type, `@service` per SERVE type. Disconnected retracts all of them. Our own tokens are local only (the peer never hears about them) |
 //! | query (with payload) | `call_raw(hash(S))` → Reply / Error |
 //! | query (no payload = latched) | the engine remembers the peer's most recent Data for LATCHED types and answers with it |
 //! | respond | a Request from the peer (hash = S) goes to the responder for the type `S`. Dropping it unanswered sends the peer `Error("no reply")` |
@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use reiny::engine::{
     BoxFuture, Callback, Caps, Engine, Guard, Key, Presence, QueryCallback, QueryParams,
-    RawPublisher, RawQuery, RawReplies, ReplyResult, SERVICE_CHUNK, Sample, now_unix_ns,
+    RawPublisher, RawQuery, RawReplies, ReplyResult, SERVICE_CHUNK, SUB_CHUNK, Sample, now_unix_ns,
 };
 use reiny::{Qos, Result};
 use tokio::sync::oneshot;
@@ -75,6 +75,11 @@ fn peer_keys(domain: &str, peer: &PeerInfo) -> Vec<Key> {
         let topic = Key::topic(domain, Some(&peer.id), &t.name);
         if t.flags & flags::PUB != 0 {
             keys.push(topic.clone());
+        }
+        // What the peer subscribes to is presence too: it is how the zenoh side's
+        // `subscribers::<T>()` / `reiny topic list` can see what an MCU is listening for.
+        if t.flags & flags::SUB != 0 {
+            keys.push(topic.with_chunk(SUB_CHUNK));
         }
         if t.flags & flags::SERVE != 0 {
             keys.push(topic.with_chunk(SERVICE_CHUNK));

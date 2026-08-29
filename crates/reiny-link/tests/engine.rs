@@ -1,8 +1,9 @@
-//! `Cloudy` をリンクの上に置く: MCU 役(素の `Host`、型を宣言)と、bridge モードの `Host` を
-//! `LinkEngine` で包んだ `Cloudy` を `tokio::io::duplex` で繋ぐ。presence / Data / latched /
-//! service を両方向に通す。ハードウェア無し。
+//! A `Cloudy` on top of a link: one side plays the MCU (a plain `Host` that declares types), the
+//! other is a `Cloudy` over a bridge-mode `Host` wrapped in a `LinkEngine`, joined by
+//! `tokio::io::duplex`. Presence / Data / latched / services all flow in both directions. No
+//! hardware.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // テストは panic で失敗を表現してよい
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests may fail by panicking
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,7 +54,7 @@ impl Service for Add {
     type Response = Sum;
 }
 
-/// MCU が呼び、ホストが serve する。
+/// Called by the MCU and served by the host.
 #[derive(Clone, PartialEq, prost::Message)]
 struct Echo {
     #[prost(string, tag = "1")]
@@ -69,11 +70,11 @@ impl Service for Echo {
 const WAIT: Duration = Duration::from_secs(5);
 
 #[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::too_many_lines)] // 1 本で通す(リンクは 1 対なので分けても速くならない)。
+#[allow(clippy::too_many_lines)] // one pass end to end (a link is a pair; splitting it saves nothing)
 async fn cloudy_over_a_link() {
     let (mcu_end, host_end) = tokio::io::duplex(4096);
 
-    // MCU 役: Pos を latched で publish、Cmd を subscribe、Add を serve、Echo を呼ぶ。
+    // The MCU side: publishes Pos latched, subscribes to Cmd, serves Add, calls Echo.
     let mut mcu_link = HostLink::host("mcu").unwrap();
     mcu_link.publishes_latched::<Pos>().unwrap();
     mcu_link.subscribes::<Cmd>().unwrap();
@@ -81,7 +82,7 @@ async fn cloudy_over_a_link() {
     mcu_link.calls::<Echo>().unwrap();
     let mcu = Arc::new(Host::spawn(mcu_link, Stream(mcu_end)));
 
-    // ホスト役: bridge モードの Host を Engine にして Cloudy を載せる。
+    // The host side: a bridge-mode Host turned into an Engine, with a Cloudy on top.
     let engine = LinkEngine::spawn(
         Host::spawn(
             HostLink::host("host").unwrap().as_bridge(),
@@ -95,7 +96,7 @@ async fn cloudy_over_a_link() {
     opts.install_tracing = false;
     let cloudy = Cloudy::open(opts).await.expect("cloudy over link");
 
-    // MCU 側のイベントを 1 本の task で捌く: Data は channel へ、Add には答える。
+    // One task handles the MCU's events: Data goes to a channel, Add gets answered.
     let (data_tx, mut data_rx) = tokio::sync::mpsc::unbounded_channel::<HostEvent>();
     let (conn_tx, mut conn_rx) = tokio::sync::mpsc::unbounded_channel::<HostEvent>();
     {
@@ -121,14 +122,14 @@ async fn cloudy_over_a_link() {
         });
     }
 
-    // 握手: MCU から見た相手は型を名乗らない bridge。
+    // Handshake: from the MCU's side the peer is a bridge, declaring no types at all.
     let Some(HostEvent::Connected { id, types }) = timeout(WAIT, conn_rx.recv()).await.unwrap()
     else {
         panic!("mcu should connect")
     };
     assert_eq!((id.as_str(), types.len()), ("host", 0));
 
-    // presence: MCU の Hello がそのまま publishers / servers / watch に見える。
+    // Presence: the MCU's Hello is what publishers / servers / watch report.
     let mut watch = cloudy.watch_publishers::<Pos>().unwrap();
     assert_eq!(
         timeout(WAIT, watch.recv()).await.unwrap(),
@@ -137,27 +138,30 @@ async fn cloudy_over_a_link() {
     assert_eq!(cloudy.publishers::<Pos>().await.unwrap(), ["mcu"]);
     assert_eq!(cloudy.servers::<Add>().await.unwrap(), ["mcu"]);
     assert!(cloudy.publishers::<Cmd>().await.unwrap().is_empty());
+    // What the MCU listens for shows up as presence too, and does not leak into publishers::<Cmd>().
+    assert_eq!(cloudy.subscribers::<Cmd>().await.unwrap(), ["mcu"]);
+    assert!(cloudy.subscribers::<Pos>().await.unwrap().is_empty());
 
-    // MCU → Cloudy: Data(指紋は Hello 経由で attachment に載る)。
+    // MCU → Cloudy: Data (the fingerprint reaches the attachment by way of the Hello).
     let mut sub = cloudy.subscribe::<Pos>().unwrap();
     assert!(mcu.send(&Pos { x: 1 }).unwrap());
     let envelope = timeout(WAIT, sub.recv_envelope()).await.unwrap().unwrap();
     assert_eq!((envelope.value.x, envelope.source.as_str()), (1, "mcu"));
 
-    // latched: 後から来た購読者は engine が覚えている直近値を受け取る。
+    // Latched: a late subscriber gets the most recent value, which the engine is holding.
     let mut late = cloudy.subscriber::<Pos>().latched().build().unwrap();
     assert_eq!(
         timeout(WAIT, late.recv()).await.unwrap().map(|p| p.x),
         Some(1)
     );
 
-    // Cloudy → MCU: publish は subscribe されている型だけ届く。
+    // Cloudy → MCU: a publish only lands for a type that is actually subscribed.
     let cmd = cloudy.publish::<Cmd>().unwrap();
     cmd.send(Cmd { v: 7 }).await.unwrap();
     let ev = timeout(WAIT, data_rx.recv()).await.unwrap().unwrap();
     assert_eq!(ev.decode::<Cmd>(), Some(Cmd { v: 7 }));
 
-    // Cloudy → MCU: service。
+    // Cloudy → MCU: a service call.
     let sum = timeout(WAIT, cloudy.call::<Add>(Add { a: 2, b: 3 }))
         .await
         .unwrap()
@@ -173,7 +177,8 @@ async fn cloudy_over_a_link() {
         Err(CallError::NoReply)
     ));
 
-    // MCU → Cloudy: service(bridge は serve していない型の request も受けて responder へ)。
+    // MCU → Cloudy: a service call (a bridge takes requests for types it does not serve and hands
+    // them to the responder).
     let mut server = cloudy.serve::<Echo>().unwrap();
     let server_task = tokio::spawn(async move {
         let req = server.recv().await.unwrap();
@@ -198,7 +203,7 @@ async fn cloudy_over_a_link() {
     .unwrap();
     assert_eq!(echoed.text, "hi!");
     server_task.await.unwrap();
-    // responder が居ない型の request はエラーで返る(ハングしない)。
+    // A request for a type with no responder comes back as an error rather than hanging.
     let err = mcu
         .call::<Echo>(
             &Echo {
