@@ -130,14 +130,16 @@ piece that does not depend on it.
   dropped. The ROS distribution is a feature (`jazzy` default). Covered by an
   in-process e2e against a ros2-client node over RustDDS loopback.
 
-- **`reiny run` logs the topic flow at startup** — before spawning, the
+- **`reiny run` draws the topic flow at startup** — before spawning, the
   launcher resolves each launch's `Reiny.toml` (per-project and workspace
-  layouts) and prints one line per type: `ping --[Ping]--> pong`, arrows
-  aligned; `[services]` request types point caller → server and name the
-  reply type. Best-effort — a launch whose manifest cannot be resolved is
-  skipped, and a dist layout with no `Reiny.toml` prints nothing.
-  `reiny-build`'s `Resolution` gained `projects()` (the `[projects.*]`
-  declarations) to feed it.
+  layouts) and renders a sequence-diagram-style banner: one boxed column per
+  launch, one horizontal arrow per type (`●─── Ping ──▶│`, `┼` where a line
+  crosses an uninvolved rail), types colored per row on a TTY (`NO_COLOR`
+  honoured). `[services]` request types draw as a double line caller
+  `●══▶` server, labeled `Req => Reply`. Best-effort — a launch whose
+  manifest cannot be resolved is skipped, and a dist layout with no
+  `Reiny.toml` prints nothing. `reiny-build`'s `Resolution` gained
+  `projects()` (the `[projects.*]` declarations) to feed it.
 
 ### Changed
 

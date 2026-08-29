@@ -4,6 +4,7 @@
 //! 場所を基準に複数の候補ディレクトリを組み立て、`reiny_launch::run_launch_dirs` に渡す。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -153,64 +154,64 @@ fn collect_flows(cfg_dir: &Path, plan: &LaunchPlan) -> (Vec<LaunchFlow>, BTreeMa
     (flows, services)
 }
 
-/// 集めた宣言から `publisher --[Type]--> subscriber` の行を組む。`[services]` の request 型は
-/// 向きが逆(caller --> server)なので左右を入れ替え、reply の型を添える。
-fn render_flow(flows: &[LaunchFlow], services: &BTreeMap<String, String>) -> Vec<String> {
-    let mut by_type: BTreeMap<&str, (Vec<&str>, Vec<&str>)> = BTreeMap::new();
-    for f in flows {
-        for t in &f.pubs {
-            by_type.entry(t).or_default().0.push(&f.name);
-        }
-        for t in &f.subs {
-            by_type.entry(t).or_default().1.push(&f.name);
-        }
-    }
-
-    let side = |names: &[&str]| {
-        if names.is_empty() {
-            "(none)".to_string()
-        } else {
-            names.join(", ")
-        }
-    };
-    let rows: Vec<(String, &str, String, String)> = by_type
-        .iter()
-        .map(|(ty, (pubs, subs))| {
-            if let Some(reply) = services.get(*ty) {
-                // service: 購読宣言側が caller、公開宣言側が server。
-                (
-                    side(subs),
-                    *ty,
-                    side(pubs),
-                    format!("  (service, reply {reply})"),
-                )
-            } else {
-                (side(pubs), *ty, side(subs), String::new())
-            }
-        })
-        .collect();
-
-    let w_left = rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0);
-    let w_ty = rows.iter().map(|r| r.1.len()).max().unwrap_or(0);
-    rows.iter()
-        .map(|(left, ty, right, note)| {
-            let dashes = "-".repeat(w_ty - ty.len() + 2);
-            format!("  {left:>w_left$} --[{ty}]{dashes}> {right}{note}")
-        })
-        .collect()
+/// `by` から型 `t` の辺を引く(無ければ作って `[services]` の reply を写す)。
+fn edge_for<'m, 'k>(
+    by: &'m mut BTreeMap<&'k str, crate::flowart::Edge>,
+    t: &'k str,
+    services: &BTreeMap<String, String>,
+) -> &'m mut crate::flowart::Edge {
+    by.entry(t).or_insert_with(|| crate::flowart::Edge {
+        ty: t.to_string(),
+        pubs: Vec::new(),
+        subs: Vec::new(),
+        reply: services.get(t).cloned(),
+    })
 }
 
-/// 起動する launch 群のトピックの流れを起動ログに出す。宣言を 1 つも解決できなければ何も出さない。
+/// 宣言を型ごとの辺(列 = `flows` の添字)へ畳む。`[services]` の request 型は矢印を
+/// 呼ぶ側 → serve する側の向きにしたいので、公開/購読の役割を入れ替える。
+fn build_edges(
+    flows: &[LaunchFlow],
+    services: &BTreeMap<String, String>,
+) -> Vec<crate::flowart::Edge> {
+    let mut by: BTreeMap<&str, crate::flowart::Edge> = BTreeMap::new();
+    for (i, f) in flows.iter().enumerate() {
+        for t in &f.pubs {
+            edge_for(&mut by, t, services).pubs.push(i);
+        }
+        for t in &f.subs {
+            edge_for(&mut by, t, services).subs.push(i);
+        }
+    }
+    let mut edges: Vec<_> = by.into_values().collect();
+    for e in &mut edges {
+        if e.reply.is_some() {
+            std::mem::swap(&mut e.pubs, &mut e.subs);
+        }
+    }
+    // 行順: 送り手の列 → 受け手の列 → 型名。上から下へ流れが読めるようにする。
+    edges.sort_by(|a, b| {
+        (a.pubs.first(), a.subs.first(), &a.ty).cmp(&(b.pubs.first(), b.subs.first(), &b.ty))
+    });
+    edges
+}
+
+/// 起動する launch 群のトピックの流れ図を起動ログに出す。宣言を 1 つも解決できなければ
+/// 何も出さない。多行の図なので tracing ではなく素の stdout へ描く(バナー扱い)。
 fn log_topic_flow(cfg_dir: &Path, plan: &LaunchPlan) {
     let (flows, services) = collect_flows(cfg_dir, plan);
-    let lines = render_flow(&flows, &services);
+    let names: Vec<String> = flows.iter().map(|f| f.name.clone()).collect();
+    let edges = build_edges(&flows, &services);
+    let color = std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal();
+    let lines = crate::flowart::render(&names, &edges, color);
     if lines.is_empty() {
         return;
     }
-    tracing::info!("topic flow:");
+    println!();
     for line in &lines {
-        tracing::info!("{line}");
+        println!("{line}");
     }
+    println!();
 }
 
 #[cfg(test)]
@@ -224,32 +225,6 @@ mod tests {
             pubs: pubs.iter().map(ToString::to_string).collect(),
             subs: subs.iter().map(ToString::to_string).collect(),
         }
-    }
-
-    #[test]
-    fn render_aligns_arrows_and_flips_services() {
-        let flows = [
-            flow("ping", &["Ping"], &["Pong"]),
-            flow("pong", &["Pong"], &["Ping"]),
-            flow("calc", &["Add"], &[]),
-            flow("asker", &[], &["Add"]),
-        ];
-        let services = BTreeMap::from([("Add".to_string(), "Sum".to_string())]);
-        let lines = render_flow(&flows, &services);
-        assert_eq!(
-            lines,
-            vec![
-                "  asker --[Add]---> calc  (service, reply Sum)",
-                "   ping --[Ping]--> pong",
-                "   pong --[Pong]--> ping",
-            ]
-        );
-    }
-
-    #[test]
-    fn render_marks_missing_sides() {
-        let lines = render_flow(&[flow("a", &["T"], &[])], &BTreeMap::new());
-        assert_eq!(lines, vec!["  a --[T]--> (none)"]);
     }
 
     #[test]
@@ -277,10 +252,26 @@ mod tests {
         assert!(services.is_empty());
         let ping = flows.iter().find(|f| f.name == "ping").expect("ping");
         assert!(ping.pubs.contains("Ping") && ping.subs.contains("Pong"));
-        let lines = render_flow(&flows, &services);
-        assert!(
-            lines.iter().any(|l| l.contains("ping --[Ping]--> pong")),
-            "{lines:?}"
+        let edges = build_edges(&flows, &services);
+        let e = edges.iter().find(|e| e.ty == "Ping").expect("Ping edge");
+        let col = |n: &str| flows.iter().position(|f| f.name == n).unwrap();
+        assert_eq!(
+            (e.pubs.as_slice(), e.subs.as_slice()),
+            ([col("ping")].as_slice(), [col("pong")].as_slice())
         );
+    }
+
+    #[test]
+    fn build_edges_flips_service_direction() {
+        // serve する側が publications、呼ぶ側が dependencies に宣言するが、矢印は caller → server。
+        let flows = [flow("asker", &[], &["Add"]), flow("calc", &["Add"], &[])];
+        let services = BTreeMap::from([("Add".to_string(), "Sum".to_string())]);
+        let edges = build_edges(&flows, &services);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(
+            (edges[0].pubs.as_slice(), edges[0].subs.as_slice()),
+            ([0].as_slice(), [1].as_slice())
+        );
+        assert_eq!(edges[0].reply.as_deref(), Some("Sum"));
     }
 }

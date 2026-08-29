@@ -11,6 +11,7 @@ mod bus;
 mod checkcmd;
 mod codec;
 mod compress;
+mod flowart;
 mod runcmd;
 mod scaffold;
 mod servicecmd;
