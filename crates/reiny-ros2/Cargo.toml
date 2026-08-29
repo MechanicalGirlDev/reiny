@@ -1,0 +1,41 @@
+[package]
+name = "reiny-ros2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "reiny ↔ ROS 2 bridge library: typed export / import of topics and services over pure-Rust DDS (ros2-client), no ROS installation needed"
+keywords = ["reiny", "ros2", "bridge", "dds"]
+categories = ["network-programming", "asynchronous"]
+
+[features]
+default = ["jazzy"]
+# ROS 2 ディストリビューション(ros2-client に素通し)。
+humble = ["ros2-client/humble"]
+iron = ["ros2-client/iron"]
+jazzy = ["ros2-client/jazzy"]
+kilted = ["ros2-client/kilted"]
+lyrical = ["ros2-client/lyrical"]
+
+[dependencies]
+# `Cloudy` と `Engine` の語彙だけ(zenoh は引かない)。
+reiny = { path = "../reiny", version = "0.4.0", default-features = false }
+ros2-client = { version = "0.10", default-features = false }
+prost = { workspace = true }
+# `export_auto` / `import_auto`: descriptor 経由の動的 decode / encode と serde の橋渡し。
+# 版は reiny-cli と同じ(prost-reflect 0.14 = prost 0.13)。
+prost-reflect = { version = "0.14", features = ["serde"] }
+serde = { workspace = true }
+serde_json = "1"
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+prost = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

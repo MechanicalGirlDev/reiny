@@ -57,6 +57,13 @@ Because the key is the Rust type, two crates sharing a type resolve to the same 
 - **Threading:** `ipc_threadsafe::Service`, so publishers / clients send from the caller's thread; one engine thread owns a `WaitSet`, re-attaches every registered listener each iteration (guards borrow listeners, so per-iteration attach avoids lifetime fights), drains *all* subscribers / servers on every wake, and polls presence. `Node` sits behind a `Mutex` only for service creation.
 - Every service name uses only `[A-Za-z0-9_/.-]`; whether iceoryx2 accepts `@` or `*` was never verified — keep it that way.
 
+## `reiny-ros2` — a bridge library, not an engine
+
+- **Per-type closures, one ROS node.** `Ros::new(&cloudy, name)` owns a `ros2_client::Context` + `Node` (behind a `std::sync::Mutex`, because every `Node::create_*` takes `&mut Node`) and spawns the node's `Spinner` on tokio; each `export` / `import` / `export_service` / `import_service` is one tokio task, aborted on `Ros` drop. ROS message types are `serde` structs implementing `ros2_client::Message`; message-type names are *arguments* (`MessageTypeName::new(pkg, name)`) because a Rust type cannot tell you its `.msg` name.
+- **`ros2-client` facts that bite:** `Context::new()` does *not* read `ROS_DOMAIN_ID` (reiny-ros2 does, plus `ROS_LOCALHOST_ONLY=1` → `DomainParticipantBuilder::with_only_networks([127.0.0.1])`); `Node::spinner()` panics if called twice; `Subscription` / `Server` futures need the message types to be `Sync`; a DDS request sent before the server is discovered is silently lost, so `import_service` wraps the call in a 10 s timeout and replies `reply_err` instead of hanging its route.
+- **Windows debug builds abort inside rustdds** (mio 0.6 Windows UDP, null-pointer UB check in Rust 1.96): `tests/loopback.rs` is `#[ignore]` under `all(windows, debug_assertions)`; validate locally with `cargo test -p reiny-ros2 --release -- --include-ignored`. The test also avoids the machine's dead link-local adapters by building loopback-only participants.
+- `export_auto` / `import_auto` go prost bytes → `prost_reflect::DynamicMessage` → serde (`use_proto_field_name`, i.e. snake_case) → ROS struct, and back; they require `Topic::DESCRIPTOR` (hand-written `impl Topic` types get an error, use the closure form).
+
 ## Three manifest files (don't conflate)
 
 - **`Cargo.toml`** — Rust build.

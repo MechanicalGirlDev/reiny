@@ -1,8 +1,8 @@
 # Changelog
 
 All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
-`reiny-link`, `reiny-iceoryx2`, `reiny-build`, `reiny-macros`, `reiny-launch`,
-`reiny-cli`).
+`reiny-link`, `reiny-iceoryx2`, `reiny-ros2`, `reiny-build`, `reiny-macros`,
+`reiny-launch`, `reiny-cli`).
 Versions are kept in lockstep via `[workspace.package].version`.
 
 ## Unreleased
@@ -115,6 +115,19 @@ piece that does not depend on it.
   / `topic hz` / `bag record`. `iceoryx2` is behind the CLI feature of the
   same name (libclang on Windows / macOS).
 
+- **`reiny-ros2`** — a ROS 2 bridge *library* on pure-Rust DDS
+  (`ros2-client` 0.10 / RustDDS; no ROS installation). A bridge grain builds
+  a `Ros` (one ROS node, spinner on tokio; `ROS_DOMAIN_ID` and
+  `ROS_LOCALHOST_ONLY=1` honoured) and adds routes per type with closures:
+  `export::<T, R>` (reiny → ROS topic), `import::<R, T>` (ROS → reiny, source
+  = the bridge's id), `export_service` (ROS clients → a reiny service) and
+  `import_service` (reiny callers → a ROS service, failures become
+  `reply_err`). `export_auto` / `import_auto` map same-shaped types by proto
+  field name through `Topic::DESCRIPTOR` (prost-reflect + serde). QoS maps
+  reliability / durability / history 1:1 onto DDS; `priority` / `express` are
+  dropped. The ROS distribution is a feature (`jazzy` default). Covered by an
+  in-process e2e against a ros2-client node over RustDDS loopback.
+
 ### Changed
 
 - `reiny::{Topic, Descriptor, Service}` are now re-exports of `reiny-core`
@@ -153,11 +166,17 @@ piece that does not depend on it.
 
 ### Notes
 
-- Not yet: `reiny-ros2` (`docs/design/0.5.0.md` §9, stage 6). An
-  `embedded-io-async` adapter was left out; `feed` / `drain` is four lines.
-  The bridge subscribes on a side to every type it has seen a token for
-  (all sources), not only the types the other side wants — narrowing that
-  needs an engine-side "who wants this type" query that does not exist yet.
+- An `embedded-io-async` adapter was left out; `feed` / `drain` is four
+  lines. The raw bridge subscribes on a side to every type it has seen a
+  token for (all sources), not only the types the other side wants —
+  narrowing that needs an engine-side "who wants this type" query that does
+  not exist yet.
+- `reiny-ros2` on **Windows debug builds**: rustdds 0.14 still uses mio 0.6,
+  whose Windows UDP code trips Rust 1.96's null-pointer UB check and aborts
+  the DDS event loop. The crate builds; its e2e is `#[ignore]`d there and
+  runs with `--release --include-ignored`. Linux (CI) is unaffected.
+- ROS 2 actions / parameters are not bridged (0.4.0 §2.6: services + topics
+  + latched express them; parameters are not a bridge's job).
 - Publishers now default to `Reliable` (see *Changed*); a grain that relied on
   zenoh's `Drop` default for high-rate data should say `Qos::SENSOR`.
 
