@@ -1,13 +1,13 @@
-//! launch config の `[launch]` 節から launch plan(起動する launch 群と順序)を導出する。
-//! `reiny --config <launch>.toml` を唯一のエントリポイントとする。
+//! Deriving a launch plan (which launches to start, and in what order) from a launch config's
+//! `[launch]` section. `reiny --config <launch>.toml` is the only entry point.
 //!
-//! `HumanoidSystem` の hs-launch と違い、**既知種別/プラグインの区別は無い**。すべてのキーが
-//! 対等な launch で、キー名 = インスタンス名 = 既定 bin 名。bin は同一ワークスペースの
-//! target ディレクトリから起動する(別ワークスペースの plugin 探索は持たない)。
+//! Unlike `HumanoidSystem`'s hs-launch there is **no known-kind / plugin distinction**. Every key is
+//! an equal launch: key = instance name = default bin name. The bins are started from the same
+//! workspace's target directory (there is no plugin search across workspaces).
 //!
-//! 既定の規約(override は `[launch]` のインラインテーブルで可能):
-//! - `bin` = キー名、`depends_on` = []、`on_exit` = ignore。
-//! - `config = "..."` を与えると起動引数に `--config <abs>` を付与する。
+//! The default conventions (overridable through the inline table in `[launch]`):
+//! - `bin` = the key name, `depends_on` = [], `on_exit` = ignore.
+//! - Giving `config = "..."` adds `--config <abs>` to the startup arguments.
 
 use std::path::{Path, PathBuf};
 
@@ -15,51 +15,56 @@ use anyhow::{Context, Result};
 
 use crate::config::{LaunchConfig, LaunchSpec, OnExit};
 
-/// 解決済みの1 launch 起動仕様(規約 + override 適用後)。
+/// One resolved launch's startup specification (after conventions and overrides).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedLaunch {
-    /// インスタンス名(`--name` で子に渡す。plan 内で一意)。launch config のキー名。
+    /// The instance name (passed to the child as `--name`; unique within the plan). The launch config's key.
     pub name: String,
-    /// 起動する実行ファイル名(未指定はキー名)。
+    /// The executable to start (unset = the key name).
     pub bin: String,
-    /// 起動引数(`--config <abs path>` 等)。
+    /// The startup arguments (`--config <abs path>` and the like).
     pub args: Vec<String>,
-    /// 起動順序を規定する依存(これより前に起動)。
+    /// The dependencies that fix the start order (started, and waited for, before this one).
     pub depends_on: Vec<String>,
-    /// プロセス終了時の振る舞い。
+    /// What happens when the process exits.
     pub on_exit: OnExit,
-    /// この子に渡すログレベルの override(未指定はランチャ既定)。
+    /// An override for the log level passed to this child (unset = the launcher's default).
     pub log_level: Option<String>,
+    /// The namespace this launch runs in (its own `domain`, else the launch-wide default). `None`
+    /// leaves it to the child's own resolution (`REINY_DOMAIN`, else `"default"`). It is already in
+    /// `args` as `--domain <ns>`; the field exists so a readiness check can address the launch on the
+    /// bus without parsing the argument list back.
+    pub domain: Option<String>,
 }
 
-/// launch config から導出した launch plan。
+/// The launch plan derived from a launch config.
 #[derive(Debug, Clone, Default)]
 pub struct LaunchPlan {
-    /// 起動順未解決の launch 群(規約 + override 適用後)。順序は [`Self::topo_order`] で決める。
+    /// The launches with their order unresolved (after conventions and overrides). [`Self::topo_order`] decides the order.
     pub launches: Vec<ResolvedLaunch>,
 }
 
-/// launch plan の検証エラー。
+/// A launch plan validation error.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LaunchError {
-    /// 同名の launch が 2 つ以上ある(キー = インスタンス名は plan 内で一意)。
+    /// Two or more launches share a name (key = instance name is unique within a plan).
     #[error("duplicate launch name '{0}'")]
     DuplicateName(String),
-    /// `depends_on` が plan に存在しない launch を指している。
+    /// A `depends_on` names a launch the plan does not have.
     #[error("launch '{launch}' depends_on undefined launch '{dep}'")]
     UndefinedDependency {
-        /// 依存を宣言した側の launch 名。
+        /// The launch that declared the dependency.
         launch: String,
-        /// 参照先(未定義)の launch 名。
+        /// The (undefined) launch it referred to.
         dep: String,
     },
-    /// `depends_on` に循環がある。
+    /// `depends_on` has a cycle.
     #[error("dependency cycle detected involving '{0}'")]
     Cycle(String),
 }
 
 impl LaunchPlan {
-    /// launch config(TOML)ファイルから launch plan を導出する。
+    /// Derive a launch plan from a launch config (TOML) file.
     pub fn from_launch_config(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read launch config {}", path.display()))?;
@@ -68,15 +73,15 @@ impl LaunchPlan {
         Ok(Self::from_config(&config, path))
     }
 
-    /// パース済み `LaunchConfig` から plan を組む。launch config パスは launch config の
-    /// 場所(dir)基準で絶対解決し、子の作業ディレクトリに依らないようにする。
-    fn from_config(config: &LaunchConfig, launch_config_path: &Path) -> Self {
-        // launch config を絶対化(存在前提。失敗時は与えられたパスをそのまま使う)。
+    /// Build a plan from an already-parsed `LaunchConfig`. Launch config paths resolve against the
+    /// launch config's own directory, so they do not depend on the child's working directory.
+    pub(crate) fn from_config(config: &LaunchConfig, launch_config_path: &Path) -> Self {
+        // Make the launch config path absolute (it is expected to exist; on failure keep what was given).
         let abs = std::fs::canonicalize(launch_config_path)
             .unwrap_or_else(|_| launch_config_path.to_path_buf());
         let cfg_dir = abs.parent().map(Path::to_path_buf).unwrap_or_default();
 
-        // BTreeMap なのでキー順は決定的 → 起動順(依存が無いとき)も安定。
+        // A BTreeMap keeps the key order deterministic → so is the start order when nothing depends on anything.
         let launches = config
             .launch
             .iter()
@@ -87,7 +92,7 @@ impl LaunchPlan {
         Self { launches }
     }
 
-    /// 一意名・依存参照・循環を検証する。
+    /// Validate unique names, dependency references and cycles.
     pub fn validate(&self) -> Result<(), LaunchError> {
         let mut seen = std::collections::HashSet::new();
         for g in &self.launches {
@@ -108,7 +113,7 @@ impl LaunchPlan {
         self.topo_order().map(|_| ())
     }
 
-    /// `depends_on` を満たす起動順(インデックス列)を返す。循環時は `Cycle`。
+    /// The start order (as indices) satisfying `depends_on`. `Cycle` when there is one.
     pub fn topo_order(&self) -> Result<Vec<usize>, LaunchError> {
         use std::collections::HashMap;
 
@@ -142,7 +147,7 @@ impl LaunchPlan {
             .map(|(i, g)| (g.name.as_str(), i))
             .collect();
 
-        // 0=未訪問, 1=訪問中, 2=完了
+        // 0 = unvisited, 1 = visiting, 2 = done
         let mut state = vec![0u8; self.launches.len()];
         let mut order = Vec::with_capacity(self.launches.len());
 
@@ -153,9 +158,9 @@ impl LaunchPlan {
     }
 }
 
-/// launch を規約既定 + override から組む。config があれば `--config <abs>` を付与。
-/// `domain` は launch の指定 → launch 全体の既定 の順で、あれば `--domain <ns>` を付与する
-/// (どちらも無ければ launch 側の既定 = `REINY_DOMAIN` か `"default"` に委ねる)。
+/// Build a launch from the default conventions plus the overrides. With a config, `--config <abs>` is added.
+/// `domain` comes from the launch's own setting, then the launch-wide default; whichever is found is
+/// added as `--domain <ns>` (with neither, it is left to the launch's own default = `REINY_DOMAIN` or `"default"`).
 fn resolve(
     name: &str,
     spec: &LaunchSpec,
@@ -171,9 +176,10 @@ fn resolve(
                 .into_owned(),
         );
     }
-    if let Some(domain) = spec.domain().or(default_domain) {
+    let domain = spec.domain().or(default_domain).map(str::to_string);
+    if let Some(domain) = &domain {
         args.push("--domain".to_string());
-        args.push(domain.to_string());
+        args.push(domain.clone());
     }
     if let Some(zcfg) = spec.zenoh_config() {
         args.push("--zenoh-config".to_string());
@@ -191,10 +197,11 @@ fn resolve(
         depends_on: spec.depends_on().to_vec(),
         on_exit: spec.on_exit(),
         log_level: spec.log_level().map(str::to_string),
+        domain,
     }
 }
 
-/// 相対パスを base 基準で解決する(絶対パスはそのまま)。
+/// Resolve a relative path against `base` (an absolute path is returned unchanged).
 fn resolve_relative(base: &Path, p: &Path) -> PathBuf {
     if p.is_absolute() {
         p.to_path_buf()
@@ -204,12 +211,12 @@ fn resolve_relative(base: &Path, p: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)] // テストは panic で失敗を表現してよい
+#[allow(clippy::expect_used, clippy::unwrap_used)] // tests may fail by panicking
 mod tests {
     use super::*;
 
-    /// テスト用 plan。launch config パスは存在しない名前でよい(canonicalize は失敗して
-    /// 与えたパスにフォールバックする — 構造の検証には十分)。
+    /// A plan for tests. The launch config path may name something that does not exist (canonicalize
+    /// fails and falls back to the given path — good enough for checking the structure).
     fn plan(s: &str) -> LaunchPlan {
         let config: LaunchConfig = toml::from_str(s).expect("parse launch config");
         LaunchPlan::from_config(&config, Path::new("reiny.toml"))
@@ -257,6 +264,10 @@ mod tests {
         assert_eq!(arg_after(gui, "--domain"), Some("lab".to_string()));
         let solo = get(&p, "solo").expect("solo present");
         assert_eq!(arg_after(solo, "--domain"), Some("other".to_string()));
+        // The same value is kept as a field, so a readiness check can address the launch on the bus
+        // without parsing `args` back.
+        assert_eq!(gui.domain.as_deref(), Some("lab"));
+        assert_eq!(solo.domain.as_deref(), Some("other"));
     }
 
     #[test]
@@ -284,7 +295,7 @@ mod tests {
         assert_eq!(m.bin, "reiny-monitor");
         assert_eq!(m.depends_on, vec!["gui".to_string()]);
         assert_eq!(m.on_exit, OnExit::Respawn);
-        // --config <abs> の後に追加 args が並ぶ。
+        // The extra args line up after `--config <abs>`.
         assert_eq!(m.args.last().map(String::as_str), Some("--fast"));
     }
 
@@ -338,7 +349,7 @@ mod tests {
         assert!(pos("gui") < pos("monitor"));
     }
 
-    // validate/topo の構造検証は ResolvedLaunch を直接組んで行う。
+    // The structural checks (validate / topo) build `ResolvedLaunch` directly.
     fn rg(name: &str, deps: &[&str]) -> ResolvedLaunch {
         ResolvedLaunch {
             name: name.to_string(),
@@ -347,6 +358,7 @@ mod tests {
             depends_on: deps.iter().map(|s| (*s).to_string()).collect(),
             on_exit: OnExit::Ignore,
             log_level: None,
+            domain: None,
         }
     }
 
@@ -378,5 +390,62 @@ mod tests {
             launches: vec![rg("a", &[]), rg("a", &[])],
         };
         assert_eq!(p.validate(), Err(LaunchError::DuplicateName("a".into())));
+    }
+
+    /// A diamond: every dependency has to come before its dependent, and every launch appears exactly
+    /// once — a depth-first order that revisits a shared dependency would start it twice.
+    #[test]
+    fn topo_handles_a_diamond_and_visits_each_launch_once() {
+        let p = LaunchPlan {
+            launches: vec![
+                rg("top", &["left", "right"]),
+                rg("left", &["base"]),
+                rg("right", &["base"]),
+                rg("base", &[]),
+            ],
+        };
+        p.validate().unwrap();
+        let order = p.topo_order().unwrap();
+        assert_eq!(order.len(), p.launches.len(), "each launch exactly once");
+        let mut seen: Vec<&str> = order.iter().map(|&i| p.launches[i].name.as_str()).collect();
+        let pos = |name: &str| seen.iter().position(|n| *n == name).unwrap();
+        assert!(pos("base") < pos("left"));
+        assert!(pos("base") < pos("right"));
+        assert!(pos("left") < pos("top"));
+        assert!(pos("right") < pos("top"));
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 4);
+    }
+
+    /// With nothing depending on anything, the order is the config's key order — the `BTreeMap` is
+    /// there so that the same launch config starts in the same order every time.
+    #[test]
+    fn independent_launches_keep_the_key_order() {
+        let p = plan(
+            r#"
+            [launch]
+            zulu = "z.toml"
+            alpha = "a.toml"
+            mike = "m.toml"
+        "#,
+        );
+        p.validate().unwrap();
+        let order: Vec<&str> = p
+            .topo_order()
+            .unwrap()
+            .iter()
+            .map(|&i| p.launches[i].name.as_str())
+            .collect();
+        assert_eq!(order, ["alpha", "mike", "zulu"]);
+    }
+
+    /// A launch depending on itself is a cycle, not a no-op — starting it would wait for itself.
+    #[test]
+    fn a_self_dependency_is_a_cycle() {
+        let p = LaunchPlan {
+            launches: vec![rg("a", &["a"])],
+        };
+        assert!(matches!(p.validate(), Err(LaunchError::Cycle(_))));
     }
 }

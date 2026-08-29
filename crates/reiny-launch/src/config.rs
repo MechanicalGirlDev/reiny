@@ -1,88 +1,88 @@
-//! launch config の `[launch]` テーブル — reiny ランチャの唯一のエントリポイント。
+//! A launch config's `[launch]` table — the reiny launcher's only entry point.
 //!
-//! Cargo の `[dependencies]` と同じ書式で、各値は
+//! It is written like Cargo's `[dependencies]`, where each value is either
 //!
-//! - **文字列** = launch 固有 config ファイルパスのショートハンド
-//!   (`gui = "configs/gui.toml"` ≡ `gui = { config = "configs/gui.toml" }`)、または
-//! - **インラインテーブル** = launch override 付きの詳細形
-//!   (`monitor = { bin = "...", on_exit = "respawn" }`)。
+//! - **a string** = shorthand for the launch's own config file path
+//!   (`gui = "configs/gui.toml"` ≡ `gui = { config = "configs/gui.toml" }`), or
+//! - **an inline table** = the detailed form, with per-launch overrides
+//!   (`monitor = { bin = "...", on_exit = "respawn" }`).
 //!
-//! `HumanoidSystem` の `[component]` と違い、**既知種別(control/gui/policy/physics)も
-//! プラグインという区別も無い**。すべてのキーは対等な「launch」で、キー名 = インスタンス名 =
-//! 既定 bin 名。ランチャは各 launch を同一ワークスペースの子プロセスとして起動する。
+//! Unlike `HumanoidSystem`'s `[component]`, there are **no known kinds (control/gui/policy/physics)
+//! and no plugin distinction**. Every key is an equal "launch": key = instance name = default bin
+//! name. The launcher starts each launch as a child process from the same workspace.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-/// launch がプロセス終了したときの振る舞い(ランチャが解釈)。
+/// What happens when a launch's process exits (the launcher's interpretation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OnExit {
-    /// 落ちても記録のみで他は継続する(既定。launch は対等なので privileged な
-    /// `control` のような全体停止既定は持たない)。全 launch が終了したらランチャも終わる。
+    /// Record it and carry on (the default). Launches are equals, so there is no privileged
+    /// `control` whose exit stops everything. The launcher ends once every launch has exited.
     #[default]
     Ignore,
-    /// 落ちたら同じ launch を再起動する。
+    /// Restart that same launch.
     Respawn,
-    /// 1つでも落ちたら全体を停止する。
+    /// Stop everything as soon as one exits.
     ShutdownAll,
 }
 
-/// launch config のルート。`[launch]` テーブルと、その全体に効く既定値。
+/// A launch config's root: the `[launch]` table plus the defaults that apply across it.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct LaunchConfig {
-    /// この launch 全体の論理名前空間(`--domain`)。同じ LAN / マシン上の別の launch と
-    /// 混ざらなくなる —— 実機とログ再生、ロボット 2 体、CI の並列ジョブが同じ理由で救われる。
-    /// launch 側の `domain` が指定されていればそちらが勝つ。
+    /// The logical namespace of this whole launch (`--domain`). It keeps launches on the same LAN or
+    /// machine from mixing — hardware versus log replay, two robots, and parallel CI jobs are all
+    /// saved by it for the same reason. A launch's own `domain` wins over this.
     pub domain: Option<String>,
-    /// 起動する launch 群。キー = インスタンス名 = 既定 bin 名。`BTreeMap` でキー順を
-    /// 決定的にし、起動順(依存が無いとき)を安定させる。
+    /// The launches to start. Key = instance name = default bin name. A `BTreeMap` makes the key
+    /// order deterministic, which keeps the start order stable when nothing declares a dependency.
     #[serde(default)]
     pub launch: BTreeMap<String, LaunchSpec>,
 }
 
-/// 1 launch の宣言。Cargo 依存と同じく、文字列(config パスのショートハンド)
-/// またはインラインテーブル(launch override 付き)。
+/// One launch's declaration. As with a Cargo dependency, it is either a string (shorthand for the
+/// config path) or an inline table (with per-launch overrides).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum LaunchSpec {
-    /// ショートハンド: config ファイルパスのみ(= `{ config = "..." }`)。
+    /// Shorthand: the config file path alone (= `{ config = "..." }`).
     Config(PathBuf),
-    /// 詳細形: launch override を伴う。
+    /// The detailed form, carrying per-launch overrides.
     Detailed(LaunchEntry),
 }
 
-/// `LaunchSpec` の詳細形フィールド(全て任意)。
+/// The detailed form's fields (all optional).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct LaunchEntry {
-    /// launch 固有 config ファイルへの、launch config ディレクトリ基準のパス。
-    /// 指定すると起動引数に `--config <abs>` を付与する。
+    /// The path to the launch's own config file, relative to the launch config's directory.
+    /// Setting it adds `--config <abs>` to the startup arguments.
     pub config: Option<PathBuf>,
-    /// 起動 bin 名の override(未指定はキー名)。
+    /// An override for the bin name (unset = the key name).
     pub bin: Option<String>,
-    /// 追加の起動引数(`--config <...>` の後に付与)。
+    /// Extra startup arguments (appended after `--config <...>`).
     pub args: Vec<String>,
-    /// 依存(これより前に起動)。
+    /// Dependencies (started before this one).
     pub depends_on: Vec<String>,
-    /// プロセス終了時の振る舞い(未指定は `Ignore`)。
+    /// What happens when the process exits (unset = `Ignore`).
     pub on_exit: Option<OnExit>,
-    /// ログレベルの override。
+    /// An override for the log level.
     pub log_level: Option<String>,
-    /// 論理名前空間の override(未指定は launch config の `domain`)。
-    /// 別 domain の launch 同士は通信しないので、通常は launch 全体で揃える。
+    /// An override for the logical namespace (unset = the launch config's `domain`).
+    /// Launches in different domains do not talk, so normally the whole launch shares one.
     pub domain: Option<String>,
-    /// zenoh セッション設定ファイル(JSON5)への、launch config ディレクトリ基準のパス。
-    /// 指定すると起動引数に `--zenoh-config <abs>` を付与する。
+    /// The path to a zenoh session configuration file (JSON5), relative to the launch config's
+    /// directory. Setting it adds `--zenoh-config <abs>` to the startup arguments.
     pub zenoh_config: Option<PathBuf>,
-    /// false で当該 launch を起動対象から外す(既定 true)。
+    /// `false` leaves this launch out of the plan (default `true`).
     pub enabled: Option<bool>,
 }
 
 impl LaunchSpec {
-    /// launch 固有 config ファイルへのパス(launch config dir 基準)。
+    /// The path to the launch's own config file (relative to the launch config's directory).
     #[must_use]
     pub fn config(&self) -> Option<&Path> {
         match self {
@@ -91,7 +91,7 @@ impl LaunchSpec {
         }
     }
 
-    /// bin 名の override(未指定はキー名)。
+    /// An override for the bin name (unset = the key name).
     #[must_use]
     pub fn bin(&self) -> Option<&str> {
         match self {
@@ -100,7 +100,7 @@ impl LaunchSpec {
         }
     }
 
-    /// 追加起動引数。
+    /// Extra startup arguments.
     #[must_use]
     pub fn args(&self) -> &[String] {
         match self {
@@ -109,7 +109,7 @@ impl LaunchSpec {
         }
     }
 
-    /// `depends_on`。
+    /// `depends_on`.
     #[must_use]
     pub fn depends_on(&self) -> &[String] {
         match self {
@@ -118,7 +118,7 @@ impl LaunchSpec {
         }
     }
 
-    /// `on_exit`(未指定は `Ignore`)。
+    /// `on_exit` (unset = `Ignore`).
     #[must_use]
     pub fn on_exit(&self) -> OnExit {
         match self {
@@ -127,7 +127,7 @@ impl LaunchSpec {
         }
     }
 
-    /// `log_level` の override。
+    /// An override for `log_level`.
     #[must_use]
     pub fn log_level(&self) -> Option<&str> {
         match self {
@@ -136,7 +136,7 @@ impl LaunchSpec {
         }
     }
 
-    /// `domain` の override。
+    /// An override for `domain`.
     #[must_use]
     pub fn domain(&self) -> Option<&str> {
         match self {
@@ -145,7 +145,7 @@ impl LaunchSpec {
         }
     }
 
-    /// zenoh セッション設定ファイルへのパス(launch config dir 基準)。
+    /// The path to a zenoh session configuration file (relative to the launch config's directory).
     #[must_use]
     pub fn zenoh_config(&self) -> Option<&Path> {
         match self {
@@ -154,7 +154,7 @@ impl LaunchSpec {
         }
     }
 
-    /// 起動対象か(既定 true)。`enabled = false` で外す。
+    /// Whether it is part of the plan (default `true`). `enabled = false` leaves it out.
     #[must_use]
     pub fn enabled(&self) -> bool {
         match self {
@@ -165,7 +165,7 @@ impl LaunchSpec {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)] // テストは panic で失敗を表現してよい
+#[allow(clippy::expect_used, clippy::unwrap_used)] // tests may fail by panicking
 mod tests {
     use super::*;
 
@@ -220,7 +220,7 @@ mod tests {
         assert_eq!(
             c.launch["gui"].domain(),
             None,
-            "エントリ未指定なら launch 既定に委ねる"
+            "an unset entry defers to the launch-wide default"
         );
         assert_eq!(c.launch["solo"].domain(), Some("other"));
     }

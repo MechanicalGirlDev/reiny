@@ -1,8 +1,8 @@
-//! reiny ランチャ。launch config の `[launch]` 節から launch plan を導出し、各 launch bin を
-//! 子プロセスとして依存順に起動して `on_exit` ポリシーで監視する。
+//! The reiny launcher. It derives a launch plan from a launch config's `[launch]` section, starts
+//! each launch bin as a child process in dependency order, and monitors them under their `on_exit` policy.
 //!
-//! `HumanoidSystem` の hs-launch と違い、**既知種別(control/gui/policy/physics)もプラグインと
-//! いう区別も無い**。すべてのキーが対等な「launch」で、キー名 = インスタンス名 = 既定 bin 名。
+//! Unlike `HumanoidSystem`'s hs-launch there are **no known kinds (control/gui/policy/physics) and no
+//! plugin distinction**. Every key is an equal "launch": key = instance name = default bin name.
 
 mod config;
 mod launch;
@@ -10,4 +10,4 @@ mod runner;
 
 pub use config::{LaunchConfig, LaunchEntry, LaunchSpec, OnExit};
 pub use launch::{LaunchError, LaunchPlan, ResolvedLaunch};
-pub use runner::{run_launch, run_launch_dirs};
+pub use runner::{Ready, run_launch, run_launch_dirs};
