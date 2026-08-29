@@ -1,25 +1,28 @@
-//! raw bridge —— 2 つのエンジンの間で sample / presence / query を**バイトのまま**写す。
+//! The raw bridge — copying samples / presence / queries **as bytes** between two engines.
 //!
-//! [`forward`] は同じ id / domain の 2 つの [`Cloudy`] —— `a` と `b`、2 本目は
-//! [`Cloudy::with_engine`] で組む —— を受け、両方向に:
+//! [`forward`] takes two [`Cloudy`]s with the same id and domain — `a` and `b`, the second built with
+//! [`Cloudy::with_engine`] — and in both directions:
 //!
-//! - **presence**: A に立った publisher / service / launch のトークンを、**同じキー(source も
-//!   同じ)**で B に立てる。B から見ると A の launch がそのまま居る。
-//! - **sample**: トークンが見えた型を A で購読し、B に同じキーで publish する(attachment =
-//!   指紋もそのまま)。
-//! - **query**: B に写したトークンごとに B で responder を立て、届いた query を A の**その
-//!   source 宛て**の query に転送し、最初の応答を返す。latched も service も同じ経路。
+//! - **presence**: a publisher / service / launch token raised on A goes up on B **on the same key
+//!   (same source too)**. From B, A's launch simply appears to be there.
+//! - **samples**: a type whose token was seen is subscribed on A and published on B under the same key
+//!   (attachment = the fingerprint, unchanged).
+//! - **queries**: for every token mirrored onto B a responder is raised on B, and a query arriving
+//!   there is relayed to A **addressed at that source**, returning the first reply. latched and
 //!
-//! ループ防止は 1 規則: **自分が B に写した source から B で見えたもの(sample / トークン)は
-//! A のエコーなので写さない。** query は転送先を必ず具体的な source にする —— B の `*` query
-//! は B の responder(= A の各 source)それぞれに届き、それぞれが A の同じ source だけに
-//! 転送するので、A の bridge responder には当たらない。
+//! Loop prevention is one rule: **anything seen on B from a source this bridge itself injected into B
+//! (sample or token) is an echo of A and is not copied back.** A relayed query always targets a
+//! concrete source — a `*` query on B reaches each of B's responders (= each of A's sources) and each
+//! relays only to that one source on A, so A's own bridge responders never see it.
 //!
-//! エンジンの型は問わない(`Local` ↔ `Local` でテストする)。`reiny bridge serial|udp|iceoryx2`
-//! はこれを zenoh とリンク / iceoryx2 の間に置く。
+//! The engine types do not matter (it is tested `Local` ↔ `Local`). `reiny bridge serial|udp|iceoryx2`
+//! puts this between zenoh and a link / iceoryx2.
 //!
-//! `// ponytail: A で購読するのは「トークンが見えた型 × 全 source」。B が要る型だけに絞るのは
-//! エンジンに「誰が欲しがっているか」を聞く口ができてから`
+//! `// ponytail: on A it subscribes to "every type a token was seen for × every source". Narrowing it
+//! to what B wants is now *writable* — @sub presence is that question — but it is not written: a
+//! link already drops types the peer does not subscribe to in Link::send_raw, so all narrowing
+//! would save is one in-process subscription, against a second echo-analysis and a two-sided
+//! reference count. Revisit when a bandwidth-bound zenoh <-> zenoh bridge exists`
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -34,10 +37,10 @@ use crate::engine::{
 };
 use crate::{Cloudy, Qos, Result};
 
-/// 転送した query の期限(zenoh の `get` の既定と同じ)。
+/// The deadline on a relayed query (the same as zenoh's `get` default).
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// [`forward`] の取っ手。drop すると両方向の転送と、写したトークン / 購読が全部消える。
+/// The handle [`forward`] returns. Dropping it removes both directions along with every mirrored token and subscription.
 pub struct Bridge {
     tasks: Vec<JoinHandle<()>>,
 }
@@ -50,7 +53,7 @@ impl Drop for Bridge {
     }
 }
 
-/// `a` と `b` の間を両方向に繋ぐ。id と domain が同じでなければエラー。tokio runtime の中で呼ぶ。
+/// Join `a` and `b` in both directions. An error unless the ids and domains match. Call it inside a tokio runtime.
 pub fn forward(a: &Cloudy, b: &Cloudy) -> Result<Bridge> {
     if a.id() != b.id() || a.domain() != b.domain() {
         anyhow::bail!(
@@ -70,7 +73,7 @@ pub fn forward(a: &Cloudy, b: &Cloudy) -> Result<Bridge> {
     })
 }
 
-/// ある側に bridge が写し込んだ source(→ トークン数)。写した先で見えても「エコー」と分かる。
+/// The sources the bridge injected into one side (→ token count), so that seeing them there is recognizable as an echo.
 #[derive(Default)]
 struct Injected(Mutex<HashMap<String, usize>>);
 
@@ -103,26 +106,26 @@ enum Op {
     Presence(Presence),
 }
 
-/// 片方向(`from` → `into`)の状態。転送 task が所有する。
+/// One direction's state (`from` → `into`), owned by the forwarding task.
 struct Flow {
     id: String,
     domain: String,
     from: Arc<dyn Engine>,
     into: Arc<dyn Engine>,
-    /// この flow が `into` に写した source。
+    /// The sources this flow mirrored into `into`.
     injected: Arc<Injected>,
-    /// 逆向きの flow が `from` に写した source(`from` で見えたらエコー)。
+    /// The sources the opposite flow mirrored into `from` (seeing them on `from` is an echo).
     echoes: Arc<Injected>,
-    /// `from` の購読(型ごと)。その型の publisher トークンが 1 つでも見えている間だけ。
+    /// The subscriptions on `from` (per type). Only while at least one publisher token of that type is visible.
     subscriptions: HashMap<String, Guard>,
     type_refs: HashMap<String, usize>,
-    /// `into` に写したトークン。
+    /// The tokens mirrored into `into`.
     tokens: HashMap<Key, Guard>,
-    /// `into` の publisher(写した source × 型)。
+    /// The publishers on `into` (mirrored source × type).
     publishers: HashMap<Key, Box<dyn RawPublisher>>,
-    /// `into` の responder(写した source × 型)。latched も service も 1 本で受ける。
+    /// The responders on `into` (mirrored source × type). One handles latched and services alike.
     responders: HashMap<Key, Guard>,
-    /// `from` の見張り(保持するだけ)。
+    /// The watch on `from` (merely held).
     _watchers: Vec<Guard>,
     handle: Handle,
     ops: mpsc::UnboundedSender<Op>,
@@ -180,7 +183,7 @@ impl Flow {
         }
     }
 
-    /// 写すべき source か。自分(bridge)と、逆向きに写されたエコーは写さない。
+    /// Whether this source should be mirrored. Neither ourselves (the bridge) nor an echo mirrored back.
     fn foreign<'k>(&self, key: &'k Key) -> Option<&'k str> {
         let source = key.source.as_deref()?;
         (source != self.id && !self.echoes.contains(source)).then_some(source)
@@ -214,7 +217,7 @@ impl Flow {
         if self.tokens.contains_key(key) {
             return;
         }
-        // トークンを写す前に「写した」と記録する —— 逆向きの見張りが先に見ても弾けるように。
+        // Record "mirrored" before mirroring the token, so the opposite watch rejects it even if it looks first.
         self.injected.add(&source);
         match self.into.declare_alive(key) {
             Ok(guard) => {
@@ -232,10 +235,10 @@ impl Flow {
             ..key.clone()
         };
         if key.is_verbatim_type() {
-            return; // @launch: トークンだけ
+            return; // @launch: the token and nothing else
         }
         if key.chunk.is_none() {
-            // publisher トークン: その型を from で購読する(初めての型なら)。
+            // A publisher token: subscribe to that type on from (if this is the first time for it).
             if let Some(ty) = key.ty.clone() {
                 *self.type_refs.entry(ty.clone()).or_insert(0) += 1;
                 if !self.subscriptions.contains_key(&ty) {
@@ -254,7 +257,7 @@ impl Flow {
                 }
             }
         }
-        // publisher でも service でも、その source × 型への query を from に転送する。
+        // For a publisher and for a service alike, relay queries for that source × type to from.
         if !self.responders.contains_key(&topic) {
             let from = Arc::clone(&self.from);
             let target = topic.clone();
@@ -309,7 +312,7 @@ impl Flow {
     }
 }
 
-/// `into` に届いた query を `from` の具体的な source 宛てに転送し、最初の応答を返す。
+/// Relay a query that arrived on `into` to a concrete source on `from` and return the first reply.
 async fn relay_query(from: Arc<dyn Engine>, target: Key, query: Box<dyn RawQuery>) {
     let params = QueryParams {
         payload: query.payload().map(<[u8]>::to_vec),
@@ -332,7 +335,7 @@ async fn relay_query(from: Arc<dyn Engine>, target: Key, query: Box<dyn RawQuery
         Some(Err(message)) => {
             let _ = query.reply_err(message);
         }
-        None => {} // 応答ゼロ: query を drop して finalize
+        None => {} // no replies: drop the query to finalize it
     }
 }
 
@@ -418,7 +421,7 @@ mod tests {
             .expect("second side");
         let _bridge = forward(&bridge_a, &bridge_b).expect("forward");
 
-        // --- presence + sample: A の publisher が B に見え、sample が source ごと届く ---
+        // --- presence + samples: A's publisher is visible on B, and samples arrive with their source ---
         let mut watch = b1.watch_publishers::<Probe>().expect("watch");
         let probe = a1
             .publisher::<Probe>()
@@ -430,7 +433,7 @@ mod tests {
             Some(PresenceEvent::Joined("a1".to_string()))
         );
         assert_eq!(b1.publishers::<Probe>().await.expect("publishers"), ["a1"]);
-        // 自分の launch も B に写っている。
+        // Our own launch is mirrored onto B as well.
         let launches = bridge_b
             .engine()
             .alive(&Key::launch(DOMAIN, None), PATIENCE)
@@ -447,7 +450,7 @@ mod tests {
             .expect("open");
         assert_eq!((envelope.value.seq, envelope.source.as_str()), (1, "a1"));
 
-        // --- latched: B の遅れて来た購読者の query が A の latch へ転送される ---
+        // --- latched: a late subscriber's query on B is relayed to A's latch ---
         let mut late = b1.subscriber::<Probe>().latched().build().expect("latched");
         assert_eq!(
             timeout(PATIENCE, late.recv())
@@ -457,7 +460,7 @@ mod tests {
             Some(1)
         );
 
-        // --- no echo: A の購読者は自分の sample を 1 回だけ受ける ---
+        // --- no echo: a subscriber on A receives its own sample exactly once ---
         let mut mine = a1.subscribe::<Probe>().expect("mine");
         tokio::time::sleep(SETTLE).await;
         probe.send(Probe { seq: 2 }).await.expect("send");
@@ -475,7 +478,7 @@ mod tests {
             "the bridge must not echo A's sample back into A"
         );
 
-        // --- service: B から A の server を呼ぶ(任意 / 宛先指定 / reply_err) ---
+        // --- services: calling A's server from B (any / addressed / reply_err) ---
         let mut server = a1.serve::<Add>().expect("serve");
         tokio::spawn(async move {
             while let Some(req) = server.recv().await {
@@ -504,7 +507,7 @@ mod tests {
             Err(CallError::Remote(m)) if m == "negative"
         ));
 
-        // --- 逆方向: B の publisher が A に届く ---
+        // --- the other direction: B's publisher reaches A ---
         let cmd = b1.publish::<Cmd>().expect("cmd");
         let mut cmds = a1.subscribe::<Cmd>().expect("cmds");
         tokio::time::sleep(SETTLE).await;
@@ -515,7 +518,7 @@ mod tests {
             .expect("open");
         assert_eq!((envelope.value.v, envelope.source.as_str()), (9, "b1"));
 
-        // --- 離脱が写る ---
+        // --- a leave is mirrored ---
         drop(probe);
         assert_eq!(
             timeout(PATIENCE, watch.recv()).await.expect("leave"),

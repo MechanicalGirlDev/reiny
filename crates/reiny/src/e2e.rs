@@ -1,9 +1,9 @@
-//! 実際に zenoh セッションを 3 本張って、0.3 で足した 3 つ —— presence / latched /
-//! domain 隔離 —— を通しで確かめる。
+//! Three real zenoh sessions, exercising the three things 0.3 added — presence / latched / domain
+//! isolation — end to end.
 //!
-//! `tests/` ではなく `src/` に置くのは、`Cloudy::new` が private だから(公開 API を
-//! テストのために増やさない)。マルチキャスト探索は切り、ループバック TCP 1 本で
-//! 決定的に繋ぐ —— CI のネットワークに依存させないため。
+//! They live in `src/` rather than `tests/` because `Cloudy::new` is private (growing the public API
+//! for a test's sake would be the wrong trade). Multicast scouting is off and the sessions are wired
+//! deterministically over one loopback TCP link, so nothing depends on CI's network.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,8 +15,8 @@ use zenoh::Wait;
 use crate::engine::Zenoh;
 use crate::{Cloudy, Descriptor, History, PresenceEvent, Qos, Topic, shutdown::Shutdown};
 
-/// このテスト専用の wire 型。`impl Topic` を手書きしているのは、それが
-/// 「第三者が自分の型で参加できる」という reiny の売りそのものだから(回帰も兼ねる)。
+/// A wire type just for these tests. `impl Topic` is hand-written because that is precisely reiny's
+/// promise — "a third party joins with their own type" — so this doubles as a regression test for it.
 #[derive(Clone, PartialEq, prost::Message)]
 struct Probe {
     #[prost(uint32, tag = "1")]
@@ -27,8 +27,8 @@ impl Topic for Probe {
     const TYPE: &'static str = "ReinyE2eProbe";
 }
 
-/// 同じ型・同じトピックだが **スキーマ指紋が違う** 2 つ。`reiny-build` が別プロジェクトの
-/// 同名型に別の指紋を振る状況を、手書きで再現している。
+/// The same type on the same topic but with **different schema fingerprints**. It recreates by hand
+/// what `reiny-build` does when another project has a same-named type.
 #[derive(Clone, PartialEq, prost::Message)]
 struct StampedV1 {
     #[prost(uint32, tag = "1")]
@@ -51,8 +51,8 @@ impl Topic for StampedV2 {
     const SCHEMA: Option<u64> = Some(0x2222_2222_2222_2222);
 }
 
-/// descriptor を名乗る型。中身は本物の descriptor set でなくてよい —— reiny はバイト列を
-/// 解釈せず、`@schema` で**そのまま**返すだけだから(解釈するのは `reiny bag` 側)。
+/// A type that announces a descriptor. The bytes need not be a real descriptor set — reiny never
+/// interprets them, it just serves them **verbatim** at `@schema` (interpreting is `reiny bag`'s job).
 #[derive(Clone, PartialEq, prost::Message)]
 struct Described {
     #[prost(uint32, tag = "1")]
@@ -67,13 +67,13 @@ impl Topic for Described {
     });
 }
 
-/// ループバックポート。テストは**並行に走る**ので、テストごとに別ポートを取ること
-/// (`rpc_e2e.rs` も 37449 を使っている —— 重ねると listen が失敗して別のテストが落ちる)。
+/// The loopback port. These tests **run in parallel**, so every test needs its own
+/// (`rpc_e2e.rs` uses 37449 — overlapping makes a listen fail and takes another test down with it).
 const ENDPOINT: &str = "tcp/127.0.0.1:37447";
 const ISLAND_A: &str = "tcp/127.0.0.1:37451";
 const ISLAND_B: &str = "tcp/127.0.0.1:37452";
 
-/// マルチキャストを切った peer セッション。`listen` 側が 1 本、他は `connect` する。
+/// A peer session with multicast off. One side `listen`s; the others `connect`.
 async fn session(listen: bool) -> zenoh::Session {
     let key = if listen {
         "listen/endpoints"
@@ -83,7 +83,7 @@ async fn session(listen: bool) -> zenoh::Session {
     open_session(&[(key, format!("[\"{ENDPOINT}\"]"))]).await
 }
 
-/// マルチキャストを切った peer セッションを、追加の設定を重ねて開く。
+/// A peer session with multicast off, opened with extra configuration layered on.
 async fn open_session(entries: &[(&str, String)]) -> zenoh::Session {
     let mut config = zenoh::Config::default();
     for (k, v) in [("scouting/multicast/enabled", "false".to_string())]
@@ -115,8 +115,8 @@ async fn cloudy(session: zenoh::Session, id: &str, domain: &str) -> Cloudy {
 const SETTLE: Duration = Duration::from_millis(600);
 const PATIENCE: Duration = Duration::from_secs(5);
 
-/// listen 側のセッションに `peers` 本のリンクが張れるまで待つ。固定の sleep は負荷の高い
-/// 並列実行で足りない —— リンクが無いうちに撃った get / 宣言は相手に届かない。
+/// Wait until the listening session has `peers` links. A fixed sleep is not enough under a loaded
+/// parallel run — a get or a declaration fired before the link exists never reaches the other side.
 pub(crate) async fn wait_peers(session: &zenoh::Session, peers: usize) {
     let deadline = tokio::time::Instant::now() + PATIENCE;
     loop {
@@ -137,10 +137,10 @@ async fn presence_latched_and_domain_isolation() {
     let alpha = cloudy(session(true).await, "alpha", "lab").await;
     let beta = cloudy(session(false).await, "beta", "lab").await;
     let gamma = cloudy(session(false).await, "gamma", "other").await;
-    // セッション同士が繋がるまで(beta / gamma が alpha に付くまで)。
+    // Until the sessions are connected (beta / gamma attached to alpha).
     wait_peers(alpha.session().expect("zenoh engine"), 2).await;
 
-    // --- Qos: publisher の KeepLast(n > 1) は build で止まる(黙って 1 に丸めない) ---
+    // --- Qos: a publisher's KeepLast(n > 1) is stopped at build (not silently rounded to 1) ---
     let err = alpha
         .publisher::<Probe>()
         .qos(Qos {
@@ -152,7 +152,7 @@ async fn presence_latched_and_domain_isolation() {
         .expect("KeepLast(3) must be rejected");
     assert!(err.to_string().contains("KeepLast(3)"), "{err}");
 
-    // --- latched(= `Qos::STATE`): 先に 1 回だけ送っておく(定期再送はしない) ---
+    // --- latched (= `Qos::STATE`): send once, up front, and never re-send ---
     let publisher = alpha
         .publisher::<Probe>()
         .qos(Qos::STATE)
@@ -161,7 +161,7 @@ async fn presence_latched_and_domain_isolation() {
     publisher.send(Probe { seq: 7 }).await.expect("send");
     tokio::time::sleep(SETTLE).await;
 
-    // --- 遅れて来た購読者が、その 1 回を受け取れる ---
+    // --- a late subscriber still receives that one sample ---
     let mut late = beta
         .subscriber::<Probe>()
         .latched()
@@ -172,15 +172,18 @@ async fn presence_latched_and_domain_isolation() {
         .expect("latched value should arrive")
         .expect("stream should not end");
     assert_eq!(envelope.value.seq, 7);
-    assert_eq!(envelope.source, "alpha", "送信元 id がキーから取れている");
+    assert_eq!(envelope.source, "alpha", "the source id comes off the key");
 
-    // --- presence: 生きている publisher が id で見える ---
+    // --- presence: a live publisher is visible by id ---
     let live = beta.publishers::<Probe>().await.expect("publishers()");
     assert_eq!(live, ["alpha"]);
 
-    // --- domain 隔離: 同じ fabric に居ても domain が違えば何も見えない ---
+    // --- domain isolation: on the same fabric, a different domain sees nothing ---
     let other = gamma.publishers::<Probe>().await.expect("publishers()");
-    assert!(other.is_empty(), "domain 越しに見えてはいけない: {other:?}");
+    assert!(
+        other.is_empty(),
+        "must not be visible across domains: {other:?}"
+    );
     let mut outsider = gamma
         .subscriber::<Probe>()
         .latched()
@@ -190,15 +193,15 @@ async fn presence_latched_and_domain_isolation() {
         timeout(Duration::from_millis(800), outsider.recv())
             .await
             .is_err(),
-        "domain 越しに latched 値が届いてはいけない"
+        "a latched value must not cross domains"
     );
 
-    // --- 離脱: publisher を drop すると liveliness トークンも落ちる ---
+    // --- leaving: dropping the publisher drops the liveliness token too ---
     let mut watch = beta.watch_publishers::<Probe>().expect("watch_publishers");
     assert_eq!(
         timeout(PATIENCE, watch.recv()).await.expect("join event"),
         Some(PresenceEvent::Joined("alpha".to_string())),
-        "history=true なので宣言済みの publisher が最初に流れる"
+        "history=true, so an already-declared publisher arrives first"
     );
     drop(publisher);
     assert_eq!(
@@ -206,11 +209,11 @@ async fn presence_latched_and_domain_isolation() {
         Some(PresenceEvent::Left("alpha".to_string())),
     );
 
-    // publisher が消えれば publishers() からも消える。
+    // Once the publisher is gone it leaves publishers() too.
     let live = beta.publishers::<Probe>().await.expect("publishers()");
-    assert!(live.is_empty(), "drop 後も残っている: {live:?}");
+    assert!(live.is_empty(), "still there after the drop: {live:?}");
 
-    // --- スキーマ指紋: 同じトピックでも形が違えば届かない ---
+    // --- schema fingerprints: same topic, different shape, nothing arrives ---
     let stamped = alpha
         .publisher::<StampedV1>()
         .build()
@@ -228,17 +231,17 @@ async fn presence_latched_and_domain_isolation() {
 
     let got = timeout(PATIENCE, same.recv())
         .await
-        .expect("同じ指紋なら届く")
+        .expect("the same fingerprint arrives")
         .expect("stream should not end");
     assert_eq!(got.seq, 42);
     assert!(
         timeout(Duration::from_millis(800), different.recv())
             .await
             .is_err(),
-        "指紋が違うサンプルは捨てられるべき(protobuf は寛容なので decode は通ってしまう)"
+        "a sample with a different fingerprint must be dropped (protobuf is permissive: it would decode)"
     );
 
-    // --- @schema: DESCRIPTOR を持つ publisher は自分のキーの脇で descriptor を名乗る ---
+    // --- @schema: a publisher with a DESCRIPTOR announces it beside its own key ---
     let described = alpha
         .publisher::<Described>()
         .build()
@@ -265,8 +268,8 @@ async fn presence_latched_and_domain_isolation() {
             b"not-a-real-descriptor-set".to_vec()
         )]
     );
-    // verbatim: `**` で domain 全体を問い合わせても @schema は混ざらない(latched の
-    // queryable は同じ get に応えるので、これが「見えない」ことの実証になる)。
+    // verbatim: querying the whole domain with `**` still does not pick up @schema (the latched
+    // queryable answers that same get, which is what makes "invisible" demonstrable).
     let broad = beta
         .session()
         .expect("zenoh engine")
@@ -278,10 +281,10 @@ async fn presence_latched_and_domain_isolation() {
         .filter_map(|r| r.result().ok().map(|s| s.key_expr().to_string()))
         .filter(|k| k.contains("@schema"))
         .collect();
-    assert!(leaked.is_empty(), "@schema が ** に見えている: {leaked:?}");
+    assert!(leaked.is_empty(), "@schema is visible to **: {leaked:?}");
     drop(described);
 
-    // --- latest(n): 読まずに溜めると最古から落ちる(既定の Fifo なら 5 件とも残る) ---
+    // --- latest(n): letting samples pile up unread drops the oldest (the default Fifo keeps all 5) ---
     let burst = alpha.publisher::<Probe>().build().expect("burst publisher");
     let mut ring = beta
         .subscriber::<Probe>()
@@ -298,51 +301,51 @@ async fn presence_latched_and_domain_isolation() {
     while let Ok(Some(m)) = timeout(Duration::from_millis(300), ring.recv()).await {
         kept.push(m.seq);
     }
-    assert_eq!(kept, [4, 5], "latest(2) は最新 2 件だけを順に返す");
+    assert_eq!(kept, [4, 5], "latest(2) returns the two newest, in order");
     let mut all = Vec::new();
     while let Ok(Some(m)) = timeout(Duration::from_millis(300), fifo.recv()).await {
         all.push(m.seq);
     }
-    assert_eq!(all, [1, 2, 3, 4, 5], "既定の Fifo は落とさない");
+    assert_eq!(all, [1, 2, 3, 4, 5], "the default Fifo drops nothing");
 
-    // --- cancel-safety: timeout で recv を捨て続けても、届いた sample は次の recv が返す ---
+    // --- cancel-safety: dropping recv on a timeout over and over still yields the sample that arrived ---
     for sub in [&mut ring, &mut fifo] {
         for _ in 0..3 {
             assert!(
                 timeout(Duration::from_millis(50), sub.recv())
                     .await
                     .is_err(),
-                "何も流れていないので期限切れのはず"
+                "nothing was published, so it must expire"
             );
         }
     }
     burst.send(Probe { seq: 99 }).await.expect("send");
     tokio::time::sleep(SETTLE).await;
     for sub in [&mut ring, &mut fifo] {
-        // 届いた後に、即時期限切れの recv で「取り出しかけて捨てる」を起こしてから読む。
+        // After it arrives, provoke a "start taking it out, then drop" with an already-expired recv.
         let got = match timeout(Duration::ZERO, sub.recv()).await {
             Ok(v) => v,
             Err(_) => timeout(PATIENCE, sub.recv())
                 .await
-                .expect("cancel された recv の後でも sample は残っている"),
+                .expect("the sample survives a cancelled recv"),
         };
         assert_eq!(got.map(|m| m.seq), Some(99));
     }
     drop(burst);
 }
 
-/// **リンクが後から張れる**先に latched publisher が居る場合。0.3.0 はここで恒久ハングした:
-/// `get` は撃った瞬間のルーティング表しか見ないので、まだ繋がっていない相手の queryable には
-/// 届かず、publisher は再送しないので二度と値が来なかった(実機では bag レコーダが 4 本目の
-/// peer として入り、physics が先にそちらと繋がって「起動完了」した途端に踏んだ)。
+/// A latched publisher on the far side of a link that **comes up later**. 0.3.0 hung here forever: a
+/// `get` only sees the routing table of the instant it is fired, so it never reached the queryable of a
+/// peer that was not connected yet, and since the publisher does not re-send, the value never came
+/// (in the field, a bag recorder joined as a fourth peer and physics connected to it first, hitting
 ///
-/// ここでは publisher と購読者を**互いに孤立したまま**立ち上げ(それぞれ listen するだけで
-/// connect しない)、送信も購読宣言も済ませてから、両方へ繋ぐ 3 本目のセッションで初めて
-/// リンクを作る。ライブ経路はもう流れないので、presence を合図に問い合わせ直す経路だけが
-/// 値を運べる。
+/// Here the publisher and the subscriber are brought up **isolated from each other** (each only
+/// listens, neither connects); the send and the subscription are done first, and only then does a
+/// third session connecting to both create the link. The live path can no longer carry anything, so
+/// only the "ask again on presence" path can deliver the value.
 #[tokio::test(flavor = "multi_thread")]
 async fn latched_survives_a_link_that_comes_up_late() {
-    // 1) publisher 側: 孤立したまま latched を 1 回だけ送る。
+    // 1) The publisher side: isolated, sends its latched value exactly once.
     let alpha = cloudy(
         open_session(&[("listen/endpoints", format!("[\"{ISLAND_A}\"]"))]).await,
         "alpha",
@@ -356,7 +359,7 @@ async fn latched_survives_a_link_that_comes_up_late() {
         .expect("latched publisher");
     publisher.send(Probe { seq: 11 }).await.expect("send");
 
-    // 2) 購読側: まだ誰とも繋がっていないので、この時点の問い合わせは必ず空振りする。
+    // 2) The subscriber side: connected to nobody, so a query at this point is bound to miss.
     let beta = cloudy(
         open_session(&[("listen/endpoints", format!("[\"{ISLAND_B}\"]"))]).await,
         "beta",
@@ -369,7 +372,7 @@ async fn latched_survives_a_link_that_comes_up_late() {
         .build()
         .expect("latched subscriber");
 
-    // 3) 両方へ繋ぐ 3 本目。ここで初めて alpha の宣言が beta へ届く。
+    // 3) The third session, connected to both. Only now does alpha's declaration reach beta.
     let _bridge = open_session(&[(
         "connect/endpoints",
         format!("[\"{ISLAND_A}\", \"{ISLAND_B}\"]"),
@@ -378,7 +381,7 @@ async fn latched_survives_a_link_that_comes_up_late() {
 
     let envelope = timeout(PATIENCE, sub.recv_envelope())
         .await
-        .expect("リンクが張れた後に latched 値が届くこと")
+        .expect("the latched value arrives once the link is up")
         .expect("stream should not end");
     assert_eq!(envelope.value.seq, 11);
     assert_eq!(envelope.source, "alpha");

@@ -1,24 +1,24 @@
-//! エンジン抽象 —— reiny が下のバスに求める 5 つの原始操作。
+//! The engine abstraction — the five primitives reiny asks of the bus underneath.
 //!
-//! reiny の上のロジック(encode / decode、指紋の照合、latched の「presence を見てから get」、
-//! latest-wins、`Shutdown` 連動、service の `NoReply` / `Timeout` 判定)は全部 reiny のコードで、
-//! バスに頼っているのは publish / subscribe / liveliness / queryable + get だけ
-//! (`docs/design/0.5.0.md` §1.1)。それを [`Engine`] に切り出し、[`Cloudy`](crate::Cloudy) は
-//! `Arc<dyn Engine>` を持つ。既定は zenoh([`Zenoh`]、feature `zenoh`)、テスト用に
-//! プロセス内バス([`Local`])。
+//! Everything above the bus (encode / decode, the fingerprint check, latched's "presence first, then
+//! get", latest-wins, hooking into `Shutdown`, a service's `NoReply` / `Timeout` decision) is reiny's
+//! own code; all it leans on the bus for is publish / subscribe / liveliness / queryable + get
+//! (`docs/design/0.5.0.md` §1.1). That much is carved out as [`Engine`], and
+//! [`Cloudy`](crate::Cloudy) holds an `Arc<dyn Engine>`. The default is zenoh ([`Zenoh`], feature
+//! `zenoh`); for tests there is an in-process bus ([`Local`]).
 //!
-//! # 契約
+//! # The contract
 //!
-//! - **受信バッファは reiny が持つ。** engine は sample / event / query ごとに callback を呼ぶ
-//!   だけ。callback は**非 async のスレッド**から呼ぶこと(zenoh がそう。`Local` は専用スレッド)。
-//!   reiny 側の callback はチャネルに積むだけで、Fifo が満杯なら engine のスレッドをブロックする
-//!   (zenoh の `FifoChannel` と同じ)。
-//! - **[`Guard`] の drop = undeclare。** subscriber / token / responder は取っ手を落とすと消える。
-//! - **[`Engine::alive`] 以外は同期。** zenoh 1.x の builder の `await` は `ready(wait())` と
-//!   等価で、非同期にする意味が無い。本当に待つのは [`RawReplies::next`] だけ —— これは
-//!   **cancel-safe** であること(`Subscriber::recv` の select 分岐に置かれる)。
-//! - [`Caps`] で無い機能を名乗る。reiny は無い機能を build 時にエラーにする(黙って劣化させ
-//!   ない)。例外は attachment: 無ければ指紋は `None` 扱いで素通し(0.3.0 §2.7 の意味論)。
+//! - **reiny owns the receive buffers.** An engine only calls a callback per sample / event / query,
+//!   and it must call them from a **non-async thread** (which is what zenoh does; `Local` uses a
+//!   dedicated one). reiny's callbacks only push onto a channel, and a full Fifo blocks the engine's
+//!   thread (exactly as zenoh's `FifoChannel` does).
+//! - **Dropping a [`Guard`] undeclares.** A subscriber / token / responder disappears with its handle.
+//! - **Everything but [`Engine::alive`] is synchronous.** `await` on a zenoh 1.x builder is equivalent
+//!   to `ready(wait())`, so making it async buys nothing. The only thing that really waits is
+//!   [`RawReplies::next`] — which must be **cancel-safe** (it sits in a `Subscriber::recv` select arm).
+//! - Features an engine lacks are declared through [`Caps`]. reiny turns a missing feature into a
+//!   build-time error (never a silent downgrade). The exception is attachments: without them a
 
 use std::any::Any;
 use std::fmt;
@@ -39,49 +39,52 @@ pub use local::Local;
 #[cfg(feature = "zenoh")]
 pub use zenoh::Zenoh;
 
-/// `Send` な boxed future。
+/// A `Send` boxed future.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-/// engine が呼ぶ callback。engine のスレッドから呼ばれるので `Send + Sync`。
+/// A callback an engine invokes. Called from the engine's thread, hence `Send + Sync`.
 pub type Callback<T> = Box<dyn Fn(T) + Send + Sync>;
-/// 宣言の取っ手。drop で undeclare。
+/// A declaration handle. Dropping it undeclares.
 pub type Guard = Box<dyn Any + Send + Sync>;
-/// query への応答 1 件。`Err` は相手が `reply_err` した中身。
+/// One reply to a query. `Err` carries what the other side passed to `reply_err`.
 pub type ReplyResult = std::result::Result<Sample, Vec<u8>>;
-/// [`Engine::respond`] に渡す callback。
+/// The callback handed to [`Engine::respond`].
 pub type QueryCallback = Callback<Box<dyn RawQuery>>;
 
-/// キー先頭の固定プレフィクス。
+/// The fixed prefix every key starts with.
 pub const KEY_ROOT: &str = "reiny";
-/// service の presence トークンが付く verbatim チャンク(`…/<Req>/@service`)。publisher の
-/// トークン(型のキーそのもの)と分けるのは、`publishers::<Req>()` に server が混ざらないため。
+/// The verbatim chunk a service's presence token hangs off (`…/<Req>/@service`). It is kept apart from
+/// a publisher's token (the type's key itself) so that servers never show up in `publishers::<Req>()`.
 pub const SERVICE_CHUNK: &str = "@service";
-/// launch そのものの presence トークン(`reiny/<domain>/<id>/@launch`)。publisher を 1 つも
-/// 持たない launch も `reiny node list` に出すため。
+/// The verbatim chunk a subscriber's presence token hangs off (`…/<T>/@sub`). Kept apart from a
+/// publisher's token for the same reason `@service` is: `publishers::<T>()` must stay publishers only.
+pub const SUB_CHUNK: &str = "@sub";
+/// The presence token of the launch itself (`reiny/<domain>/<id>/@launch`), so that a launch with no
+/// publishers at all still appears in `reiny node list`.
 pub const LAUNCH_CHUNK: &str = "@launch";
-/// descriptor を名乗る queryable のチャンク(`…/<T>/@schema/<message>`)。
+/// The chunk of the queryable that announces a descriptor (`…/<T>/@schema/<message>`).
 pub const SCHEMA_CHUNK: &str = "@schema";
 
-/// 住所。zenoh は `reiny/<domain>/<source>/<ty>[/<chunk>]` と描く(0.4 と同じ wire)。
+/// An address. zenoh renders it as `reiny/<domain>/<source>/<ty>[/<chunk>]` (the 0.4 wire).
 ///
-/// 他のエンジンは別の描き方をしてよい —— 共通なのは「`ty` が住所」という 1 点だけ。
-/// `source` も住所の一部とは限らず、engine は `subscribe` の `source: Some(id)` を **filter**
-/// として実装してよい(iceoryx2 は型 1 つ = service 1 つで、source は header に載る)。
+/// Another engine may render it differently — the one thing they share is that `ty` is the address.
+/// `source` is not necessarily part of the address either: an engine may implement `subscribe`'s
+/// `source: Some(id)` as a **filter** (iceoryx2 has one service per type and puts source in a header).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Key {
-    /// 論理名前空間。
+    /// The logical namespace.
     pub domain: String,
-    /// 送信元 launch id。`None` = 全部(`*`)。
+    /// The sending launch's id. `None` = all of them (`*`).
     pub source: Option<String>,
-    /// 型セグメント([`Topic::TYPE`](crate::Topic::TYPE))。`None` = 全部(`*`)。launch の
-    /// トークンは型の位置に verbatim の `@launch` を置く(`*` にはマッチしない)。
+    /// The type segment ([`Topic::TYPE`](crate::Topic::TYPE)). `None` = all of them (`*`). A launch's
+    /// token puts the verbatim `@launch` in the type slot (which `*` does not match).
     pub ty: Option<String>,
-    /// 型の後ろの verbatim チャンク(`@service` / `@schema/<message>`)。`*` にも `**` にも
-    /// マッチしない —— 型のトピックを汚さないための隔離。パターンでも完全一致。
+    /// The verbatim chunk after the type (`@service` / `@schema/<message>`). It matches neither `*` nor
+    /// `**` — the isolation that keeps a type's topic clean. Even in a pattern it compares exactly.
     pub chunk: Option<String>,
 }
 
 impl Key {
-    /// 型のキー。`source: None` は `*`。
+    /// A type's key. `source: None` means `*`.
     #[must_use]
     pub fn topic(domain: &str, source: Option<&str>, ty: &str) -> Self {
         Self {
@@ -92,7 +95,7 @@ impl Key {
         }
     }
 
-    /// launch の presence トークン `reiny/<domain>/<id>/@launch`(`id: None` は全 launch)。
+    /// A launch's presence token `reiny/<domain>/<id>/@launch` (`id: None` = every launch).
     #[must_use]
     pub fn launch(domain: &str, id: Option<&str>) -> Self {
         Self {
@@ -103,7 +106,7 @@ impl Key {
         }
     }
 
-    /// 全 source・全型のパターン `reiny/<domain>/*/*`(verbatim は含まない)。
+    /// The all-sources, all-types pattern `reiny/<domain>/*/*` (it does not reach the verbatim chunks).
     #[must_use]
     pub fn all(domain: &str) -> Self {
         Self {
@@ -114,13 +117,13 @@ impl Key {
         }
     }
 
-    /// 型の位置が verbatim(`@launch`)か。
+    /// Whether the type slot is verbatim (`@launch`).
     #[must_use]
     pub fn is_verbatim_type(&self) -> bool {
         self.ty.as_deref().is_some_and(|t| t.starts_with('@'))
     }
 
-    /// チャンクを付けた複製。
+    /// A copy with a chunk appended.
     #[must_use]
     pub fn with_chunk(&self, chunk: impl Into<String>) -> Self {
         Self {
@@ -129,7 +132,7 @@ impl Key {
         }
     }
 
-    /// zenoh 形 `reiny/<domain>/<source>/<ty>[/<chunk>]` から組む。形が違えば `None`。
+    /// Parse the zenoh form `reiny/<domain>/<source>/<ty>[/<chunk>]`. `None` when the shape differs.
     #[must_use]
     pub fn parse(key: &str) -> Option<Self> {
         let mut parts = key.split('/');
@@ -148,8 +151,8 @@ impl Key {
         })
     }
 
-    /// `self` をパターンとして `key` がマッチするか。`None` のセグメントは `*` で、型の `*` は
-    /// verbatim(`@launch`)にマッチしない。chunk は完全一致。
+    /// Whether `key` matches `self` taken as a pattern. A `None` segment is `*`, a `*` type does not
+    /// match a verbatim one (`@launch`), and a chunk compares exactly.
     #[must_use]
     pub fn matches(&self, key: &Key) -> bool {
         let ty_ok = match (&self.ty, &key.ty) {
@@ -187,44 +190,44 @@ impl fmt::Display for Key {
     }
 }
 
-/// engine が届ける 1 件。publish された sample も query への応答も同じ形。
+/// One item an engine delivers. A published sample and a reply to a query take the same shape.
 #[derive(Clone, Debug)]
 pub struct Sample {
-    /// 届いたキー(publisher / responder の具体キー。`source` は `Some`)。
+    /// The key it arrived on (a publisher's / responder's concrete key, so `source` is `Some`).
     pub key: Key,
-    /// encode 済みのメッセージ本体。
+    /// The encoded message itself.
     pub payload: Vec<u8>,
-    /// reiny の指紋(8 バイト LE)か、他人の attachment。
+    /// reiny's fingerprint (8 bytes LE), or somebody else's attachment.
     pub attachment: Option<Vec<u8>>,
-    /// 送信時刻(unix ns)。engine が持たなければ `None`。
+    /// The send time (unix ns). `None` when the engine has none.
     pub timestamp: Option<u64>,
 }
 
-/// liveliness の参加 / 離脱。
+/// A liveliness join or leave.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Presence {
-    /// このキーのトークンが立った(宣言済みのものも `watch_alive` 直後に流れる)。
+    /// A token went up on this key (existing ones also arrive right after `watch_alive`).
     Joined(Key),
-    /// トークンが落ちた(drop、またはプロセスごと)。
+    /// A token went down (dropped, or the whole process did).
     Left(Key),
 }
 
-/// engine が持つ機能。無いものは reiny が build 時にエラーにする。
+/// What an engine can do. reiny turns anything missing into a build-time error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(clippy::struct_excessive_bools)] // フラグの集合そのもの。状態機械ではない。
+#[allow(clippy::struct_excessive_bools)] // it is a set of flags, not a state machine
 pub struct Caps {
-    /// `source: None` の subscribe / alive / watch(全 publisher)。点対点リンクには無い。
+    /// subscribe / alive / watch with `source: None` (every publisher). A point-to-point link has none.
     pub wildcard_source: bool,
-    /// `declare_alive` / `alive` / `watch_alive`(presence)。
+    /// `declare_alive` / `alive` / `watch_alive` (presence).
     pub liveliness: bool,
-    /// `respond` / `query`(latched / service / `@schema`)。
+    /// `respond` / `query` (latched / services / `@schema`).
     pub query: bool,
-    /// sample に attachment を載せられる(指紋の照合)。無ければ照合は素通し。
+    /// A sample can carry an attachment (the fingerprint check). Without it the check passes everything.
     pub attachment: bool,
 }
 
 impl Caps {
-    /// 全部ある。
+    /// Everything.
     pub const ALL: Caps = Caps {
         wildcard_source: true,
         liveliness: true,
@@ -233,80 +236,80 @@ impl Caps {
     };
 }
 
-/// [`Engine::query`] の引数。
+/// The arguments to [`Engine::query`].
 #[derive(Clone, Debug)]
 pub struct QueryParams {
-    /// request 本体。`None` は latched の問い合わせ(payload の有無で service と区別する)。
+    /// The request itself. `None` is a latched query (payload presence is what tells it from a service).
     pub payload: Option<Vec<u8>>,
-    /// request 型の指紋。
+    /// The request type's fingerprint.
     pub attachment: Option<Vec<u8>>,
-    /// これを過ぎたら engine は応答の列を閉じる。
+    /// Past this, the engine closes the reply stream.
     pub timeout: Duration,
 }
 
-/// reiny が下のバスに求めるもの。5 操作: publish / subscribe / liveliness(3 つ)/ queryable + get。
+/// What reiny asks of the bus underneath. Five operations: publish / subscribe / liveliness (three) / queryable + get.
 pub trait Engine: Send + Sync + 'static {
-    /// 持っている機能。
+    /// The features it has.
     fn caps(&self) -> Caps;
 
-    /// `key`(具体キー)への publisher を宣言する。
+    /// Declare a publisher on `key` (a concrete key).
     fn publisher(&self, key: &Key, qos: &Qos) -> Result<Box<dyn RawPublisher>>;
 
-    /// `key`(パターン)にマッチする sample ごとに `on_sample` を呼ぶ。
+    /// Call `on_sample` for every sample matching `key` (a pattern).
     fn subscribe(&self, key: &Key, on_sample: Callback<Sample>) -> Result<Guard>;
 
-    /// `key`(具体キー)に presence トークンを立てる。取っ手の drop、またはプロセスの死で落ちる。
+    /// Raise a presence token on `key` (a concrete key). It falls with the handle, or with the process.
     fn declare_alive(&self, key: &Key) -> Result<Guard>;
 
-    /// `key`(パターン)に立っているトークンの一覧。`timeout` を過ぎたら手持ちで返す。
+    /// The tokens standing on `key` (a pattern). Past `timeout`, return what it has.
     fn alive(&self, key: &Key, timeout: Duration) -> BoxFuture<'_, Result<Vec<Key>>>;
 
-    /// `key`(パターン)のトークンの参加 / 離脱を `on_event` に流す。宣言済みは `Joined` で先に流す。
+    /// Stream joins / leaves of `key`'s (a pattern) tokens to `on_event`. Existing ones come first as `Joined`.
     fn watch_alive(&self, key: &Key, on_event: Callback<Presence>) -> Result<Guard>;
 
-    /// `key`(具体キー)への query に `on_query` で応える。応えずに drop すれば finalize。
-    /// `on_query` の型は [`QueryCallback`]。
+    /// Answer queries on `key` (a concrete key) through `on_query`. Dropping one unanswered finalizes it.
+    /// `on_query`'s type is [`QueryCallback`].
     fn respond(&self, key: &Key, on_query: QueryCallback) -> Result<Guard>;
 
-    /// `key`(パターン)にマッチする全 responder に query を撃つ。
+    /// Fire a query at every responder matching `key` (a pattern).
     fn query(&self, key: &Key, params: QueryParams) -> Result<Box<dyn RawReplies>>;
 
-    /// downcast の口。`cloudy.engine().as_any().downcast_ref::<Zenoh>()`。
+    /// The downcast door. `cloudy.engine().as_any().downcast_ref::<Zenoh>()`.
     fn as_any(&self) -> &dyn Any;
 }
 
-/// [`Engine::publisher`] が返す送信口。
+/// The send side [`Engine::publisher`] returns.
 pub trait RawPublisher: Send + Sync {
-    /// 1 件送る。`Reliable` なら送信路が空くまでブロックしてよい。
+    /// Send one item. Under `Reliable` it may block until the send path clears.
     fn put(&self, payload: Vec<u8>, attachment: Option<Vec<u8>>) -> Result<()>;
 }
 
-/// 受け取った query。[`RawQuery::reply`] / [`RawQuery::reply_err`] で消費するか、drop で finalize。
+/// A received query. Consume it with [`RawQuery::reply`] / [`RawQuery::reply_err`], or drop it to finalize.
 pub trait RawQuery: Send {
-    /// 問い合わせのキー(パターンのこともある)。
+    /// The query's key (which may be a pattern).
     fn key(&self) -> &Key;
-    /// request 本体。`None` は latched の問い合わせ。
+    /// The request itself. `None` is a latched query.
     fn payload(&self) -> Option<&[u8]>;
-    /// request の attachment。
+    /// The request's attachment.
     fn attachment(&self) -> Option<&[u8]>;
-    /// `key`(応える側の具体キー)で応答を返す。
+    /// Reply on `key` (the answering side's concrete key).
     fn reply(
         self: Box<Self>,
         key: &Key,
         payload: Vec<u8>,
         attachment: Option<Vec<u8>>,
     ) -> Result<()>;
-    /// エラーで応える。呼び出し側には `Err(message)` が届く。
+    /// Answer with an error. The caller receives `Err(message)`.
     fn reply_err(self: Box<Self>, message: Vec<u8>) -> Result<()>;
 }
 
-/// [`Engine::query`] の応答の列。
+/// The stream of replies to an [`Engine::query`].
 pub trait RawReplies: Send {
-    /// 次の応答。全 responder が finalize したか、`timeout` を過ぎたら `None`。**cancel-safe**。
+    /// The next reply. `None` once every responder finalized or `timeout` passed. **Cancel-safe**.
     fn next(&mut self) -> BoxFuture<'_, Option<ReplyResult>>;
 }
 
-/// 現在時刻(unix ns)。engine が sample に時刻を持たないとき用。
+/// The current time (unix ns). For engines whose samples carry no time of their own.
 #[must_use]
 pub fn now_unix_ns() -> Option<u64> {
     SystemTime::now()
@@ -377,5 +380,14 @@ mod tests {
         let services = all.with_chunk(SERVICE_CHUNK);
         assert!(services.matches(&Key::topic("lab", Some("a"), "T").with_chunk(SERVICE_CHUNK)));
         assert!(!services.matches(&Key::topic("lab", Some("a"), "T")));
+        // A subscriber's token is a third, disjoint world: it reaches neither publishers nor servers.
+        let subs = all.with_chunk(SUB_CHUNK);
+        let sub_key = Key::topic("lab", Some("a"), "T").with_chunk(SUB_CHUNK);
+        assert!(subs.matches(&sub_key));
+        assert!(!subs.matches(&Key::topic("lab", Some("a"), "T").with_chunk(SERVICE_CHUNK)));
+        assert!(!services.matches(&sub_key));
+        assert!(!any.matches(&sub_key), "publishers::<T>() must not see it");
+        assert!(!all.matches(&sub_key), "bag record's */* must not see it");
+        assert_eq!(sub_key.to_string(), "reiny/lab/a/T/@sub");
     }
 }

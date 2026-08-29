@@ -1,8 +1,8 @@
-//! launch ランタイムの起動オプションと入口。
+//! The launch runtime's startup options and entry points.
 //!
-//! `#[reiny::main]` は [`RuntimeOptions::from_args`] → [`run_with`] を呼ぶだけなので、
-//! 自前でオプションを組めば同じ入口をライブラリとして使える。tokio runtime を自分で持つ
-//! (テスト、bridge)なら [`Cloudy::open`] が async の入口。
+//! `#[reiny::main]` does nothing but call [`RuntimeOptions::from_args`] → [`run_with`], so building
+//! the options yourself gets you the same entry point as a library. When the tokio runtime is yours
+//! already (tests, a bridge), [`Cloudy::open`] is the async entry point.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -15,23 +15,23 @@ use crate::engine::Engine;
 use crate::shutdown::Shutdown;
 use crate::{Cloudy, DEFAULT_DOMAIN, Result, validate_segment};
 
-/// domain を環境変数で与えるときのキー。CI の並列ジョブのように、config を書き換えずに
-/// 系統を分けたいときの入口。
+/// The environment variable key for giving the domain. The way to split systems apart without editing
+/// a config — parallel CI jobs, for instance.
 pub const DOMAIN_ENV: &str = "REINY_DOMAIN";
 
-/// zenoh セッション設定の出どころ。
+/// Where a zenoh session's configuration comes from.
 ///
-/// reiny は zenoh の設定スキーマを **ラップしない**。ラップした瞬間に zenoh の設定項目へ
-/// 追随する義務が生まれ、「薄さが価値」という前提を裏切るため。
+/// reiny **does not wrap** zenoh's configuration schema. Wrapping it would create an obligation to
+/// track zenoh's settings, which betrays the premise that thinness is the value.
 #[cfg(feature = "zenoh")]
 pub enum ZenohSource {
-    /// `zenoh::Config::default()`(0.2 と同じ)。
+    /// `zenoh::Config::default()` (as in 0.2).
     Default,
-    /// `zenoh::Config::from_env()`。
+    /// `zenoh::Config::from_env()`.
     Env,
-    /// `zenoh::Config::from_file()`(JSON5 / JSON / YAML)。
+    /// `zenoh::Config::from_file()` (JSON5 / JSON / YAML).
     File(PathBuf),
-    /// 呼び出し側が組み立てたもの。
+    /// One the caller assembled.
     Config(Box<zenoh::Config>),
 }
 
@@ -49,40 +49,40 @@ impl ZenohSource {
     }
 }
 
-/// launch ランタイムの起動オプション。
+/// The launch runtime's startup options.
 pub struct RuntimeOptions {
-    /// インスタンス id。キーの `<id>` セグメントになる。
+    /// The instance id. It becomes the key's `<id>` segment.
     pub id: String,
-    /// 論理名前空間。キーの `<domain>` セグメントになる。
+    /// The logical namespace. It becomes the key's `<domain>` segment.
     pub domain: String,
-    /// 使うエンジン。`None` なら zenoh(feature `zenoh`)を `zenoh` / `zenoh_overrides` から開く。
-    /// テストは [`crate::engine::Local`]、bridge は自前のエンジンをここに挿す。
+    /// The engine to use. `None` opens zenoh (feature `zenoh`) from `zenoh` / `zenoh_overrides`.
+    /// Tests slot [`crate::engine::Local`] in here; a bridge slots in an engine of its own.
     pub engine: Option<Arc<dyn Engine>>,
-    /// zenoh セッション設定の出どころ。
+    /// Where the zenoh session configuration comes from.
     #[cfg(feature = "zenoh")]
     pub zenoh: ZenohSource,
-    /// `zenoh` を組み立てた後に重ねる `Config::insert_json5` の (key, json5) 列。
-    /// CLI の `--connect` / `--zenoh-mode` はここへ落ちる。
+    /// The (key, json5) pairs applied with `Config::insert_json5` after `zenoh` is assembled.
+    /// The CLI's `--connect` / `--zenoh-mode` land here.
     #[cfg(feature = "zenoh")]
     pub zenoh_overrides: Vec<(String, String)>,
-    /// reiny が `tracing_subscriber` をグローバル登録するか。
+    /// Whether reiny installs a global `tracing_subscriber`.
     ///
-    /// 自前の subscriber(ログ収集レイヤなど)を持つ launch は `false` にする。`true` のまま
-    /// 先を越されると reiny 側は黙って何もしない(`try_init` は後勝ちしない)ため、
-    /// 「reiny より先に入れる」順序依存を抱え込むことになる。
+    /// A launch with a subscriber of its own (a log-collecting layer, say) sets it to `false`. Left
+    /// `true`, reiny silently does nothing if it is beaten to it (`try_init` does not win when it runs
+    /// later), which means taking on an ordering dependency on "install it before reiny does".
     pub install_tracing: bool,
-    /// `install_tracing` が true のときのログレベル。
+    /// The log level, when `install_tracing` is true.
     pub log_level: Level,
-    /// tokio のワーカースレッド数(未指定は tokio 既定 = CPU 数)。
+    /// tokio's worker thread count (unset = tokio's default, the CPU count).
     pub worker_threads: Option<usize>,
-    /// `--config <path>`。[`Cloudy::config_table`](crate::Cloudy::config_table) の原データ。
+    /// `--config <path>`. The raw material for [`Cloudy::config_table`](crate::Cloudy::config_table).
     pub config_path: Option<PathBuf>,
-    /// reiny が解釈しなかった引数。そのまま [`Cloudy::extra_args`](crate::Cloudy::extra_args) へ。
+    /// The arguments reiny did not interpret. Passed straight to [`Cloudy::extra_args`](crate::Cloudy::extra_args).
     pub extra_args: Vec<String>,
 }
 
 impl RuntimeOptions {
-    /// 既定値。`id` 以外は `--` 引数を見ない素の状態。
+    /// The defaults. Apart from `id`, the bare state that has looked at no `--` argument.
     #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self {
@@ -101,13 +101,13 @@ impl RuntimeOptions {
         }
     }
 
-    /// プロセス引数から組む。`#[reiny::main]` が使う経路。
+    /// Build from the process arguments. The path `#[reiny::main]` takes.
     ///
-    /// 解釈するのは `--id` / `--name` / `--log-level` / `--config` / `--domain` /
-    /// `--zenoh-config` / `--connect` / `--zenoh-mode` だけ。**未知の引数はエラーにせず**
-    /// [`RuntimeOptions::extra_args`] へ落とす —— launch 固有の引数を reiny は知りようがなく、
-    /// 厳格化すると既存の launch が全部落ちる。タイポ検出は launch 側の引数パーサの仕事。
-    /// zenoh 抜きのビルドでは zenoh 系の引数は警告して無視する。
+    /// The only ones interpreted are `--id` / `--name` / `--log-level` / `--config` / `--domain` /
+    /// `--zenoh-config` / `--connect` / `--zenoh-mode`. **An unknown argument is not an error**; it
+    /// lands in [`RuntimeOptions::extra_args`] — reiny cannot know a launch's own arguments, and being
+    /// strict would break every existing launch. Catching typos is the launch's argument parser's job.
+    /// In a build without zenoh, the zenoh arguments are warned about and ignored.
     #[must_use]
     pub fn from_args(default_id: &str) -> Self {
         Self::from_arg_list(default_id, std::env::args().skip(1))
@@ -121,7 +121,7 @@ impl RuntimeOptions {
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
-                // ランチャはインスタンス id を渡す(連番、例 pong-2)。`--name` も同義で受ける。
+                // The launcher passes an instance id (numbered, e.g. pong-2). `--name` means the same.
                 "--id" | "--name" => take(&mut args, &mut opts.id),
                 "--domain" => take(&mut args, &mut opts.domain),
                 "--log-level" => {
@@ -171,11 +171,11 @@ impl RuntimeOptions {
         opts
     }
 
-    /// `zenoh` の出どころに `zenoh_overrides` を重ねた zenoh 設定を組む。
+    /// The zenoh configuration: the `zenoh` source with `zenoh_overrides` layered on top.
     ///
-    /// [`Cloudy::open`] がセッションを開く直前に通るのと同じ経路。launch ではないが launch と同じ
-    /// fabric に乗りたいツール(`reiny bag` など)が、`--zenoh-config` / `--connect` の
-    /// 解釈を写さずに済むための口。
+    /// The very path [`Cloudy::open`] goes through just before opening a session. The door for a tool
+    /// that is not a launch but wants to be on the same fabric as one (`reiny bag` …) to avoid copying
+    /// how `--zenoh-config` / `--connect` are interpreted.
     #[cfg(feature = "zenoh")]
     pub fn zenoh_config(&self) -> Result<zenoh::Config> {
         let mut config = self.zenoh.to_config()?;
@@ -188,8 +188,8 @@ impl RuntimeOptions {
         Ok(config)
     }
 
-    /// `engine` が無ければ既定のエンジン(zenoh)を開く。
-    #[allow(clippy::unused_async)] // zenoh 抜きのビルドでは await 地点が無い。
+    /// Open the default engine (zenoh) when there is no `engine`.
+    #[allow(clippy::unused_async)] // a build without zenoh has no await point here
     async fn take_engine(&mut self) -> Result<Arc<dyn Engine>> {
         if let Some(engine) = self.engine.take() {
             return Ok(engine);
@@ -215,11 +215,11 @@ fn take<I: Iterator<Item = String>>(args: &mut I, slot: &mut String) {
 }
 
 impl Cloudy {
-    /// オプションからエンジンを開き(または `opts.engine` を受け取り)、`Cloudy` を組む。
+    /// Open the engine from the options (or take `opts.engine`) and build a `Cloudy`.
     ///
-    /// tokio runtime の中で呼ぶ。シグナルは見ない —— `#[tokio::test]` の中で
-    /// [`crate::engine::Local`] を挿して launch を回す入口であり、bridge が 2 本目を開く入口。
-    /// プロセスの入口は [`run_with`]。
+    /// Call it inside a tokio runtime. It watches no signals — it is the entry point for slotting
+    /// [`crate::engine::Local`] into a `#[tokio::test]` and running a launch, and the one a bridge uses
+    /// to open its second `Cloudy`. The process's entry point is [`run_with`].
     pub async fn open(mut opts: RuntimeOptions) -> Result<Self> {
         validate_segment("--id", &opts.id)?;
         validate_segment("--domain", &opts.domain)?;
@@ -238,8 +238,8 @@ impl Cloudy {
     }
 }
 
-/// tokio ランタイムを建て、エンジンとシャットダウン(Ctrl+C / SIGTERM)を用意して
-/// 利用側の `async fn main(cloudy)` を実行する。
+/// Build a tokio runtime, set up the engine and shutdown (Ctrl+C / SIGTERM), and run the caller's
+/// `async fn main(cloudy)`.
 pub fn run_with<F, Fut>(opts: RuntimeOptions, user: F) -> Result<()>
 where
     F: FnOnce(Cloudy) -> Fut,
@@ -268,8 +268,8 @@ where
     })
 }
 
-/// `--config <path>` を読み、TOML table として parse する。読めない/壊れている場合は
-/// 警告して `None`(= `[config]` の既定値だけを使う)。
+/// Read `--config <path>` and parse it as a TOML table. Unreadable or broken: warn and return `None`
+/// (= use only `[config]`'s defaults).
 fn load_config(path: Option<&Path>) -> Option<toml::Table> {
     let path = path?;
     match std::fs::read_to_string(path) {
@@ -287,8 +287,8 @@ fn load_config(path: Option<&Path>) -> Option<toml::Table> {
     }
 }
 
-/// 終了シグナルを待つ。unix では SIGTERM も見る(ランチャ・コンテナ・systemd が使うのはこちら)。
-/// シグナルを購読できない環境では永久に待つ —— 待てないことを「即終了」に化けさせない。
+/// Wait for a termination signal. On unix it watches SIGTERM too (what launchers, containers and
+/// systemd use). Where signals cannot be subscribed to it waits forever — "cannot wait" must never
 #[cfg(unix)]
 async fn wait_for_signal() {
     use tokio::signal::unix::{SignalKind, signal};
@@ -315,14 +315,14 @@ async fn wait_for_signal() {
 
 async fn wait_for_ctrl_c() {
     if tokio::signal::ctrl_c().await.is_err() {
-        // ハンドラを張れないなら「今すぐ終了」ではなく「シグナルは来ない」を選ぶ。
+        // If no handler can be installed, choose "the signal never comes" over "exit right now".
         return std::future::pending().await;
     }
     tracing::info!("Ctrl+C received; shutting down");
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)] // テストは panic で失敗を表現してよい
+#[allow(clippy::expect_used)] // tests may fail by panicking
 mod tests {
     use super::*;
 
@@ -387,7 +387,7 @@ mod tests {
         assert!(matches!(o.zenoh, ZenohSource::File(p) if p == *Path::new("z.json5")));
     }
 
-    /// zenoh 系の引数は(feature の有無に関わらず)値ごと消費され、`extra_args` に漏れない。
+    /// A zenoh argument is consumed together with its value (feature or no feature) and never leaks
     #[test]
     fn zenoh_args_never_leak_into_extra_args() {
         let o = parse(&[

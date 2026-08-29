@@ -1,13 +1,14 @@
-//! 型付き publisher / subscriber と、その builder・presence。
+//! Typed publishers / subscribers, their builders, and presence.
 //!
-//! キーの形は `reiny/<domain>/<id>/<TYPE>`(publish)/ `reiny/<domain>/*/<TYPE>`(subscribe)。
-//! 組み立ては [`Cloudy::key_for`](crate::Cloudy) が一手に引き受ける。バスへの出入りは
-//! [`Engine`](crate::engine::Engine) 越し —— ここにあるのは encode / decode、指紋の照合、
-//! latched の「presence を見てから get」、latest-wins、受信バッファ(Fifo / Ring)で、
-//! どのエンジンでも同じ実装が動く。
+//! The key shape is `reiny/<domain>/<id>/<TYPE>` (publish) and `reiny/<domain>/*/<TYPE>` (subscribe);
+//! [`Cloudy::key_for`](crate::Cloudy) is the single place that assembles it. Getting on and off the bus
+//! goes through an [`Engine`](crate::engine::Engine) — what lives here is encode / decode, the
+//! fingerprint check, latched's "presence first, then get", latest-wins and the receive buffers (Fifo /
+//! Ring), and the same implementation runs on every engine.
 
 use std::collections::{HashSet, VecDeque};
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -16,30 +17,30 @@ use tokio::sync::{Notify, mpsc};
 
 use crate::engine::{
     Callback, Engine, Guard, Key, Presence as RawPresence, QueryParams, RawPublisher, RawQuery,
-    RawReplies, ReplyResult, SCHEMA_CHUNK, Sample,
+    RawReplies, ReplyResult, SCHEMA_CHUNK, SUB_CHUNK, Sample,
 };
 use crate::shutdown::Shutdown;
 use crate::{Cloudy, Descriptor, Durability, History, Priority, Qos, Reliability, Result, Topic};
 
-/// 既定の受信バッファ(Fifo)の深さ。zenoh の `API_DATA_RECEPTION_CHANNEL_SIZE` と同じ。
+/// The depth of the default receive buffer (Fifo). The same as zenoh's `API_DATA_RECEPTION_CHANNEL_SIZE`.
 const FIFO_CAPACITY: usize = 256;
-/// latched の問い合わせを諦めるまで。zenoh の `get` の既定と同じ。
+/// How long a latched query waits before giving up. The same as zenoh's `get` default.
 const LATCHED_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// 受信メッセージと、reiny が知っている来歴。
+/// A received message together with the provenance reiny knows about.
 ///
-/// `source` / `timestamp` は 0.2 では [`Subscriber::recv`] の中で捨てられていた情報なので、
-/// 取り出すのに追加の実行コストは無い。
+/// `source` / `timestamp` were information [`Subscriber::recv`] threw away in 0.2, so getting them out
+/// costs nothing extra at run time.
 pub struct Envelope<T> {
-    /// decode 済みのメッセージ本体。
+    /// The decoded message itself.
     pub value: T,
-    /// 送信元 launch の id(キーの `<id>` セグメント)。
+    /// The sending launch's id (the key's `<id>` segment).
     pub source: String,
-    /// 送信時刻(unix ns)。エンジンが持つときだけ載る(zenoh は timestamping が有効なとき)。
+    /// The send time (unix ns). Present only when the engine has one (zenoh, with timestamping on).
     pub timestamp: Option<u64>,
 }
 
-/// `T::SCHEMA` を attachment の形(8 バイト LE)に。
+/// `T::SCHEMA` in attachment form (8 bytes, little-endian).
 pub(crate) fn fingerprint(schema: Option<u64>) -> Option<Vec<u8>> {
     schema.map(|f| f.to_le_bytes().to_vec())
 }
@@ -52,8 +53,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 // publisher
 // ---------------------------------------------------------------------------
 
-/// [`Cloudy::publisher`] が返す builder。何も指定しなければ [`Cloudy::publish`] と同じ。
-#[must_use = "builder は .build() するまで何もしない"]
+/// The builder [`Cloudy::publisher`] returns. With nothing set it is [`Cloudy::publish`].
+#[must_use = "a builder does nothing until .build()"]
 pub struct PublisherBuilder<'a, T> {
     cloudy: &'a Cloudy,
     qos: Qos,
@@ -69,45 +70,45 @@ impl<'a, T> PublisherBuilder<'a, T> {
         }
     }
 
-    /// `QoS` をまとめて指定する —— [`Qos::SENSOR`] / [`Qos::COMMAND`] / [`Qos::STATE`] の
-    /// プロファイルか、自前の [`Qos`]。後から呼ぶ糖衣(`.latched()` 等)はこの上に重なる。
+    /// Set the whole `QoS` at once — one of the [`Qos::SENSOR`] / [`Qos::COMMAND`] / [`Qos::STATE`]
+    /// profiles, or a [`Qos`] of your own. The sugar called afterwards (`.latched()` …) layers on top.
     pub fn qos(mut self, qos: Qos) -> Self {
         self.qos = qos;
         self
     }
 
-    /// 直近 1 件を保持し、遅れて来た購読者の問い合わせに答える(latched)。
-    /// 「起動時に 1 回配れば済む設定」を定期再送し続けるタスクの代わり。履歴は 1 件だけ。
-    /// = `durability: TransientLocal`。
+    /// Keep the most recent sample and answer a late subscriber's query with it (latched).
+    /// It replaces the task that re-sends "a setting that only needs delivering once at startup" forever.
+    /// The history is one sample. = `durability: TransientLocal`.
     pub fn latched(mut self) -> Self {
         self.qos.durability = Durability::TransientLocal;
         self
     }
 
-    /// 輻輳時に捨てるか待つか。= `Qos.reliability`。
+    /// Whether to drop or to wait under congestion. = `Qos.reliability`.
     pub fn reliability(mut self, reliability: Reliability) -> Self {
         self.qos.reliability = reliability;
         self
     }
 
-    /// 送信優先度。= `Qos.priority`。
+    /// Send priority. = `Qos.priority`.
     pub fn priority(mut self, priority: Priority) -> Self {
         self.qos.priority = priority;
         self
     }
 
-    /// バッチングを飛ばして即時送信する(低レイテンシ・低スループット)。= `Qos.express`。
+    /// Skip batching and send immediately (lower latency, lower throughput). = `Qos.express`.
     pub fn express(mut self, express: bool) -> Self {
         self.qos.express = express;
         self
     }
 
-    /// publisher を宣言する。同じキーの liveliness トークンも必ず同伴する
-    /// ([`Cloudy::publishers`] の土台。opt-out は無い)。
+    /// Declare the publisher. A liveliness token on the same key always comes with it
+    /// (the foundation of [`Cloudy::publishers`]; there is no opt-out).
     ///
-    /// `history: KeepLast(n > 1)` はエラー —— publisher が持つのは latched の 1 件までで、
-    /// n 件のリングは購読側 `.latest(n)` の仕事(黙って 1 に丸めない)。エンジンに無い機能
-    /// (latched に要る query、presence に要る liveliness)もここでエラーにする。
+    /// `history: KeepLast(n > 1)` is an error — a publisher holds at most the one latched sample, and an
+    /// n-deep ring is the subscriber's job through `.latest(n)` (it is not silently rounded to 1). A
+    /// feature the engine lacks (query, needed by latched; liveliness, needed by presence) errors here too.
     pub fn build(self) -> Result<Publisher<T>>
     where
         T: Message + Topic,
@@ -151,12 +152,12 @@ impl<'a, T> PublisherBuilder<'a, T> {
             None
         };
 
-        // トークンは latched queryable の**後**に宣言する。購読側は presence(このトークン)を
-        // 合図に直近値を問い合わせるので、逆順だと「居るのに queryable はまだ届いていない」
-        // 一瞬に問い合わせが飛んで空振りする。同じリンク上の宣言は順序が保たれる。
+        // The token is declared **after** the latched queryable. A subscriber takes presence (this very
+        // token) as its cue to ask for the most recent value, so in the other order the query would fly
+        // during the instant where "it is there but its queryable has not arrived yet" and come back
         let token = engine.declare_alive(&key)?;
-        // `@schema` は診断用なので、query の無いエンジンでは黙って立てない(エラーにしない ——
-        // `reiny-build` 生成型は全部 DESCRIPTOR を持つ)。
+        // `@schema` is for diagnostics, so on an engine without query it is silently skipped rather than
+        // being an error (every `reiny-build` generated type carries a DESCRIPTOR).
         let schema = match T::DESCRIPTOR {
             Some(descriptor) if caps.query => Some(declare_schema(self.cloudy, &key, descriptor)?),
             _ => None,
@@ -174,12 +175,12 @@ impl<'a, T> PublisherBuilder<'a, T> {
     }
 }
 
-/// [`Topic::DESCRIPTOR`] を持つ型の publisher が、自分のキーの脇
-/// `<key>/@schema/<message>` で descriptor set を名乗るための queryable。
+/// The queryable through which a publisher of a type carrying a [`Topic::DESCRIPTOR`] announces its
+/// descriptor set, beside its own key at `<key>/@schema/<message>`.
 ///
-/// `@schema` は verbatim チャンク —— `*` / `**` のどちらにもマッチしないので、型のトピックを
-/// 購読・記録している誰にも見えない。拾うのは `reiny bag record` のように
-/// `reiny/<domain>/*/*/@schema/*` と明示して問い合わせる側だけ。
+/// `@schema` is a verbatim chunk — it matches neither `*` nor `**`, so it is invisible to anyone
+/// subscribing to or recording the type's topic. The only ones who pick it up ask for it explicitly, as
+/// `reiny bag record` does with `reiny/<domain>/*/*/@schema/*`.
 pub(crate) fn declare_schema(cloudy: &Cloudy, key: &Key, descriptor: Descriptor) -> Result<Guard> {
     let reply_key = key.with_chunk(format!("{SCHEMA_CHUNK}/{}", descriptor.message));
     let callback_key = reply_key.clone();
@@ -193,8 +194,8 @@ pub(crate) fn declare_schema(cloudy: &Cloudy, key: &Key, descriptor: Descriptor)
     )
 }
 
-/// latched publisher の裏側 —— 自分の publish キーに queryable を 1 本立て、
-/// 最後に送った値をそのまま返すだけ。
+/// The other half of a latched publisher — one queryable on its own publish key, answering with the
+/// last value it sent and nothing more.
 fn declare_latch(
     cloudy: &Cloudy,
     key: &Key,
@@ -205,15 +206,15 @@ fn declare_latch(
     cloudy.engine().respond(
         key,
         Box::new(move |query: Box<dyn RawQuery>| {
-            // payload 付きの query は service の呼び出し(`service.rs`)。同じ型を latched publish
-            // しつつ serve する launch で、呼び出しに直近値を返してしまわないよう無視する。
+            // A query carrying a payload is a service call (`service.rs`). Ignore it, so that a launch
+            // that latched-publishes and serves the same type does not answer a call with its last value.
             if query.payload().is_some() {
                 return;
             }
             let Some(bytes) = lock(&last).clone() else {
                 return;
             };
-            // ライブ経路と同じ指紋を載せる。載せないと latched 応答だけ照合を素通りする。
+            // Carry the same fingerprint the live path does. Without it, only latched replies would slip past the check.
             if let Err(e) = query.reply(&reply_key, bytes, fingerprint(schema)) {
                 tracing::warn!(key = %reply_key, error = %e, "latched reply failed");
             }
@@ -221,28 +222,28 @@ fn declare_latch(
     )
 }
 
-/// 型付き publisher。[`Cloudy::publish`] / [`PublisherBuilder::build`] で得る。
+/// A typed publisher. Obtained from [`Cloudy::publish`] / [`PublisherBuilder::build`].
 ///
-/// drop すると liveliness トークンも落ちるので、購読側の [`Cloudy::watch_publishers`] に
-/// [`PresenceEvent::Left`] が届く。
+/// Dropping it drops the liveliness token too, so subscribers watching through
+/// [`Cloudy::watch_publishers`] get a [`PresenceEvent::Left`].
 pub struct Publisher<T> {
     raw: Box<dyn RawPublisher>,
-    /// publisher と生死を共にする presence トークン(保持するだけ)。
+    /// The presence token that lives and dies with the publisher (merely held).
     _token: Guard,
-    /// latched のときだけ立つ、直近値を返す queryable(保持するだけ)。
+    /// The queryable answering with the most recent value, declared only when latched (merely held).
     queryable: Option<Guard>,
-    /// `T::DESCRIPTOR` があるときだけ立つ、`@schema` で descriptor を名乗る queryable(保持するだけ)。
+    /// The queryable announcing the descriptor at `@schema`, only when `T::DESCRIPTOR` is set (merely held).
     _schema: Option<Guard>,
     last: Arc<Mutex<Option<Vec<u8>>>>,
     _marker: PhantomData<T>,
 }
 
 impl<T: Message + Topic> Publisher<T> {
-    /// メッセージを encode して発行する。`T::SCHEMA` があれば指紋を attachment に載せる。
+    /// Encode the message and publish it. With a `T::SCHEMA`, the fingerprint rides in the attachment.
     ///
-    /// `Reliable`(既定)なら送信路が詰まっている間ブロックする。`async` なのは API の形を
-    /// 保つため —— 今のエンジンに await 地点は無い。
-    #[allow(clippy::unused_async)] // 0.4 からの API。エンジンが本当に待つ日のために残す。
+    /// Under `Reliable` (the default) it blocks while the send path is congested. It is `async` to keep
+    /// the shape of the API — no engine today has an await point in here.
+    #[allow(clippy::unused_async)] // API since 0.4; kept for the day an engine really does wait.
     pub async fn send(&self, message: T) -> Result<()> {
         let buf = message.encode_to_vec();
         if self.queryable.is_some() {
@@ -256,8 +257,8 @@ impl<T: Message + Topic> Publisher<T> {
 // subscriber
 // ---------------------------------------------------------------------------
 
-/// [`Cloudy::subscriber`] が返す builder。何も指定しなければ [`Cloudy::subscribe`] と同じ。
-#[must_use = "builder は .build() するまで何もしない"]
+/// The builder [`Cloudy::subscriber`] returns. With nothing set it is [`Cloudy::subscribe`].
+#[must_use = "a builder does nothing until .build()"]
 pub struct SubscriberBuilder<'a, T> {
     cloudy: &'a Cloudy,
     from: Option<String>,
@@ -277,38 +278,38 @@ impl<'a, T> SubscriberBuilder<'a, T> {
         }
     }
 
-    /// 特定の launch id だけを購読する。同じ型を複数の launch が publish する構成で、
-    /// 購読側が出し手を選ぶための指定。
+    /// Subscribe to one launch id only. For setups where several launches publish the same type and the
+    /// subscriber wants to pick which one it listens to.
     pub fn from(mut self, id: impl Into<String>) -> Self {
         self.from = Some(id.into());
         self
     }
 
-    /// latched publisher の直近値を受け取ってからライブ購読に入る。
+    /// Take a latched publisher's most recent value before entering the live subscription.
     ///
-    /// 問い合わせ(`get`)は**宣言直後ではなく、その型の publisher の presence を見てから**撃つ。
-    /// `get` はその瞬間のルーティング表しか見ないので、宣言直後に撃つと「セッションは開いたが
-    /// publisher が居る peer とのリンクがまだ張れていない」一瞬に空振りし、**publisher が
-    /// 再送しない限り恒久的に黙る**(latched の存在意義そのものが消える)。presence は
-    /// liveliness の**購読**なので、後から張れたリンクの宣言もちゃんと届く —— この非対称性が
-    /// 穴を塞ぐ。publisher が増えるたびに、その id へ 1 回だけ問い合わせ直す。
+    /// The query (`get`) is fired **after seeing the presence of a publisher of that type, not right
+    /// after declaring**. A `get` only sees the routing table of that instant, so firing it immediately
+    /// misses during the moment where "the session is open but the link to the peer holding the
+    /// publisher is not up yet", and then **stays silent forever unless the publisher re-sends** (which
+    /// is the entire point of latched, gone). Presence is a **subscription** to liveliness, so
+    /// declarations from links established later still arrive — that asymmetry is what closes the hole.
     pub fn latched(mut self) -> Self {
         self.latched = true;
         self
     }
 
-    /// 直近 `n` 件だけを保持し、溢れたら**最古を捨てる**(ROS 2 の `KEEP_LAST(n)`)。
+    /// Keep only the most recent `n` samples and **drop the oldest** on overflow (ROS 2's `KEEP_LAST(n)`).
     ///
-    /// 既定(未指定)は Fifo(256 件)で、**満杯になるとエンジンの受信スレッドがブロックし、
-    /// その launch の全購読が詰まる**。高レートの状態量を自分の周期でしか読まない
-    /// 購読(GUI が 100Hz の `RobotState` を描画周期で読む等)は `latest(1)` にする。
-    /// コマンド系は既定のまま —— 黙って落ちる方が制御では危ない。
+    /// The default (unset) is a Fifo of 256, and **when it fills, the engine's receive thread blocks and
+    /// every subscription in that launch stalls**. A subscription that only reads a high-rate state at
+    /// its own pace (a GUI drawing a 100 Hz `RobotState` at frame rate, say) wants `latest(1)`.
+    /// Leave command paths on the default — silently dropping is the more dangerous one for control.
     pub fn latest(mut self, n: usize) -> Self {
         self.latest = Some(n.max(1));
         self
     }
 
-    /// subscriber を宣言する。エンジンに無い機能(`*` 購読、latched)はここでエラー。
+    /// Declare the subscriber. A feature the engine lacks (`*` subscription, latched) errors here.
     pub fn build(self) -> Result<Subscriber<T>>
     where
         T: Message + Default + Topic,
@@ -329,25 +330,59 @@ impl<'a, T> SubscriberBuilder<'a, T> {
         }
         let key = self.cloudy.key_for(self.from.as_deref(), T::TYPE);
 
-        // 受信バッファは reiny が持つ。engine の callback はここに積むだけ。
+        // reiny owns the receive buffer. The engine's callback only pushes onto it (and counts).
+        let counters = Arc::new(Counters::default());
         let (chan, on_sample): (Chan, Callback<Sample>) = if let Some(n) = self.latest {
             let ring = Arc::new(Ring::new(n));
             let sink = Arc::clone(&ring);
-            (Chan::Ring(ring), Box::new(move |s| sink.push(s)))
+            let counters = Arc::clone(&counters);
+            (
+                Chan::Ring(ring),
+                Box::new(move |s| {
+                    counters.received.fetch_add(1, Ordering::Relaxed);
+                    if sink.push(s) {
+                        counters.note_full(T::TYPE, true);
+                    }
+                }),
+            )
         } else {
             let (tx, rx) = flume::bounded(FIFO_CAPACITY);
+            let counters = Arc::clone(&counters);
             (
                 Chan::Fifo(rx),
                 Box::new(move |s| {
-                    // 満杯なら engine のスレッドをブロックする(zenoh の FifoChannel と同じ)。
-                    let _ = tx.send(s);
+                    counters.received.fetch_add(1, Ordering::Relaxed);
+                    // The behaviour is unchanged — a full buffer still blocks the engine's thread,
+                    // as zenoh's FifoChannel does. `try_send` runs first only so that it can be counted.
+                    if let Err(flume::TrySendError::Full(s)) = tx.try_send(s) {
+                        counters.note_full(T::TYPE, false);
+                        let _ = tx.send(s);
+                    }
                 }),
             )
         };
         let guard = engine.subscribe(&key, on_sample)?;
 
-        // latched の問い合わせは presence を待ってから撃つ(`latched()` のコメント参照)。
-        // 購読の**後**に見張り始めるので、応答を待つ間に流れたライブ sample も落とさない。
+        // Our own presence: `reiny/<domain>/<our id>/<T>/@sub`, whatever source the subscription
+        // itself names. The question it answers is "who listens to this type", not "who listens to
+        // whom". Unlike a publisher's token this one is skipped rather than refused on an engine
+        // without liveliness — it changes nothing about how the subscription behaves.
+        let mine = self.cloudy.key_for(Some(self.cloudy.id()), T::TYPE);
+        let sub_token = if caps.liveliness {
+            Some(engine.declare_alive(&mine.with_chunk(SUB_CHUNK))?)
+        } else {
+            None
+        };
+        // A subscriber describes its type on the bus too, so `reiny topic pub` can encode for a
+        // launch that only listens — during bring-up the publisher of that type is typically the
+        // thing that is not running yet.
+        let schema = match T::DESCRIPTOR {
+            Some(descriptor) if caps.query => Some(declare_schema(self.cloudy, &mine, descriptor)?),
+            _ => None,
+        };
+
+        // The latched query waits for presence before firing (see the comment on `latched()`).
+        // Watching starts **after** subscribing, so live samples arriving while we wait are not lost.
         let presence = if self.latched {
             Some(self.cloudy.watch_key::<T>(&key)?)
         } else {
@@ -358,6 +393,9 @@ impl<'a, T> SubscriberBuilder<'a, T> {
         Ok(Subscriber {
             chan,
             _guard: guard,
+            _sub_token: sub_token,
+            _schema: schema,
+            counters,
             engine: Arc::clone(engine),
             key,
             latched: None,
@@ -373,16 +411,80 @@ impl<'a, T> SubscriberBuilder<'a, T> {
     }
 }
 
-/// 受信チャネル。既定は Fifo(満杯でブロック)、[`SubscriberBuilder::latest`] で Ring
-/// (満杯で最古を捨てる)。enum にして `Subscriber<T>` をバッファでジェネリックにしない ——
-/// 公開型の形はダウンストリームの構造体フィールドに現れている。
+/// What a subscriber's receive buffer has done since it was declared.
+///
+/// Both buffers are quiet by design: the default Fifo of [`FIFO_CAPACITY`] **blocks the engine's
+/// receive thread** when it fills (which stalls every subscription in the launch), and
+/// [`SubscriberBuilder::latest`]'s ring never blocks but throws the oldest sample away instead.
+/// Neither leaves a trace, so these counters — with the one-shot `warn!` beside them — are the only
+/// way to learn that "the robot freezes now and then" is a full buffer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SubscriberStats {
+    /// Samples the engine handed to this subscriber's buffer (the dropped ones included).
+    pub received: u64,
+    /// Samples the ring threw away because it was full (`latest(n)` only).
+    pub dropped: u64,
+    /// Times the engine's thread had to wait on a full Fifo (the default buffer only).
+    pub blocked: u64,
+}
+
+/// The counters behind [`SubscriberStats`], shared with the engine's callback.
+#[derive(Default)]
+struct Counters {
+    received: AtomicU64,
+    dropped: AtomicU64,
+    blocked: AtomicU64,
+    /// Whether the one-shot warning has already gone out.
+    warned: AtomicBool,
+}
+
+impl Counters {
+    fn snapshot(&self) -> SubscriberStats {
+        SubscriberStats {
+            received: self.received.load(Ordering::Relaxed),
+            dropped: self.dropped.load(Ordering::Relaxed),
+            blocked: self.blocked.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Count a full buffer and say so **once**. Warning per sample buries the log; warning never is
+    /// how a stall stays unexplained — the same trade the fingerprint-mismatch warning already makes.
+    fn note_full(&self, ty: &'static str, dropping: bool) {
+        let counter = if dropping {
+            &self.dropped
+        } else {
+            &self.blocked
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        if self.warned.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        if dropping {
+            tracing::warn!(
+                ty,
+                "receive ring is full; dropping the oldest sample. Read faster or raise `.latest(n)`"
+            );
+        } else {
+            tracing::warn!(
+                ty,
+                capacity = FIFO_CAPACITY,
+                "receive buffer is full; the engine's thread is blocked, which stalls every \
+                 subscription in this launch. Read faster or use `.latest(n)`"
+            );
+        }
+    }
+}
+
+/// The receive channel. The default is Fifo (blocks when full); [`SubscriberBuilder::latest`] makes it a
+/// Ring (drops the oldest when full). It is an enum rather than making `Subscriber<T>` generic over the
+/// buffer — the shape of a public type shows up in downstream struct fields.
 enum Chan {
     Fifo(flume::Receiver<Sample>),
     Ring(Arc<Ring>),
 }
 
 impl Chan {
-    /// 次の sample。どちらも cancel-safe(await 地点に取り出し済みの値を抱えない)。
+    /// The next sample. Both are cancel-safe (no value already taken out is held across an await point).
     async fn recv(&self) -> Option<Sample> {
         match self {
             Self::Fifo(rx) => rx.recv_async().await.ok(),
@@ -391,7 +493,7 @@ impl Chan {
     }
 }
 
-/// 直近 n 件のリング。満杯なら最古を捨てる。
+/// A ring of the most recent n samples. Drops the oldest when full.
 struct Ring {
     queue: Mutex<VecDeque<Sample>>,
     capacity: usize,
@@ -407,19 +509,22 @@ impl Ring {
         }
     }
 
-    fn push(&self, sample: Sample) {
+    /// Push one sample, returning whether the oldest had to be thrown away to make room.
+    fn push(&self, sample: Sample) -> bool {
         let mut queue = lock(&self.queue);
-        if queue.len() == self.capacity {
+        let evicted = queue.len() == self.capacity;
+        if evicted {
             queue.pop_front();
         }
         queue.push_back(sample);
         drop(queue);
         self.notify.notify_one();
+        evicted
     }
 
     async fn pop(&self) -> Sample {
         loop {
-            // 待ち手を先に登録してからキューを見る —— 間に push が来ても取りこぼさない。
+            // Register the waiter before looking at the queue — a push arriving in between is not missed.
             let notified = self.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
@@ -431,59 +536,74 @@ impl Ring {
     }
 }
 
-/// 型付き subscriber。[`Cloudy::subscribe`] / [`SubscriberBuilder::build`] で得る。
+/// A typed subscriber. Obtained from [`Cloudy::subscribe`] / [`SubscriberBuilder::build`].
 ///
-/// `recv` はシャットダウン(Ctrl+C / SIGTERM / [`Cloudy::shutdown_now`])で `None` を返すので、
-/// `while let Some(m) = sub.recv().await` のループが自然に抜ける。
+/// `recv` returns `None` on shutdown (Ctrl+C / SIGTERM / [`Cloudy::shutdown_now`]), so a
+/// `while let Some(m) = sub.recv().await` loop falls out of its own accord.
 ///
 /// # cancel-safety
 ///
-/// [`Subscriber::recv`] / [`Subscriber::recv_envelope`] は **cancel-safe**: `tokio::select!` や
-/// `tokio::time::timeout` で途中で捨てても、届いていた sample は失われず次の `recv` が返す。
-/// 「一定時間来なければ切断扱い」はこれで書く(reiny に deadline API は無い):
+/// [`Subscriber::recv`] / [`Subscriber::recv_envelope`] are **cancel-safe**: dropping one half-finished
+/// in a `tokio::select!` or a `tokio::time::timeout` loses no sample that had arrived — the next `recv`
+/// returns it. "Treat silence past a deadline as a disconnect" is written this way (reiny has no
 ///
 /// ```ignore
 /// match tokio::time::timeout(Duration::from_secs(1), sub.recv()).await {
 ///     Ok(Some(m)) => on_message(m),
-///     Ok(None) => break,       // シャットダウン
-///     Err(_) => on_stale(),    // 居るのに黙っている(居なくなったのは watch_publishers で取る)
+///     Ok(None) => break,       // shutdown
+///     Err(_) => on_stale(),    // there but quiet (gone is what watch_publishers reports)
 /// }
 /// ```
 pub struct Subscriber<T> {
     chan: Chan,
-    /// 購読の取っ手(保持するだけ。drop で undeclare)。
+    /// The subscription handle (merely held; dropping it undeclares).
     _guard: Guard,
-    /// latched の問い合わせを撃ち直すための材料(エンジンと購読キー)。
+    /// Our own `…/<T>/@sub` presence token, so `Cloudy::subscribers::<T>()` can see us (merely held).
+    _sub_token: Option<Guard>,
+    /// The `@schema` queryable describing `T`, when it has a `DESCRIPTOR` (merely held).
+    _schema: Option<Guard>,
+    /// The receive buffer's counters, shared with the engine's callback.
+    counters: Arc<Counters>,
+    /// What is needed to fire the latched query again (the engine and the subscription key).
     engine: Arc<dyn Engine>,
     key: Key,
-    /// いま飛んでいる latched 問い合わせの応答列(presence を見て撃つ)。
+    /// The reply stream of the latched query in flight (fired on seeing presence).
     latched: Option<Box<dyn RawReplies>>,
-    /// 応答列を読み切ったか。撃っていなければ true。
+    /// Whether that reply stream is drained. True when none was ever fired.
     latched_done: bool,
-    /// latched のとき、publisher の参加 / 離脱を見張るストリーム。
+    /// When latched, the stream watching publishers join and leave.
     presence: Option<Presence<T>>,
-    /// presence ストリームが終端したか。latched でなければ最初から true。
+    /// Whether the presence stream has ended. True from the start when not latched.
     presence_done: bool,
-    /// 直近値を既に問い合わせた publisher id(離脱したら忘れ、復帰時に撃ち直す)。
+    /// The publisher ids already asked for their most recent value (forgotten on leave, re-asked on return).
     queried: HashSet<String>,
-    /// ライブ sample を配り終えた送信元。latched 応答がこれより後に届いたら捨てる。
+    /// The sources a live sample has already been delivered from. A latched reply arriving later is dropped.
     seen: HashSet<String>,
-    /// スキーマ指紋の不一致を既に警告した送信元(送信元ごとに 1 度だけ鳴らす)。
+    /// The sources already warned about a schema fingerprint mismatch (one warning per source).
     warned: HashSet<String>,
     shutdown: Shutdown,
     _marker: PhantomData<T>,
 }
 
+impl<T> Subscriber<T> {
+    /// What this subscriber's receive buffer has done so far. See [`SubscriberStats`] for why the
+    /// numbers matter — a non-zero `dropped` or `blocked` is a real problem, not a statistic.
+    #[must_use]
+    pub fn stats(&self) -> SubscriberStats {
+        self.counters.snapshot()
+    }
+}
+
 impl<T: Message + Default + Topic> Subscriber<T> {
-    /// 次のメッセージを受け取る。チャネルが閉じたか、シャットダウンが要求されたら `None`。
+    /// Receive the next message. `None` once the channel is closed or shutdown was requested.
     ///
-    /// decode に失敗したサンプル(壊れた/別スキーマのペイロード)は警告して読み飛ばし、
-    /// 受信を続ける。`None` は「もう来ない」を意味する終端シグナルとしてのみ返す。
+    /// A sample that fails to decode (a corrupt payload, or one of another schema) is warned about,
+    /// skipped, and reception continues. `None` is returned only as the "nothing more is coming" signal.
     pub async fn recv(&mut self) -> Option<T> {
         self.recv_envelope().await.map(|e| e.value)
     }
 
-    /// [`Subscriber::recv`] と同じだが、送信元 id と timestamp も返す。
+    /// The same as [`Subscriber::recv`], but it also gives the source id and the timestamp.
     pub async fn recv_envelope(&mut self) -> Option<Envelope<T>> {
         let Self {
             chan,
@@ -503,7 +623,7 @@ impl<T: Message + Default + Topic> Subscriber<T> {
             tokio::select! {
                 biased;
                 () = shutdown.wait() => return None,
-                // publisher が見えた合図。その id へ 1 回だけ直近値を問い合わせる。
+                // The cue that a publisher appeared. Ask that id for its most recent value, once.
                 event = recv_presence(presence.as_mut()), if !*presence_done => {
                     match event {
                         Some(PresenceEvent::Joined(id)) => {
@@ -522,14 +642,14 @@ impl<T: Message + Default + Topic> Subscriber<T> {
                         None => *presence_done = true,
                     }
                 }
-                // latched 応答を先に流す(短命な列なので飢餓は起きない)。
+                // Drain the latched replies first (the stream is short-lived, so nothing starves).
                 reply = recv_reply(latched.as_mut()), if !*latched_done => {
                     let Some(reply) = reply else {
                         *latched_done = true;
                         continue;
                     };
                     let Ok(sample) = reply else { continue };
-                    // latest-wins: そのソースのライブ sample を既に配っていたら遅れた応答は捨てる。
+                    // latest-wins: drop a late reply from a source whose live samples we already delivered.
                     let source = sample.key.source.clone().unwrap_or_default();
                     if seen.contains(&source) {
                         continue;
@@ -541,7 +661,7 @@ impl<T: Message + Default + Topic> Subscriber<T> {
                 sample = chan.recv() => {
                     let sample = sample?; // channel closed
                     let source = sample.key.source.clone().unwrap_or_default();
-                    // latched を見張っている間だけ覚える(遅れて届いた直近値を捨てるため)。
+                    // Only remembered while watching for latched (so a late "most recent" can be dropped).
                     if !*presence_done {
                         seen.insert(source.clone());
                     }
@@ -554,7 +674,7 @@ impl<T: Message + Default + Topic> Subscriber<T> {
     }
 }
 
-/// 指紋を照合して decode する。落とすべき sample なら `None`。
+/// Check the fingerprint and decode. `None` for a sample that should be dropped.
 fn unwrap_sample<T: Message + Default + Topic>(
     sample: &Sample,
     source: String,
@@ -571,8 +691,8 @@ fn unwrap_sample<T: Message + Default + Topic>(
     })
 }
 
-/// `Option<&mut replies>` を future 化する。precondition 付き select 分岐で使うので、
-/// `None` は「永遠に来ない」= `pending` として扱う(unwrap を避けるため)。
+/// Turn `Option<&mut replies>` into a future. It sits in a select! branch with a precondition, so `None`
+/// is treated as "never arrives" = `pending` (which avoids an unwrap).
 async fn recv_reply(replies: Option<&mut Box<dyn RawReplies>>) -> Option<ReplyResult> {
     match replies {
         Some(r) => r.next().await,
@@ -580,7 +700,7 @@ async fn recv_reply(replies: Option<&mut Box<dyn RawReplies>>) -> Option<ReplyRe
     }
 }
 
-/// [`recv_reply`] の presence 版。latched でない購読では `None` = `pending`。
+/// The presence counterpart of [`recv_reply`]. On a non-latched subscription `None` = `pending`.
 async fn recv_presence<T>(presence: Option<&mut Presence<T>>) -> Option<PresenceEvent> {
     match presence {
         Some(p) => p.recv().await,
@@ -588,12 +708,12 @@ async fn recv_presence<T>(presence: Option<&mut Presence<T>>) -> Option<Presence
     }
 }
 
-/// attachment に載った送信側の指紋を自分の `T::SCHEMA` と突き合わせる。
+/// Match the sender's fingerprint from the attachment against our own `T::SCHEMA`.
 ///
-/// 素通しにするのは「照合できないとき」だけ —— どちらかが `None`(手書き `impl Topic` や
-/// 指紋を載せない送信側、attachment を持たないエンジン)、または attachment が既知の形
-/// (8 バイト LE)でないとき。不一致だけを落とし、その送信元については 1 度しか警告しない
-/// (毎サンプル鳴らすとログが埋まる)。
+/// It passes through only when there is nothing to compare — either side is `None` (a hand-written
+/// `impl Topic`, a sender that carries no fingerprint, an engine with no attachments), or the
+/// attachment is not in the known shape (8 bytes, little-endian). Only a mismatch is dropped, and each
+/// source is warned about once (warning per sample would bury the log).
 fn schema_matches<T: Topic>(sample: &Sample, source: &str, warned: &mut HashSet<String>) -> bool {
     let (Some(mine), Some(theirs)) = (
         T::SCHEMA,
@@ -616,7 +736,7 @@ fn schema_matches<T: Topic>(sample: &Sample, source: &str, warned: &mut HashSet<
     false
 }
 
-/// attachment に載った reiny の指紋(8 バイト LE)。無い / 形が違う(他人の attachment)なら `None`。
+/// reiny's fingerprint as carried in an attachment (8 bytes LE). `None` when it is absent or shaped differently (someone else's attachment).
 pub(crate) fn attachment_fingerprint(attachment: Option<&[u8]>) -> Option<u64> {
     let raw = <[u8; 8]>::try_from(attachment?).ok()?;
     Some(u64::from_le_bytes(raw))
@@ -636,19 +756,19 @@ fn decode<T: Message + Default + Topic>(sample: &Sample) -> Option<T> {
 // presence
 // ---------------------------------------------------------------------------
 
-/// publisher の参加 / 離脱。
+/// A publisher joining or leaving.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PresenceEvent {
-    /// この launch id がその型の publisher を宣言した(宣言済みのものも初回に流れる)。
+    /// This launch id declared a publisher of that type (existing ones arrive first).
     Joined(String),
-    /// publisher が drop された、またはプロセスごと落ちた。
+    /// The publisher was dropped, or the whole process went away.
     Left(String),
 }
 
-/// [`Cloudy::watch_publishers`] が返すイベントストリーム。
+/// The event stream [`Cloudy::watch_publishers`] returns.
 pub struct Presence<T> {
     rx: mpsc::UnboundedReceiver<PresenceEvent>,
-    /// 見張りの取っ手(保持するだけ)。
+    /// The watch handle (merely held).
     _guard: Guard,
     shutdown: Shutdown,
     _marker: PhantomData<T>,
@@ -675,12 +795,159 @@ impl<T> Presence<T> {
         })
     }
 
-    /// 次のイベントを待つ。シャットダウンかチャネル終端で `None`。
+    /// Wait for the next event. `None` on shutdown or once the channel ends.
     pub async fn recv(&mut self) -> Option<PresenceEvent> {
         tokio::select! {
             biased;
             () = self.shutdown.wait() => None,
             event = self.rx.recv() => event,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)] // tests may fail by panicking
+mod tests {
+    use super::*;
+
+    /// A type with a fingerprint, and a same-topic twin with a different one — the shape
+    /// `reiny-build` produces when two projects happen to name a type alike.
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct State {
+        #[prost(int32, tag = "1")]
+        x: i32,
+    }
+    impl Topic for State {
+        const TYPE: &'static str = "PubState";
+        const SCHEMA: Option<u64> = Some(0xaaaa_bbbb_cccc_dddd);
+    }
+
+    /// The same `TYPE` written by hand, with no fingerprint at all.
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct StateNoSchema {
+        #[prost(int32, tag = "1")]
+        x: i32,
+    }
+    impl Topic for StateNoSchema {
+        const TYPE: &'static str = "PubState";
+    }
+
+    fn sample(payload: Vec<u8>, attachment: Option<Vec<u8>>) -> Sample {
+        Sample {
+            key: Key::topic("lab", Some("src"), State::TYPE),
+            payload,
+            attachment,
+            timestamp: None,
+        }
+    }
+
+    /// The fingerprint travels as 8 bytes little-endian, and anything else in the attachment is
+    /// somebody else's — parsing it must not guess.
+    #[test]
+    fn fingerprint_is_eight_bytes_little_endian() {
+        assert_eq!(fingerprint(None), None);
+        let bytes = fingerprint(State::SCHEMA).expect("State has a fingerprint");
+        assert_eq!(bytes.len(), 8);
+        assert_eq!(attachment_fingerprint(Some(&bytes)), State::SCHEMA);
+
+        assert_eq!(attachment_fingerprint(None), None);
+        assert_eq!(attachment_fingerprint(Some(&[])), None);
+        assert_eq!(attachment_fingerprint(Some(&[1, 2, 3])), None, "too short");
+        assert_eq!(attachment_fingerprint(Some(&[0u8; 9])), None, "too long");
+    }
+
+    /// The check drops **only** a real mismatch. Everything it cannot compare passes through, which is
+    /// what keeps a hand-written `impl Topic` (no `SCHEMA`) and an engine without attachments working.
+    #[test]
+    fn only_a_real_fingerprint_mismatch_is_dropped() {
+        let mut warned = HashSet::new();
+        let payload = State { x: 7 }.encode_to_vec();
+        let mine = fingerprint(State::SCHEMA);
+
+        // Both sides present and equal: delivered.
+        let ok = sample(payload.clone(), mine.clone());
+        assert_eq!(
+            unwrap_sample::<State>(&ok, "src".into(), &mut warned).map(|e| e.value),
+            Some(State { x: 7 })
+        );
+
+        // Both sides present and different: dropped, even though the payload would decode fine.
+        let bad = sample(payload.clone(), fingerprint(Some(0x1234)));
+        assert!(unwrap_sample::<State>(&bad, "src".into(), &mut warned).is_none());
+
+        // No attachment at all: nothing to compare, so it passes.
+        let bare = sample(payload.clone(), None);
+        assert!(unwrap_sample::<State>(&bare, "src".into(), &mut warned).is_some());
+
+        // Our own side has no fingerprint: passes whatever the sender put there.
+        let mut warned2 = HashSet::new();
+        assert!(
+            unwrap_sample::<StateNoSchema>(&bad, "src".into(), &mut warned2).is_some(),
+            "a hand-written impl Topic must keep interoperating"
+        );
+
+        // An attachment of another shape is somebody else's, not a mismatch.
+        let alien = sample(payload, Some(b"not-a-fingerprint".to_vec()));
+        assert!(unwrap_sample::<State>(&alien, "src".into(), &mut warned).is_some());
+    }
+
+    /// A mismatch warns once per source, not once per sample — the log is the thing this protects.
+    #[test]
+    fn a_mismatching_source_is_warned_about_once() {
+        let mut warned = HashSet::new();
+        let bad = sample(State { x: 1 }.encode_to_vec(), fingerprint(Some(0x1234)));
+        for _ in 0..3 {
+            assert!(unwrap_sample::<State>(&bad, "src".into(), &mut warned).is_none());
+        }
+        assert_eq!(warned.len(), 1);
+        assert!(unwrap_sample::<State>(&bad, "other".into(), &mut warned).is_none());
+        assert_eq!(warned.len(), 2, "each source is warned about separately");
+    }
+
+    /// An undecodable payload is skipped rather than killing the subscription — the bytes come off a
+    /// bus anyone can write to.
+    #[test]
+    fn an_undecodable_payload_is_skipped() {
+        let mut warned = HashSet::new();
+        // A valid fingerprint with garbage behind it: the fingerprint check cannot catch this.
+        let broken = sample(vec![0xff, 0xff, 0xff], fingerprint(State::SCHEMA));
+        assert!(unwrap_sample::<State>(&broken, "src".into(), &mut warned).is_none());
+        assert!(
+            warned.is_empty(),
+            "that is a decode failure, not a mismatch"
+        );
+    }
+
+    /// `latest(n)` keeps the newest n and drops the oldest — the opposite of the default Fifo, and the
+    /// reason a GUI reading a high-rate state at frame rate does not stall the whole launch.
+    #[tokio::test]
+    async fn ring_keeps_the_newest_and_drops_the_oldest() {
+        let ring = Ring::new(2);
+        for x in 1..=4i32 {
+            ring.push(sample(State { x }.encode_to_vec(), None));
+        }
+        let mut got = Vec::new();
+        for _ in 0..2 {
+            let s = ring.pop().await;
+            got.push(State::decode(s.payload.as_slice()).unwrap().x);
+        }
+        assert_eq!(got, [3, 4], "the two newest, in order");
+    }
+
+    /// `pop` registers its waiter before looking at the queue, so a push racing with an empty read is
+    /// never missed.
+    #[tokio::test]
+    async fn ring_pop_waits_for_a_later_push() {
+        let ring = std::sync::Arc::new(Ring::new(4));
+        let pusher = {
+            let ring = std::sync::Arc::clone(&ring);
+            tokio::spawn(async move {
+                tokio::task::yield_now().await;
+                ring.push(sample(State { x: 9 }.encode_to_vec(), None));
+            })
+        };
+        let s = ring.pop().await;
+        assert_eq!(State::decode(s.payload.as_slice()).unwrap().x, 9);
+        pusher.await.unwrap();
     }
 }

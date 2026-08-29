@@ -1,10 +1,10 @@
-//! `Engine` の適合テスト —— 同じ関数を全エンジンに流す。
+//! The `Engine` conformance test — one function, run against every engine.
 //!
-//! 5 操作 + reiny の上のロジック(latest(n) / cancel-safety / latched / service 往復 /
-//! presence / 指紋)が、エンジンを差し替えても同じに見えることを固定する。エンジンを足す人は
-//! この 1 本を通せばよい: feature `conformance` で公開されるので、他クレートのテストから
-//! `reiny::engine::conformance::{cloudy, exercise}` を呼ぶ。`Local` は同一プロセス、`Zenoh` は
-//! ループバック 37453(`e2e.rs` の 37447 / `rpc_e2e.rs` の 37449 とは別)。
+//! It pins that the five operations plus the logic above them (latest(n) / cancel-safety / latched /
+//! a service round trip / presence / fingerprints) look the same whichever engine is underneath.
+//! Someone adding an engine only has to pass this one: it is public behind the `conformance` feature,
+//! so another crate's tests can call `reiny::engine::conformance::{cloudy, exercise}`. `Local` runs
+//! in-process, `Zenoh` on loopback 37453 (apart from `e2e.rs`'s 37447 and `rpc_e2e.rs`'s 37449).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,7 +76,7 @@ const DOMAIN: &str = "conf";
 const SETTLE: Duration = Duration::from_millis(600);
 const PATIENCE: Duration = Duration::from_secs(5);
 
-/// `engine` の上に launch `id`(domain は `conf`)を組む。
+/// Build the launch `id` on top of `engine` (in the domain `conf`).
 pub async fn cloudy(engine: Arc<dyn Engine>, id: &str) -> Cloudy {
     Cloudy::new(
         engine,
@@ -90,12 +90,12 @@ pub async fn cloudy(engine: Arc<dyn Engine>, id: &str) -> Cloudy {
     .expect("cloudy")
 }
 
-/// 適合テスト本体。`a` / `b` は同じバスに乗った別の launch(id `a` / `b`)。通らなければ panic。
-#[allow(clippy::too_many_lines)] // 1 本で通す(エンジンごとに 1 回)ので長い。
+/// The conformance body. `a` / `b` are two launches (ids `a` / `b`) on the same bus. It panics on failure.
+#[allow(clippy::too_many_lines)] // one pass end to end (run once per engine), hence long
 pub async fn exercise(a: Cloudy, b: Cloudy) {
     tokio::time::sleep(SETTLE).await;
 
-    // --- launch presence: Cloudy::new が @launch を立てている ---
+    // --- launch presence: Cloudy::new raised @launch ---
     let launches = a
         .engine()
         .alive(&Key::launch(DOMAIN, None), PATIENCE)
@@ -105,7 +105,7 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
     ids.sort();
     assert_eq!(ids, ["a", "b"]);
 
-    // --- publish → subscribe、source が付く ---
+    // --- publish → subscribe, with the source attached ---
     let probe = a.publish::<Probe>().expect("publisher");
     let mut plain = b.subscribe::<Probe>().expect("subscriber");
     tokio::time::sleep(SETTLE).await;
@@ -117,7 +117,7 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
     assert_eq!(envelope.value.seq, 1);
     assert_eq!(envelope.source, "a");
 
-    // --- cancel-safety: 途中で捨てた recv の後も次の sample は失われない ---
+    // --- cancel-safety: a recv dropped half-way loses no later sample ---
     assert!(
         timeout(Duration::from_millis(200), plain.recv())
             .await
@@ -132,7 +132,7 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
         Some(2)
     );
 
-    // --- latest(2): 溢れたら最古を捨てる ---
+    // --- latest(2): the oldest is dropped on overflow ---
     let mut ring = b.subscriber::<Probe>().latest(2).build().expect("ring");
     tokio::time::sleep(SETTLE).await;
     for seq in 10..15 {
@@ -142,7 +142,38 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
     assert_eq!(ring.recv().await.map(|p| p.seq), Some(13));
     assert_eq!(ring.recv().await.map(|p| p.seq), Some(14));
 
-    // --- presence: publishers() と watch(history → Joined、drop → Left) ---
+    // --- and it says so: dropping the oldest is silent apart from these counters ---
+    let ring_stats = ring.stats();
+    assert_eq!(
+        (ring_stats.received, ring_stats.dropped, ring_stats.blocked),
+        (5, 3, 0),
+        "5 samples into a ring of 2"
+    );
+
+    // --- subscriber presence (`@sub`): who is listening, publisher or no publisher ---
+    // `Sum` has neither a publisher nor another subscriber here, so the answer is unambiguous.
+    assert!(
+        a.subscribers::<Sum>()
+            .await
+            .expect("subscribers")
+            .is_empty()
+    );
+    let mut watch_subs = a.watch_subscribers::<Sum>().expect("watch subscribers");
+    let listener = b.subscribe::<Sum>().expect("subscriber");
+    assert_eq!(
+        timeout(PATIENCE, watch_subs.recv()).await.expect("join"),
+        Some(PresenceEvent::Joined("b".to_string()))
+    );
+    assert_eq!(a.subscribers::<Sum>().await.expect("subscribers"), ["b"]);
+    // A listener is not a publisher: `@sub` must not leak into the type's own key.
+    assert!(a.publishers::<Sum>().await.expect("publishers").is_empty());
+    drop(listener);
+    assert_eq!(
+        timeout(PATIENCE, watch_subs.recv()).await.expect("leave"),
+        Some(PresenceEvent::Left("b".to_string()))
+    );
+
+    // --- presence: publishers() and watch (history → Joined, drop → Left) ---
     assert_eq!(b.publishers::<Probe>().await.expect("publishers"), ["a"]);
     let mut watch = b.watch_publishers::<Probe>().expect("watch");
     assert_eq!(
@@ -161,7 +192,7 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
             .is_empty()
     );
 
-    // --- latched(Qos::STATE): 遅れて来た購読者が直近値を受け取る ---
+    // --- latched (Qos::STATE): a late subscriber receives the most recent value ---
     let state = a
         .publisher::<Probe>()
         .qos(Qos::STATE)
@@ -180,7 +211,7 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
         .expect("stream open");
     assert_eq!((envelope.value.seq, envelope.source.as_str()), (42, "a"));
 
-    // --- 指紋: 同じトピックでも形が違えば届かない ---
+    // --- fingerprints: same topic, different shape, nothing arrives ---
     let stamped = a.publish::<StampedV1>().expect("stamped publisher");
     let mut same = b.subscribe::<StampedV1>().expect("same");
     let mut different = b.subscribe::<StampedV2>().expect("different");
@@ -200,7 +231,7 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
         "mismatching fingerprint must be dropped"
     );
 
-    // --- service: 往復 / reply_err / 居ない宛先 / 返さず drop / 保留 → Timeout ---
+    // --- services: round trip / reply_err / a destination that is not there / dropped / held → Timeout ---
     let mut server = a.serve::<Add>().expect("serve");
     let server_task = tokio::spawn(async move {
         let mut held = Vec::new();
@@ -248,7 +279,7 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
         Err(CallError::NoReply)
     ));
 
-    // --- shutdown: recv が None で抜ける ---
+    // --- shutdown: recv returns None and the loop falls out ---
     b.shutdown_now();
     assert_eq!(timeout(PATIENCE, plain.recv()).await.expect("recv"), None);
     a.shutdown_now();

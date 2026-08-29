@@ -1,9 +1,9 @@
-//! Services(0.4.0)の e2e: server 1 + client 2 を実際に zenoh で繋ぎ、往復・宛先指定・
-//! `reply_err` → `Remote`・返さずに drop → `NoReply`・保留 → `Timeout`・指紋違い・
-//! `servers()` / `watch_servers()`・**latched publish と serve の同居**を 1 本で通す。
+//! The services (0.4.0) e2e: one server and two clients over real zenoh, covering the round trip,
+//! addressing, `reply_err` → `Remote`, dropped unanswered → `NoReply`, held → `Timeout`, a fingerprint
+//! mismatch, `servers()` / `watch_servers()`, and **a latched publish coexisting with a serve**.
 //!
-//! `e2e.rs` と同じ理由で `src/` に置く(private な `Cloudy::new` が要る)。ポートは e2e の
-//! 37447 / `bag_e2e` の 37448 の次。
+//! It lives in `src/` for the same reason as `e2e.rs` (it needs the private `Cloudy::new`). The port is
+//! the next one after e2e's 37447 and `bag_e2e`'s 37448.
 
 use std::time::Duration;
 
@@ -35,12 +35,12 @@ impl Topic for Sum {
     const SCHEMA: Option<u64> = Some(0x5555_5555_5555_5555);
 }
 
-/// 手書き `impl Service` —— 第三者型が 1 行で参加できることの回帰でもある。
+/// A hand-written `impl Service` — also a regression test for a third-party type joining in one line.
 impl Service for Add {
     type Response = Sum;
 }
 
-/// 同じトピックだが **指紋が違う** request。別プロジェクトの同名型を再現する。
+/// The same topic with a **different fingerprint** request. It recreates another project's same-named type.
 #[derive(Clone, PartialEq, prost::Message)]
 struct AddV2 {
     #[prost(int64, tag = "1")]
@@ -58,7 +58,7 @@ impl Service for AddV2 {
     type Response = Sum;
 }
 
-/// latched publish と serve を **同じ型**でやる launch の再現。
+/// A launch that latched-publishes and serves **the same type**.
 #[derive(Clone, PartialEq, prost::Message)]
 struct Cfg {
     #[prost(uint32, tag = "1")]
@@ -112,14 +112,14 @@ const SETTLE: Duration = Duration::from_millis(600);
 const PATIENCE: Duration = Duration::from_secs(5);
 
 #[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::too_many_lines)] // 1 本で通す(ポートを増やさない)ので長い。
+#[allow(clippy::too_many_lines)] // one pass end to end (so as not to add another port), hence long
 async fn services_round_trip_presence_and_latched_coexistence() {
     let server = cloudy(session(true).await, "srv").await;
     let client = cloudy(session(false).await, "cli").await;
     let other = cloudy(session(false).await, "cli2").await;
     crate::e2e::wait_peers(server.session().expect("zenoh engine"), 2).await;
 
-    // --- server: b の値で振る舞いを変える(正常 / reply_err / 返さず drop / 保留) ---
+    // --- the server: b's value picks the behavior (normal / reply_err / dropped / held) ---
     let mut srv = server.serve::<Add>().expect("serve");
     let server_task = tokio::spawn(async move {
         let mut held = Vec::new();
@@ -132,11 +132,11 @@ async fn services_round_trip_presence_and_latched_coexistence() {
                 _ => req.reply(Sum { sum: a + b }).await.expect("reply"),
             }
         }
-        // srv(= liveliness token)はここで drop される。
+        // srv (= the liveliness token) is dropped here.
     });
     tokio::time::sleep(SETTLE).await;
 
-    // --- presence: server は servers() に出て、publishers() には混ざらない ---
+    // --- presence: a server shows up in servers() and never in publishers() ---
     assert_eq!(client.servers::<Add>().await.expect("servers"), ["srv"]);
     assert!(
         client
@@ -144,10 +144,10 @@ async fn services_round_trip_presence_and_latched_coexistence() {
             .await
             .expect("publishers")
             .is_empty(),
-        "@service トークンは publisher の一覧に見えてはいけない"
+        "an @service token must not appear in the publisher list"
     );
 
-    // --- 往復(任意の server / 宛先指定) ---
+    // --- the round trip (any server / an addressed one) ---
     let sum = timeout(PATIENCE, client.call::<Add>(Add { a: 2, b: 3 }))
         .await
         .expect("call should return")
@@ -163,7 +163,7 @@ async fn services_round_trip_presence_and_latched_coexistence() {
         11
     );
 
-    // --- 居ない宛先 / reply_err / 返さずに drop / 保留 ---
+    // --- a destination that is not there / reply_err / dropped unanswered / held ---
     let nobody = client
         .caller::<Add>()
         .to("ghost")
@@ -189,7 +189,7 @@ async fn services_round_trip_presence_and_latched_coexistence() {
     let held = impatient.call(Add { a: 1, b: 7 }).await;
     assert!(matches!(held, Err(CallError::Timeout)), "{held:?}");
 
-    // --- 指紋違いの request は黙って捨てず、エラーで応える(NoReply に見せない) ---
+    // --- a request with a mismatched fingerprint is answered with an error, not silently dropped ---
     let mismatched = other
         .caller::<AddV2>()
         .to("srv")
@@ -200,7 +200,7 @@ async fn services_round_trip_presence_and_latched_coexistence() {
         Err(CallError::Remote(m)) if m.contains("fingerprint")
     ));
 
-    // --- watch_servers: Joined → (server 終了) → Left ---
+    // --- watch_servers: Joined → (the server ends) → Left ---
     let mut watch = client.watch_servers::<Add>().expect("watch_servers");
     assert_eq!(
         timeout(PATIENCE, watch.recv()).await.expect("join event"),
@@ -214,7 +214,7 @@ async fn services_round_trip_presence_and_latched_coexistence() {
     );
     assert!(client.servers::<Add>().await.expect("servers").is_empty());
 
-    // --- 同じ型を latched publish しつつ serve する launch ---
+    // --- a launch that latched-publishes and serves the same type ---
     let cfg_pub = other
         .publisher::<Cfg>()
         .latched()
@@ -229,7 +229,7 @@ async fn services_round_trip_presence_and_latched_coexistence() {
         }
     });
     tokio::time::sleep(SETTLE).await;
-    // latched 購読者(payload 無しの get)には直近値だけが届き、service は黙っている。
+    // A latched subscriber (a payload-less get) receives only the most recent value; the service stays quiet.
     let mut late = client
         .subscriber::<Cfg>()
         .latched()
@@ -244,9 +244,9 @@ async fn services_round_trip_presence_and_latched_coexistence() {
         timeout(Duration::from_millis(500), late.recv())
             .await
             .is_err(),
-        "service の queryable が latched の get に応えてはいけない"
+        "a service queryable must not answer a latched get"
     );
-    // 呼び出し(payload 有り)には service だけが応え、latched の直近値は混ざらない。
+    // A call (with a payload) is answered only by the service; the latched value never mixes in.
     let resp = client
         .caller::<Cfg>()
         .to("cli2")
@@ -255,7 +255,7 @@ async fn services_round_trip_presence_and_latched_coexistence() {
         .call(Cfg { rev: 5 })
         .await
         .expect("call cfg");
-    assert_eq!(resp.rev, 105, "latched の直近値(1)が応答に化けている");
+    assert_eq!(resp.rev, 105, "the latched value (1) leaked into the reply");
 
     other.shutdown_now();
     cfg_task.await.expect("cfg task");

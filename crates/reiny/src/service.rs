@@ -1,17 +1,17 @@
-//! 型付き request/response —— **request 型がサービスの住所**。
+//! Typed request/response — **the request type is the service's address**.
 //!
 //! ```text
 //! server : respond  reiny/<domain>/<id>/<Req>      (+ liveliness  reiny/<domain>/<id>/<Req>/@service)
-//! client : query    reiny/<domain>/<id|*>/<Req>    payload = Req、応答 payload = Req::Response
+//! client : query    reiny/<domain>/<id|*>/<Req>    payload = Req, reply payload = Req::Response
 //! ```
 //!
-//! publish と同じキー形なので、宛先指定([`CallerBuilder::to`])も presence
-//! ([`Cloudy::servers`] / [`Cloudy::watch_servers`])も pub/sub と同じ仕組みで効く。
-//! latched publisher(`pubsub.rs`)と同じキーを共有できる —— 区別は **payload の有無**で、
-//! latched 購読者の `get` は payload 無し、service の呼び出しは必ず payload 有り。
+//! It is the same key shape as publishing, so addressing ([`CallerBuilder::to`]) and presence
+//! ([`Cloudy::servers`] / [`Cloudy::watch_servers`]) work through the same machinery as pub/sub.
+//! It can even share a key with a latched publisher (`pubsub.rs`) — they are told apart by **whether
+//! there is a payload**: a latched subscriber's `get` carries none, a service call always does.
 //!
-//! 相関・タイムアウト・「返さずに drop したら応答ゼロ」はエンジンの query が持っているので、
-//! reiny が足すのは encode / decode と指紋の照合だけ。
+//! Correlation, timeouts and "dropped without answering = no replies" belong to the engine's query, so
+//! all reiny adds is encode / decode and the fingerprint check.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -25,29 +25,29 @@ use crate::pubsub::{attachment_fingerprint, declare_schema, fingerprint};
 use crate::shutdown::Shutdown;
 use crate::{Cloudy, Result, Service, Topic};
 
-/// zenoh の `get` の既定と同じ。
+/// The same as zenoh's `get` default.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
-/// エンジン側の query 期限を自分の期限よりこれだけ後ろに置く(先に自分の timer が切れるように)。
+/// How far behind our own deadline the engine's query deadline is put (so our timer fires first).
 const ENGINE_TIMEOUT_MARGIN: Duration = Duration::from_secs(1);
-/// 受けた request を溜めておく深さ。zenoh の queryable の既定チャネルと同じ。
+/// How many received requests are buffered. The same as zenoh's default queryable channel.
 const QUERY_CAPACITY: usize = 256;
 
 // ---------------------------------------------------------------------------
 // server
 // ---------------------------------------------------------------------------
 
-/// 型付き server。[`Cloudy::serve`] で得る。
+/// A typed server. Obtained from [`Cloudy::serve`].
 ///
-/// drop すると liveliness トークンも落ち、[`Cloudy::watch_servers`] に `Left` が届く。
+/// Dropping it drops the liveliness token too, and [`Cloudy::watch_servers`] reports a `Left`.
 pub struct Server<S> {
     rx: flume::Receiver<Box<dyn RawQuery>>,
-    /// queryable の取っ手(保持するだけ)。
+    /// The queryable handle (merely held).
     _guard: Guard,
-    /// server と生死を共にする presence トークン(保持するだけ)。
+    /// The presence token that lives and dies with the server (merely held).
     _token: Guard,
-    /// request / response の `DESCRIPTOR` があるときだけ立つ `@schema` queryable(保持するだけ)。
+    /// The `@schema` queryable, declared only when the request / response have a `DESCRIPTOR` (merely held).
     _schema: Vec<Guard>,
-    /// 自分のキー。応答はこのキーで返す(問い合わせキー `reiny/<domain>/*/<Req>` と交差する)。
+    /// Our own key. Replies go back on it (it intersects the query key `reiny/<domain>/*/<Req>`).
     key: Key,
     shutdown: Shutdown,
     _marker: PhantomData<S>,
@@ -68,12 +68,12 @@ impl<S: Service> Server<S> {
         let guard = engine.respond(
             &key,
             Box::new(move |query| {
-                // 満杯なら engine のスレッドをブロックする(zenoh の queryable チャネルと同じ)。
+                // When it is full, block the engine's thread (as zenoh's queryable channel does).
                 let _ = tx.send(query);
             }),
         )?;
         let token = engine.declare_alive(&key.with_chunk(SERVICE_CHUNK))?;
-        // `reiny service call` が JSON ↔ proto を組むのに request / response 両方の descriptor が要る。
+        // `reiny service call` needs both descriptors to translate between JSON and proto.
         let mut schema = Vec::new();
         for descriptor in [S::DESCRIPTOR, S::Response::DESCRIPTOR]
             .into_iter()
@@ -93,11 +93,11 @@ impl<S: Service> Server<S> {
         })
     }
 
-    /// 次の request を待つ。シャットダウンかチャネル終端で `None`。
+    /// Wait for the next request. `None` on shutdown or once the channel ends.
     ///
-    /// decode できない request は警告して読み飛ばす(呼び出し側には `reply_err` が返る)。
-    /// **指紋不一致も `reply_err`** —— 購読のように黙って捨てると、呼び出し側は応答ゼロを
-    /// 「server が居ない」と誤診する。payload の無い query(latched 購読者の `get`)は無視する。
+    /// A request that does not decode is warned about and skipped (the caller gets a `reply_err`).
+    /// **A fingerprint mismatch is a `reply_err` too** — dropping it silently, as a subscription would,
+    /// would leave the caller misreading "no replies" as "no server". A payload-less query (a latched
     pub async fn recv(&mut self) -> Option<Request<S>> {
         loop {
             let query = tokio::select! {
@@ -150,22 +150,22 @@ fn reply_err(query: Box<dyn RawQuery>, message: String) {
     }
 }
 
-/// 受け取った request。[`Request::reply`] / [`Request::reply_err`] のどちらかで消費する。
+/// A received request. Consume it with either [`Request::reply`] or [`Request::reply_err`].
 ///
-/// どちらも呼ばずに drop するとエンジンが query を finalize し、呼び出し側は
-/// [`CallError::NoReply`] を受け取る —— 「返し忘れ」はハングにならない。
+/// Dropping it without calling either makes the engine finalize the query, and the caller receives a
+/// [`CallError::NoReply`] — forgetting to answer never turns into a hang.
 pub struct Request<S: Service> {
-    /// decode 済みの request 本体。
+    /// The decoded request itself.
     pub value: S,
     query: Box<dyn RawQuery>,
     key: Key,
 }
 
-// `reply` / `reply_err` は 0.4 からの API で `async fn`。今のエンジンに await 地点は無いが、
-// エンジンが本当に待つ日のために形を残す。
+// `reply` / `reply_err` have been `async fn` since 0.4. No engine today has an await point in them, but
+// the shape is kept for the day one really does wait.
 #[allow(clippy::unused_async)]
 impl<S: Service> Request<S> {
-    /// 応答を返す。`S::Response::SCHEMA` があれば指紋を attachment に載せる。
+    /// Send the reply. With an `S::Response::SCHEMA`, the fingerprint rides in the attachment.
     pub async fn reply(self, response: S::Response) -> Result<()> {
         self.query.reply(
             &self.key,
@@ -174,7 +174,7 @@ impl<S: Service> Request<S> {
         )
     }
 
-    /// エラーで応える。呼び出し側には [`CallError::Remote`] としてこの文字列が届く。
+    /// Answer with an error. The caller receives this string as [`CallError::Remote`].
     pub async fn reply_err(self, message: impl Into<String>) -> Result<()> {
         self.query.reply_err(message.into().into_bytes())
     }
@@ -184,8 +184,8 @@ impl<S: Service> Request<S> {
 // client
 // ---------------------------------------------------------------------------
 
-/// [`Cloudy::caller`] が返す builder。何も指定しなければ [`Cloudy::call`] と同じ。
-#[must_use = "builder は .build() するまで何もしない"]
+/// The builder [`Cloudy::caller`] returns. With nothing set it is [`Cloudy::call`].
+#[must_use = "a builder does nothing until .build()"]
 pub struct CallerBuilder<'a, S> {
     cloudy: &'a Cloudy,
     to: Option<String>,
@@ -203,20 +203,20 @@ impl<'a, S> CallerBuilder<'a, S> {
         }
     }
 
-    /// 特定の launch id の server だけに撃つ。未指定は同 domain の全 server に撃ち、
-    /// **最初の応答を採る** —— server が 2 つ以上居る構成ではこちらで選ぶこと。
+    /// Fire only at one launch id's server. Unset, it fires at every server in the domain and
+    /// **takes the first reply** — with two or more servers around, pick here.
     pub fn to(mut self, id: impl Into<String>) -> Self {
         self.to = Some(id.into());
         self
     }
 
-    /// 応答を待つ上限(既定 10 s = zenoh の既定)。超えると [`CallError::Timeout`]。
+    /// The limit on waiting for a reply (default 10 s, zenoh's own). Past it, [`CallError::Timeout`].
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
-    /// caller を組む。宣言を伴わない(query は都度撃つ)ので失敗しない。
+    /// Build the caller. It declares nothing (a query is fired per call), so it cannot fail.
     #[must_use]
     pub fn build(self) -> Caller<S>
     where
@@ -231,7 +231,7 @@ impl<'a, S> CallerBuilder<'a, S> {
     }
 }
 
-/// 型付き client。[`Cloudy::caller`] で組む。`Cloudy` を借りないので構造体に持てる。
+/// A typed client, built by [`Cloudy::caller`]. It borrows no `Cloudy`, so it can live in a struct.
 pub struct Caller<S> {
     engine: Arc<dyn Engine>,
     key: Key,
@@ -240,10 +240,10 @@ pub struct Caller<S> {
 }
 
 impl<S: Service> Caller<S> {
-    /// request を送って応答を待つ。
+    /// Send the request and wait for the reply.
     pub async fn call(&self, request: S) -> std::result::Result<S::Response, CallError> {
-        // 期限は自分の timer で切り(→ `Timeout`)、エンジン側の期限はその外に置く ——
-        // zenoh は期限切れも「応答ゼロ」としか見せず、`NoReply` と区別できないため。
+        // Our own timer decides the deadline (→ `Timeout`) and the engine's deadline sits outside it —
+        // zenoh shows its own expiry as nothing but "no replies", indistinguishable from `NoReply`.
         let params = QueryParams {
             payload: Some(request.encode_to_vec()),
             attachment: fingerprint(S::SCHEMA),
@@ -257,7 +257,7 @@ impl<S: Service> Caller<S> {
             .await
             .map_err(|_| CallError::Timeout)?
         else {
-            // 列が閉じた = 該当 responder が全部 finalize した(server 不在 / 返さず drop)。
+            // The stream closed = every matching responder finalized (no server, or dropped unanswered).
             return Err(CallError::NoReply);
         };
         match reply {
@@ -278,26 +278,26 @@ impl<S: Service> Caller<S> {
     }
 }
 
-/// [`Caller::call`] の失敗。`Remote` / `NoReply` を潰さないのは、呼び出し側が
-/// 「server が居ない」と「server が断った」を分岐したい場面(GUI のボタン活性など)があるから。
+/// A [`Caller::call`] failure. `Remote` / `NoReply` are kept apart because callers do branch on
+/// "there is no server" versus "the server refused" (whether to enable a GUI button, say).
 #[derive(Debug)]
 pub enum CallError {
-    /// 応答が 1 つも来なかった: server 不在、または server が返さずに drop した。
+    /// Not one reply arrived: no server, or a server that dropped the request without answering.
     NoReply,
-    /// タイムアウトまでに応答が無かった。
+    /// No reply before the timeout.
     Timeout,
-    /// server が [`Request::reply_err`] した。中身は server が渡した文字列。
+    /// The server called [`Request::reply_err`]. The payload is the string it passed.
     Remote(String),
-    /// 応答の指紋が `Response::SCHEMA` と違う。
+    /// The reply's fingerprint differs from `Response::SCHEMA`.
     Schema {
-        /// 自分の `Response::SCHEMA`。
+        /// Our own `Response::SCHEMA`.
         expected: u64,
-        /// 応答に載っていた指紋。
+        /// The fingerprint that rode on the reply.
         received: u64,
     },
-    /// 応答が `Response` として decode できない。
+    /// The reply does not decode as `Response`.
     Decode(prost::DecodeError),
-    /// エンジン層のエラー。
+    /// An engine-layer error.
     Engine(anyhow::Error),
 }
 
@@ -324,5 +324,61 @@ impl std::error::Error for CallError {
             Self::Engine(e) => Some(e.as_ref()),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)] // tests may fail by panicking
+mod tests {
+    use super::*;
+
+    /// The engine's deadline has to sit **behind** ours, or the engine's expiry (which looks exactly
+    /// like "no replies") would win the race and a timeout would be reported as `NoReply`.
+    #[test]
+    fn our_deadline_fires_before_the_engine_one() {
+        assert!(ENGINE_TIMEOUT_MARGIN > Duration::ZERO);
+        for timeout in [
+            Duration::from_millis(1),
+            Duration::from_secs(1),
+            DEFAULT_TIMEOUT,
+        ] {
+            assert!(timeout < timeout + ENGINE_TIMEOUT_MARGIN);
+        }
+    }
+
+    /// Every variant says which failure it is. `NoReply` and `Remote` in particular are what callers
+    /// branch on, so neither may read as the other.
+    #[test]
+    fn call_errors_describe_themselves() {
+        assert!(CallError::NoReply.to_string().contains("no reply"));
+        assert!(CallError::Timeout.to_string().contains("timed out"));
+        assert_eq!(
+            CallError::Remote("busy".into()).to_string(),
+            "server replied with error: busy"
+        );
+        let schema = CallError::Schema {
+            expected: 0xdead_beef,
+            received: 0x1234,
+        }
+        .to_string();
+        assert!(schema.contains("00000000deadbeef"), "{schema}");
+        assert!(schema.contains("0000000000001234"), "{schema}");
+    }
+
+    /// `Decode` and `Engine` carry a cause; the rest are self-contained. `{:#}` on an anyhow chain
+    /// relies on this.
+    #[test]
+    fn only_wrapping_variants_have_a_source() {
+        use std::error::Error;
+        let decode = CallError::Decode(prost::DecodeError::new("bad"));
+        assert!(decode.source().is_some());
+        assert!(
+            CallError::Engine(anyhow::anyhow!("boom"))
+                .source()
+                .is_some()
+        );
+        assert!(CallError::NoReply.source().is_none());
+        assert!(CallError::Timeout.source().is_none());
+        assert!(CallError::Remote("x".into()).source().is_none());
     }
 }

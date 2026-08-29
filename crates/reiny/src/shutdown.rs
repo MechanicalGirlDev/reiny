@@ -1,11 +1,11 @@
-//! 協調シャットダウン。Ctrl+C や明示トリガで立つ共有フラグ。
+//! Cooperative shutdown. A shared flag raised by Ctrl+C or by an explicit trigger.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::Notify;
 
-/// クローン可能な共有シャットダウンシグナル。
+/// A cloneable shared shutdown signal.
 #[derive(Clone, Default)]
 pub(crate) struct Shutdown {
     inner: Arc<Inner>,
@@ -18,29 +18,29 @@ struct Inner {
 }
 
 impl Shutdown {
-    /// 未トリガの新規シグナルを生成。
+    /// A fresh, untriggered signal.
     pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    /// シャットダウンを要求する（冪等）。
+    /// Request shutdown (idempotent).
     pub(crate) fn trigger(&self) {
         self.inner.flag.store(true, Ordering::SeqCst);
         self.inner.notify.notify_waiters();
     }
 
-    /// トリガ済みかをポーリングで確認する。
+    /// Poll whether it has been triggered.
     pub(crate) fn is_triggered(&self) -> bool {
         self.inner.flag.load(Ordering::SeqCst)
     }
 
-    /// トリガまで非同期に待つ（tokio コンポーネント用）。
+    /// Wait asynchronously until it is triggered (for tokio components).
     pub(crate) async fn wait(&self) {
         loop {
             if self.is_triggered() {
                 return;
             }
-            // notified() を作ってから再チェックし、trigger との取りこぼしを防ぐ。
+            // Re-check after creating notified() so a concurrent trigger cannot be missed.
             let notified = self.inner.notify.notified();
             if self.is_triggered() {
                 return;
@@ -51,7 +51,7 @@ impl Shutdown {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)] // テストは panic で失敗を表現してよい
+#[allow(clippy::expect_used, clippy::unwrap_used)] // tests may fail by panicking
 mod tests {
     use super::*;
     use std::time::Duration;

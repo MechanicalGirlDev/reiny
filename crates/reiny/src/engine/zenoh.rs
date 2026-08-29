@@ -1,5 +1,5 @@
-//! zenoh エンジン —— 0.4 までの `Cloudy` が直接やっていたことを [`Engine`] の形に移しただけ。
-//! wire(キー形・attachment・verbatim チャンク)は 0.4 のまま。
+//! The zenoh engine — what `Cloudy` used to do directly up to 0.4, moved into [`Engine`]'s shape.
+//! The wire (key shape, attachments, verbatim chunks) is unchanged from 0.4.
 
 use std::any::Any;
 use std::time::{Duration, UNIX_EPOCH};
@@ -16,25 +16,25 @@ use super::{
 };
 use crate::{Priority, Qos, Reliability, Result};
 
-/// zenoh セッションを [`Engine`] として。
+/// A zenoh session as an [`Engine`].
 pub struct Zenoh {
     session: Session,
 }
 
 impl Zenoh {
-    /// 設定からセッションを開く。
+    /// Open a session from a configuration.
     pub async fn open(config: zenoh::Config) -> Result<Self> {
         let session = zenoh::open(config).await.map_err(anyhow::Error::msg)?;
         Ok(Self { session })
     }
 
-    /// 開いてあるセッションを包む。
+    /// Wrap a session that is already open.
     #[must_use]
     pub fn from_session(session: Session) -> Self {
         Self { session }
     }
 
-    /// 内側のセッション。reiny が包んでいない zenoh 機能への逃げ道。
+    /// The session inside. The escape hatch to zenoh features reiny does not wrap.
     #[must_use]
     pub fn session(&self) -> &Session {
         &self.session
@@ -47,8 +47,8 @@ impl Engine for Zenoh {
     }
 
     fn publisher(&self, key: &Key, qos: &Qos) -> Result<Box<dyn RawPublisher>> {
-        // QoS setter は zenoh 側で `#[internal_trait]` により固有メソッドとしても生えているので、
-        // `QoSBuilderTrait` を import せず(= `internal` feature を開けず)に呼べる。
+        // zenoh's `#[internal_trait]` also grows the QoS setters as inherent methods, so they are
+        // callable without importing `QoSBuilderTrait` (= without opening the `internal` feature).
         let publisher = self
             .session
             .declare_publisher(key.to_string())
@@ -152,8 +152,8 @@ impl Engine for Zenoh {
     }
 
     fn query(&self, key: &Key, params: QueryParams) -> Result<Box<dyn RawReplies>> {
-        // consolidation は切る: reiny の応答はキーごとに別物で、同じキーの 2 応答も
-        // 「重複」ではなく「別の答え」(service)。
+        // Consolidation off: reiny's replies differ per key, and two replies on the same key are not
+        // "duplicates" but "different answers" (services).
         let mut get = self
             .session
             .get(key.to_string())
@@ -180,7 +180,7 @@ struct ZenohPublisher {
 
 impl RawPublisher for ZenohPublisher {
     fn put(&self, payload: Vec<u8>, attachment: Option<Vec<u8>>) -> Result<()> {
-        // attachment setter も `#[internal_trait]` の固有メソッド側を使う(trait import 不要)。
+        // The attachment setter likewise uses the inherent `#[internal_trait]` method (no trait import).
         let mut put = self.publisher.put(payload);
         if let Some(attachment) = attachment {
             put = put.attachment(attachment);
@@ -238,7 +238,7 @@ impl RawReplies for ZenohReplies {
     fn next(&mut self) -> BoxFuture<'_, Option<ReplyResult>> {
         Box::pin(async move {
             loop {
-                // flume の `recv_async` は cancel-safe(await 地点に取り出し済みの値を抱えない)。
+                // flume's `recv_async` is cancel-safe (no taken value is held across an await point).
                 let reply = self.replies.recv_async().await.ok()?;
                 match reply.result() {
                     Ok(sample) => {
@@ -253,7 +253,7 @@ impl RawReplies for ZenohReplies {
     }
 }
 
-/// zenoh の sample を engine の形に。キーが reiny の形でなければ `None`(他人の sample)。
+/// A zenoh sample in the engine's shape. `None` when the key is not reiny's (somebody else's sample).
 fn convert(sample: &ZSample) -> Option<Sample> {
     Some(Sample {
         key: Key::parse(sample.key_expr().as_str())?,
@@ -272,7 +272,7 @@ fn unix_ns(timestamp: &zenoh::time::Timestamp) -> Option<u64> {
         .and_then(|d| u64::try_from(d.as_nanos()).ok())
 }
 
-/// reiny の 5 段階を zenoh の 7 段階へ。`Normal` = zenoh の既定(`Data`)。
+/// reiny's five levels onto zenoh's seven. `Normal` = zenoh's default (`Data`).
 fn zenoh_priority(priority: Priority) -> ZPriority {
     match priority {
         Priority::RealTime => ZPriority::RealTime,
@@ -283,9 +283,9 @@ fn zenoh_priority(priority: Priority) -> ZPriority {
     }
 }
 
-/// `Reliability` は zenoh の `congestion_control` に落とす —— 輻輳で「捨てる / 待つ」が、
-/// 実際に効く唯一のノブだから。zenoh 自身の `reliability()` は再送をしない marker で、
-/// 1.10 でも `unstable`(`docs/design/0.5.0.md` §2.3)。
+/// `Reliability` lowers to zenoh's `congestion_control` — "drop or wait" under congestion is the only
+/// knob that actually takes effect. zenoh's own `reliability()` is a marker that retransmits nothing,
+/// and is still `unstable` in 1.10 (`docs/design/0.5.0.md` §2.3).
 fn zenoh_congestion(reliability: Reliability) -> CongestionControl {
     match reliability {
         Reliability::BestEffort => CongestionControl::Drop,
