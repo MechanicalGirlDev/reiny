@@ -97,7 +97,7 @@ clap = { version = "4", features = ["derive"] }
 
 # 設定ファイル(launch config の [launch] 節)
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "0.9"
 
 # プロセス横断の Ctrl+C ハンドラ
 ctrlc = "3"
