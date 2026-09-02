@@ -506,6 +506,7 @@ pub fn describe(dir: &Path) -> Result<Resolution> {
     };
 
     validate_no_topic_collision(&entries, &manifest_path)?;
+    validate_config(manifest.config.as_ref())?;
     let services = resolve_services(&manifest, &entries, &schema_parts, &manifest_path)?;
 
     Ok(Resolution {
@@ -554,6 +555,7 @@ fn resolve_for(manifest_dir: &Path, pkg_name: &str) -> Result<Resolution> {
     };
 
     validate_no_topic_collision(&entries, &manifest_path)?;
+    validate_config(manifest.config.as_ref())?;
     let services = resolve_services(&manifest, &entries, &schema_parts, &manifest_path)?;
 
     Ok(Resolution {
@@ -1553,6 +1555,8 @@ fn render_config(table: &toml::Table) -> Result<String> {
         rust_ty: &'static str,
         default_lit: String,
         getter: &'static str,
+        /// The TOML type name the override must have (as `Value::type_str` spells it), for the warn.
+        expected: &'static str,
         assign: String,
     }
 
@@ -1564,6 +1568,7 @@ fn render_config(table: &toml::Table) -> Result<String> {
                 rust_ty: "String",
                 default_lit: format!("{s:?}.to_string()"),
                 getter: "as_str",
+                expected: "string",
                 assign: "v.to_string()".to_string(),
             },
             toml::Value::Integer(i) => Field {
@@ -1571,6 +1576,7 @@ fn render_config(table: &toml::Table) -> Result<String> {
                 rust_ty: "u64",
                 default_lit: format!("{i}u64"),
                 getter: "as_integer",
+                expected: "integer",
                 assign: "v as u64".to_string(),
             },
             toml::Value::Float(fl) => Field {
@@ -1578,6 +1584,7 @@ fn render_config(table: &toml::Table) -> Result<String> {
                 rust_ty: "f64",
                 default_lit: format!("{fl}f64"),
                 getter: "as_float",
+                expected: "float",
                 assign: "v".to_string(),
             },
             toml::Value::Boolean(b) => Field {
@@ -1585,6 +1592,7 @@ fn render_config(table: &toml::Table) -> Result<String> {
                 rust_ty: "bool",
                 default_lit: format!("{b}"),
                 getter: "as_bool",
+                expected: "boolean",
                 assign: "v".to_string(),
             },
             other => bail!(
@@ -1610,16 +1618,18 @@ fn render_config(table: &toml::Table) -> Result<String> {
         writeln!(out, "                {}: {},", f.name, f.default_lit).ok();
     }
     out.push_str("            }\n        }\n    }\n");
-    out.push_str("    impl Config {\n        #[doc(hidden)]\n        pub fn __from_table(table: &::reiny::__toml::Table) -> Self {\n            let mut cfg = Self::default();\n");
+    // Walk the override table rather than the fields, so an unknown key and a wrong type are each
+    // reported (`reiny::__config`) instead of silently leaving the default in place.
+    out.push_str("    impl Config {\n        #[doc(hidden)]\n        pub fn __from_table(table: &::reiny::__toml::Table) -> Self {\n            let mut cfg = Self::default();\n            for (key, value) in table {\n                match key.as_str() {\n");
     for f in &fields {
         writeln!(
             out,
-            "            if let Some(v) = table.get({:?}).and_then(|x| x.{}()) {{ cfg.{} = {}; }}",
-            f.name, f.getter, f.name, f.assign
+            "                    {:?} => match value.{}() {{ Some(v) => cfg.{} = {}, None => ::reiny::__config::warn_type(key, {:?}, value) }},",
+            f.name, f.getter, f.name, f.assign, f.expected
         )
         .ok();
     }
-    out.push_str("            cfg\n        }\n    }\n}\n\n");
+    out.push_str("                    _ => ::reiny::__config::warn_unknown(key),\n                }\n            }\n            cfg\n        }\n    }\n}\n\n");
 
     // The `cloudy.config()` extension. The glob re-export brings it into scope.
     out.push_str(
@@ -1695,6 +1705,27 @@ fn ensure_rust_ident(name: &str, what: &str, section: &str) -> Result<()> {
         " — 先頭は英字か `_`、以降は英数字か `_` のみ、予約語は不可".to_string()
     };
     bail!("{section} の {what} `{name}` は Rust 識別子として無効です{hint}");
+}
+
+/// `[config]` keys become struct fields verbatim and only scalars have a Rust type to become, so both
+/// are checked at resolution time — `reiny check` reports them, not a rustc error in `reiny_generated.rs`.
+fn validate_config(config: Option<&toml::Table>) -> Result<()> {
+    for (key, val) in config.into_iter().flatten() {
+        ensure_rust_ident(key, "config key", "[config]")?;
+        if !matches!(
+            val,
+            toml::Value::String(_)
+                | toml::Value::Integer(_)
+                | toml::Value::Float(_)
+                | toml::Value::Boolean(_)
+        ) {
+            bail!(
+                "[config].{key}: unsupported value type {} (only string/int/float/bool)",
+                val.type_str()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Whether two different types were assigned the same topic segment (type name). Since type = topic, two
@@ -2659,6 +2690,38 @@ mod tests {
         let err = describe_err(f.root());
         assert!(err.contains("Reiny.toml"), "{err}");
         assert!(err.contains("no-manifest"), "{err}");
+    }
+
+    /// A `[config]` key becomes a struct field verbatim, so it is checked like the other identifiers
+    /// and the error names the section; a non-scalar value has no field type and is refused the same way.
+    #[test]
+    fn config_keys_are_idents_and_values_scalars() {
+        let manifest = |config: &str| {
+            format!(
+                r#"
+                [project]
+                name = "app"
+                version = "0.1.0"
+                [publications]
+                A = {{ proto = "proto/a.proto", message = "a.A" }}
+                [config]
+                {config}
+                "#
+            )
+        };
+        let f = Fixture::new("config-key");
+        f.write("proto/a.proto", "");
+        f.write("Reiny.toml", &manifest("delay-ms = 0"));
+        let err = describe_err(f.root());
+        assert!(err.contains("[config]"), "{err}");
+        assert!(err.contains("delay-ms"), "{err}");
+
+        let f = Fixture::new("config-value");
+        f.write("proto/a.proto", "");
+        f.write("Reiny.toml", &manifest("limits = { max = 1 }"));
+        let err = describe_err(f.root());
+        assert!(err.contains("[config].limits"), "{err}");
+        assert!(err.contains("table"), "{err}");
     }
 
     /// `[config]` and `[services]` reach the introspection view: `reiny check` prints both, and a

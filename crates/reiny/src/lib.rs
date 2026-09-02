@@ -100,6 +100,26 @@ macro_rules! schema {
 #[doc(hidden)]
 pub use toml as __toml;
 
+/// Called by that generated `config()` when an override in `--config` does not apply, so a typo or
+/// a wrong type shows up in the log instead of silently becoming the `[config]` default.
+#[doc(hidden)]
+pub mod __config {
+    /// The key is in `[config]` but the value's type is not the declared one.
+    pub fn warn_type(key: &str, expected: &str, value: &toml::Value) {
+        tracing::warn!(
+            key,
+            expected,
+            found = value.type_str(),
+            "--config: type mismatch, keeping the [config] default"
+        );
+    }
+
+    /// The key is not in `[config]` at all.
+    pub fn warn_unknown(key: &str) {
+        tracing::warn!(key, "--config: unknown key ignored (not in [config])");
+    }
+}
+
 /// reiny's result type. Failures all funnel into [`anyhow::Error`].
 pub type Result<T> = anyhow::Result<T>;
 
