@@ -1855,6 +1855,8 @@ dependencies = [
  "prost",
  "reiny-core",
  "reiny-macros",
+ "serde_json",
+ "serde_yaml",
  "tokio",
  "toml",
  "tracing",

@@ -1,8 +1,9 @@
 //! `reiny` — the CLI tying together launch scaffolding (`new`/`init`/`add`), `build`, `run` and `compress`.
 //!
-//! Backwards compatibility: `reiny --config <launch.toml>` and `reiny <launch.toml>` (a bare
-//! positional) both mean `reiny run <launch.toml>`. And when our own executable is not named `reiny`
-//! (= an artifact renamed by `compress --launcher`), it starts the neighbouring `<basename>.toml` with no arguments.
+//! Backwards compatibility: `reiny --config <launch.yaml>` and `reiny <launch.yaml>` (a bare
+//! positional) both mean `reiny run <launch.yaml>`. And when our own executable is not named `reiny`
+//! (= an artifact renamed by `compress --launcher`), it starts the neighbouring `<basename>.yaml`
+//! (or `.yml` / `.toml`) with no arguments.
 
 mod bagcmd;
 mod bridgecmd;
@@ -98,7 +99,7 @@ enum Command {
         /// The output directory.
         #[arg(long, default_value = "dist")]
         out: PathBuf,
-        /// Rename the bundled launcher to this and line the config up as `<name>.toml`.
+        /// Rename the bundled launcher to this and line the config up as `<name>.<ext>`.
         #[arg(long)]
         launcher: Option<String>,
         /// Bundle the system libraries too.
@@ -118,7 +119,7 @@ enum Command {
 }
 
 fn main() -> Result<()> {
-    // 1. A renamed launcher starting itself (`./ping-pong` → the neighbouring `ping-pong.toml`).
+    // 1. A renamed launcher starting itself (`./ping-pong` → the neighbouring `ping-pong.yaml`).
     if let Some(config) = renamed_launcher_config()? {
         init_tracing("info");
         return runcmd::run_self(&config);
@@ -185,7 +186,8 @@ fn main() -> Result<()> {
     }
 }
 
-/// When our executable is not named `reiny`, return the neighbouring `<basename>.toml` as the launch config.
+/// When our executable is not named `reiny`, return the neighbouring `<basename>.yaml` (or `.yml` /
+/// `.toml`, in that order) as the launch config.
 fn renamed_launcher_config() -> Result<Option<PathBuf>> {
     let exe = std::env::current_exe().context("resolving current_exe")?;
     let base = exe.file_stem().map(|s| s.to_string_lossy().into_owned());
@@ -196,14 +198,16 @@ fn renamed_launcher_config() -> Result<Option<PathBuf>> {
         return Ok(None);
     }
     let dir = exe.parent().unwrap_or_else(|| Path::new("."));
-    let config = dir.join(format!("{base}.toml"));
-    if config.is_file() {
-        Ok(Some(config))
-    } else {
-        anyhow::bail!(
-            "launcher '{base}' expects {} next to it (renamed launcher reads <name>.toml)",
-            config.display()
-        )
+    let found = ["yaml", "yml", "toml"]
+        .into_iter()
+        .map(|ext| dir.join(format!("{base}.{ext}")))
+        .find(|p| p.is_file());
+    match found {
+        Some(config) => Ok(Some(config)),
+        None => anyhow::bail!(
+            "launcher '{base}' expects {base}.yaml (or .yml / .toml) next to it in {}",
+            dir.display()
+        ),
     }
 }
 

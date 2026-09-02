@@ -31,7 +31,7 @@ let mut pongs = cloudy.subscribe::<Pong>()?; // reiny/*/Pong — 全 pong イン
 ```
 ping-pong-fanout/
 ├── Cargo.toml          # cargo ワークスペース(members = ping, pong)
-├── ping-pong.toml      # launch config(pong を 3 起動 + ping)
+├── ping-pong.yaml      # launch config(pong を 3 起動 + ping)
 ├── ping/               # Ping を broadcast、Pong を集約
 │   ├── Reiny.toml      # publications = Ping / dependencies = pong
 │   ├── proto/ping.proto
@@ -53,5 +53,5 @@ cargo run -p ping     # 3 つの返球がまとまって届く
 
 # または、ランチャでまとめて(pong×3 + ping)
 #   ※ あらかじめ cargo build してから、bin の置き場を --bin-dir で指す
-reiny --config ping-pong.toml --bin-dir target/debug
+reiny --config ping-pong.yaml --bin-dir target/debug
 ```

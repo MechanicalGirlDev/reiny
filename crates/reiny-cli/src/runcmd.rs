@@ -100,7 +100,7 @@ fn ready_session(plan: &LaunchPlan) -> Option<zenoh::Session> {
     }
 }
 
-/// `reiny run <launch.toml>`. It searches relative to the launch config, so a bin relative to wherever you `cd`ed is still found.
+/// `reiny run <launch.yaml>`. It searches relative to the launch config, so a bin relative to wherever you `cd`ed is still found.
 ///
 /// `ready_timeout` seconds is how long each `depends_on` dependency is waited for (`0` = start
 /// everything at once, which is what 0.5 did).
@@ -143,7 +143,7 @@ pub(crate) fn run(
     )
 }
 
-/// The path a renamed launcher (`./ping-pong`) takes to start its neighbouring `<name>.toml` with no
+/// The path a renamed launcher (`./ping-pong`) takes to start its neighbouring `<name>.yaml` with no
 /// arguments. Bins are looked for next to the launcher (dist) as well as in the project targets around the launch config.
 pub(crate) fn run_self(config: &Path) -> Result<()> {
     run(config, None, "info", DEFAULT_READY_TIMEOUT)
@@ -301,7 +301,7 @@ mod tests {
     fn collect_reads_per_project_declarations() {
         // In a per-project layout (an in-repo example), publications / dependencies::* reach the diagram.
         let cfg_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/ping-pong-ring");
-        let plan = LaunchPlan::from_launch_config(&cfg_dir.join("ping-pong.toml")).unwrap();
+        let plan = LaunchPlan::from_launch_config(&cfg_dir.join("ping-pong.yaml")).unwrap();
         let (flows, _services) = collect_flows(&cfg_dir, &plan);
         let ping = flows.iter().find(|f| f.name == "ping").expect("ping");
         assert!(
@@ -317,7 +317,7 @@ mod tests {
         // In the in-repo example workspace, the `[projects.*]` declarations reach the diagram.
         let cfg_dir =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/ping-pong-workspace");
-        let plan = LaunchPlan::from_launch_config(&cfg_dir.join("ping-pong.toml")).unwrap();
+        let plan = LaunchPlan::from_launch_config(&cfg_dir.join("ping-pong.yaml")).unwrap();
         let (flows, services) = collect_flows(&cfg_dir, &plan);
         assert!(services.is_empty());
         let ping = flows.iter().find(|f| f.name == "ping").expect("ping");

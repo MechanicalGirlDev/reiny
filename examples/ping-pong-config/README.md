@@ -27,21 +27,24 @@ pongs.send(Pong { message: cfg.reply.clone(), .. }).await?;
 ```
 
 既定値は `[config]`、**上書き** は起動時の設定ファイルです。launch config の
-`config = "pong.config.toml"` で渡すと、既定値の上に重なります。
+`config = "pong.config.yaml"` で渡すと、既定値の上に重なります。
 
-```toml
-# pong.config.toml(上書き)
-reply = "PONG!"
-delay_ms = 250
+```yaml
+# pong.config.yaml(上書き)
+reply: PONG!
+delay_ms: 250
 ```
+
+上書きファイルは YAML です。拡張子が `.toml` / `.json` ならその形式で読みます。
+`[config]` に無いキーや型の違う値は warn ログに出て、既定値のままです。
 
 ## レイアウト
 
 ```
 ping-pong-config/
 ├── Cargo.toml          # cargo ワークスペース(members = ping, pong)
-├── ping-pong.toml      # launch config(pong に config を渡す)
-├── pong.config.toml    # ★ 設定の上書き値
+├── ping-pong.yaml      # launch config(pong に config を渡す)
+├── pong.config.yaml    # ★ 設定の上書き値
 ├── ping/               # ふつうの ping
 └── pong/
     ├── Reiny.toml      # ★ [config] に既定値スキーマ
@@ -58,5 +61,5 @@ cargo run -p ping
 
 # ランチャでまとめて起動(reply="PONG!", delay=250ms)
 #   ※ あらかじめ cargo build してから、bin の置き場を --bin-dir で指す
-reiny --config ping-pong.toml --bin-dir target/debug
+reiny --config ping-pong.yaml --bin-dir target/debug
 ```

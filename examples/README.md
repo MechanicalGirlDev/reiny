@@ -19,7 +19,7 @@ reiny の使い方を示すサンプル集。どれも題材は最小の ping-po
   公開型・依存型)を持つ。
 - `#[reiny::main] async fn main(cloudy: Cloudy)` で起動。`cloudy.publish::<T>()` /
   `cloudy.subscribe::<T>()` は **型を渡すだけ**(reiny が型 → トピックを解決、文字列は出てこない)。
-- 各サンプルに、ランチャ `reiny`(reiny-launch)用の `ping-pong.toml`(launch config)を同梱。
+- 各サンプルに、ランチャ `reiny`(reiny-launch)用の `ping-pong.yaml`(launch config)を同梱。
 
 ## 一覧
 

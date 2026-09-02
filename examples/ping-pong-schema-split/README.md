@@ -42,5 +42,5 @@ reiny-build はこれを cargo の `links` メタで解く。
 ```sh
 cargo build
 reiny check          # 区画・所有・型 → トピック
-reiny ping-pong.toml
+reiny ping-pong.yaml
 ```

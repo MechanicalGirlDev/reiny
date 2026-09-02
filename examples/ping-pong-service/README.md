@@ -47,7 +47,7 @@ let sum = cloudy.call::<Add>(Add { a: 1, b: 2 }).await?;   // Sum
 
 ```sh
 cargo build
-reiny ping-pong-service.toml --bin-dir target/debug
+reiny ping-pong-service.yaml --bin-dir target/debug
 # または別々の端末で
 cargo run -p calc
 cargo run -p asker

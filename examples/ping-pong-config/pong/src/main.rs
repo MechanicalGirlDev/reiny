@@ -2,7 +2,7 @@
 //!
 //! 見どころ: 振る舞い(reply / delay_ms)をコードに埋め込まず、Reiny.toml の [config]
 //! で宣言した型付き設定として `cloudy.config()` から読む。既定値は [config]、上書きは
-//! 起動時の設定ファイル(launch config の `config = "pong.config.toml"`)。
+//! 起動時の設定ファイル(launch config の `config = "pong.config.yaml"`)。
 //!
 //! 注意: これは reiny の到達目標を示す設計サンプル。umbrella crate `reiny` と
 //! `reiny-build`(Reiny.toml パーサ + codegen)は未実装なので、まだビルドは通らない。

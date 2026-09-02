@@ -4,10 +4,10 @@
 # 「どの launch を一緒に動かすか」という *デプロイ* を表す(roslaunch 相当)。
 # キー = インスタンス名 = 既定 bin 名。
 #
-#   reiny ping-pong.toml
+#   reiny ping-pong.yaml
 #
-[launch]
-# pong を先に起動。落ちたら再起動。
-pong = { bin = "pong", on_exit = "respawn" }
-# ping は pong の後に起動する。
-ping = { bin = "ping", depends_on = ["pong"] }
+launch:
+  # pong を先に起動。落ちたら再起動。
+  pong: { bin: pong, on_exit: respawn }
+  # ping は pong の後に起動する。
+  ping: { bin: ping, depends_on: [pong] }

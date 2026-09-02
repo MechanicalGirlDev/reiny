@@ -6,7 +6,7 @@
 # 置き、[internals] を schema/ クレートが 1 度だけ prost コンパイルする。ping/pong はそれを
 # Cargo 依存として共有し、自前の proto 再コンパイルをしない(../ping-pong-workspace との差)。
 #
-# `reiny ping-pong.toml` で起動、`reiny check` でモードと型 → トピックを確認できる。
+# `reiny ping-pong.yaml` で起動、`reiny check` でモードと型 → トピックを確認できる。
 [workspace]
 resolver = "2"
 members = ["schema", "ping", "pong"]

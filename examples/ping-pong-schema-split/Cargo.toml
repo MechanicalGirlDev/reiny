@@ -9,7 +9,7 @@
 # 素直にやると msg 側にも Point が生成されて別の型になってしまう。reiny-build は geometry が
 # cargo の `links` メタで公開した FQN 一覧を読み、prost の extern_path に変換してこれを防ぐ。
 #
-# `reiny ping-pong.toml` で起動、`reiny check` で区画と型 → トピックを確認できる。
+# `reiny ping-pong.yaml` で起動、`reiny check` で区画と型 → トピックを確認できる。
 [workspace]
 resolver = "2"
 members = ["geometry", "msg", "ping", "pong"]

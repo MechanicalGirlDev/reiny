@@ -77,7 +77,7 @@ reiny には役割の違う 2 種類の TOML があります。
 | ファイル | 層 | 相当 | 役割 |
 | --- | --- | --- | --- |
 | `Reiny.toml`(各プロジェクト) | プロジェクトの身元 | Cargo.toml / package.xml | 名前・version・公開型・依存型を宣言 |
-| `ping-pong.toml`(ルート) | デプロイ | roslaunch | どの launch を一緒に起動するか(`[launch]`) |
+| `ping-pong.yaml`(ルート) | デプロイ | roslaunch | どの launch を一緒に起動するか(`[launch]`) |
 
 ランチャ(`reiny-launch` の `reiny` バイナリ)は launch config の `[launch]` を読み、
 各 launch を子プロセスとして起動します。ping-pong の launch config:
@@ -93,7 +93,7 @@ ping = { bin = "ping", depends_on = ["pong"] }
 ```
 ping-pong/
 ├── Cargo.toml          # cargo ワークスペース(members = ping, pong)
-├── ping-pong.toml      # launch config(reiny ランチャ用 / [launch])
+├── ping-pong.yaml      # launch config(reiny ランチャ用 / [launch])
 ├── ping/
 │   ├── Cargo.toml      # Rust パッケージ定義
 │   ├── Reiny.toml      # reiny プロジェクト宣言(name/version/publications/dependencies)
@@ -115,5 +115,5 @@ cargo run -p ping   # ping を起動(Ping を送信開始)
 
 # または、ランチャでまとめて(launch config の [launch] を起動)
 #   ※ あらかじめ cargo build してから、bin の置き場を --bin-dir で指す
-reiny --config ping-pong.toml --bin-dir target/debug
+reiny --config ping-pong.yaml --bin-dir target/debug
 ```

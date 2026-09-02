@@ -1,7 +1,7 @@
 # launch config — calc(server)と asker(client)をまとめて起動する。
 #
-#   reiny ping-pong-service.toml --bin-dir target/debug
+#   reiny ping-pong-service.yaml --bin-dir target/debug
 #
-[launch]
-calc = { bin = "calc", on_exit = "respawn" }
-asker = { bin = "asker", depends_on = ["calc"] }
+launch:
+  calc: { bin: calc, on_exit: respawn }
+  asker: { bin: asker, depends_on: [calc] }

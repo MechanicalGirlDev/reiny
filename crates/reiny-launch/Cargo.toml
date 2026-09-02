@@ -14,6 +14,8 @@ categories = ["development-tools", "command-line-utilities"]
 anyhow = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
+# Launch configs are YAML (`.toml` by extension). Same crate zenoh pulls in; swap for `serde_yaml_ng` with it.
+serde_yaml = "0.9"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

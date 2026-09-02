@@ -2,7 +2,8 @@
 //!
 //! It walks the launch config and gathers the reachable launch bins, the shared libraries they
 //! actually link, the launch config and **the reiny launcher itself** into `<out>/`. With
-//! `--launcher <name>`, reiny is renamed to `<name>` and the config lined up as `<name>.toml`, so `./<name>` alone starts everything.
+//! `--launcher <name>`, reiny is renamed to `<name>` and the config lined up as `<name>.<ext>`
+//! (the config's own extension, so its format is still told apart), so `./<name>` alone starts everything.
 
 use std::path::{Path, PathBuf};
 
@@ -11,7 +12,7 @@ use reiny_launch::LaunchPlan;
 
 use crate::runcmd::{config_dir, find_bin, search_dirs};
 
-/// `reiny compress <launch.toml> --out <dir> [--launcher <name>] [--include-system]`.
+/// `reiny compress <launch.yaml> --out <dir> [--launcher <name>] [--include-system]`.
 pub(crate) fn compress(
     config: &Path,
     out: &Path,
@@ -35,8 +36,13 @@ pub(crate) fn compress(
         launcher_dst.display()
     );
 
-    // 2. The launch config as <out>/<launcher>.toml (a renamed launcher reads it from its own name).
-    let cfg_dst = out.join(format!("{launcher_name}.toml"));
+    // 2. The launch config as <out>/<launcher>.<ext> (a renamed launcher reads it from its own name;
+    //    the extension travels with it so `.toml` stays TOML, and an extension-less file is the YAML it was).
+    let ext = config
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("yaml");
+    let cfg_dst = out.join(format!("{launcher_name}.{ext}"));
     copy_file(config, &cfg_dst)?;
     println!("  config    {} -> {}", config.display(), cfg_dst.display());
 

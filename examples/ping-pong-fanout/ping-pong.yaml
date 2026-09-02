@@ -4,10 +4,10 @@
 # reiny は起動時に連番 id(pong-1 / pong-2 / pong-3)を自動採番する。
 # ping はそれら全員より後に起動する。
 #
-#   reiny ping-pong.toml
+#   reiny ping-pong.yaml
 #
-[launch]
-pong-1 = { bin = "pong", on_exit = "respawn" }
-pong-2 = { bin = "pong", on_exit = "respawn" }
-pong-3 = { bin = "pong", on_exit = "respawn" }
-ping = { bin = "ping", depends_on = ["pong-1", "pong-2", "pong-3"] }
+launch:
+  pong-1: { bin: pong, on_exit: respawn }
+  pong-2: { bin: pong, on_exit: respawn }
+  pong-3: { bin: pong, on_exit: respawn }
+  ping: { bin: ping, depends_on: [pong-1, pong-2, pong-3] }

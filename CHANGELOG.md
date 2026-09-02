@@ -5,6 +5,28 @@ All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
 `reiny-launch`, `reiny-cli`).
 Versions are kept in lockstep via `[workspace.package].version`.
 
+## Unreleased
+
+### Added
+- **`reiny`** — `--config <path>` is read as YAML; a `.toml` or `.json` extension
+  selects that format instead. All three land in the same `toml::Table` through
+  serde, so the generated `config()` and `config_table()` are unchanged. A YAML
+  `null` has no TOML counterpart and rejects the file (warn, defaults apply).
+  **Breaking** for a TOML override without the `.toml` extension.
+- **`reiny-launch` / `reiny-cli`** — launch configs are YAML too (a `launch:`
+  mapping; same structs, so every key is spelled as before). A `.toml` extension
+  still reads TOML. A renamed launcher looks for `<name>.yaml`, then `.yml`, then
+  `.toml` next to itself, and `reiny compress` keeps the config's extension so the
+  bundle round-trips. The examples' `ping-pong.toml` are now `ping-pong.yaml`.
+
+### Changed
+- **`reiny-build`** — `[config]` keys are validated as Rust identifiers and values
+  as scalars at resolution time, so `reiny check` reports `delay-ms = 0` with a
+  hint at the section instead of a rustc syntax error in `reiny_generated.rs`.
+- **`reiny`** — an override in `--config` that does not apply is now logged: an
+  unknown key (not in `[config]`) and a type mismatch each get a `warn!` naming
+  the key, instead of silently keeping the default.
+
 ## 0.5.0 — 2026-08-29
 
 Two things at once, with a design record each: **taking zenoh's shape out of

@@ -26,6 +26,10 @@ zenoh = { workspace = true, optional = true }
 flume = "0.11"
 tokio = { workspace = true }
 toml = { workspace = true }
+# `--config` is YAML by default (`.toml` / `.json` by extension); all deserialize into one `toml::Table`.
+# serde_yaml is archived upstream but is what zenoh already pulls in; swap for `serde_yaml_ng` with zenoh.
+serde_yaml = "0.9"
+serde_json = "1"
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

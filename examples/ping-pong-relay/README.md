@@ -43,7 +43,7 @@ while let Some(ping) = incoming.recv().await {
 ```
 ping-pong-relay/
 ├── Cargo.toml          # cargo ワークスペース(members = ping, relay, pong)
-├── ping-pong.toml      # launch config(ping → relay → pong の起動順)
+├── ping-pong.yaml      # launch config(ping → relay → pong の起動順)
 ├── ping/               # source: publications = Ping
 ├── relay/              # transform: dependencies = Ping / publications = Relayed
 │   ├── proto/relayed.proto
@@ -62,5 +62,5 @@ cargo run -p ping
 
 # または、ランチャで起動順込みでまとめて
 #   ※ あらかじめ cargo build してから、bin の置き場を --bin-dir で指す
-reiny --config ping-pong.toml --bin-dir target/debug
+reiny --config ping-pong.yaml --bin-dir target/debug
 ```

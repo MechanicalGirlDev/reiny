@@ -268,23 +268,39 @@ where
     })
 }
 
-/// Read `--config <path>` and parse it as a TOML table. Unreadable or broken: warn and return `None`
+/// Read `--config <path>` and parse it into a TOML table. Unreadable or broken: warn and return `None`
 /// (= use only `[config]`'s defaults).
 fn load_config(path: Option<&Path>) -> Option<toml::Table> {
     let path = path?;
-    match std::fs::read_to_string(path) {
-        Ok(text) => match text.parse::<toml::Table>() {
-            Ok(table) => Some(table),
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "ignoring unparsable --config");
-                None
-            }
-        },
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "ignoring unreadable --config");
+            return None;
+        }
+    };
+    match parse_config(path, &text) {
+        Ok(table) => Some(table),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "ignoring unparsable --config");
             None
         }
     }
+}
+
+/// YAML is the format; `.toml` and `.json` are read by extension. All three deserialize into the
+/// same `toml::Table`, so the generated `config()` never sees the difference. A YAML `null` has no
+/// TOML counterpart and rejects the whole file.
+fn parse_config(path: &Path, text: &str) -> Result<toml::Table> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    Ok(match ext.as_deref() {
+        Some("toml") => text.parse::<toml::Table>()?,
+        Some("json") => serde_json::from_str(text)?,
+        _ => serde_yaml::from_str(text)?,
+    })
 }
 
 /// Wait for a termination signal. On unix it watches SIGTERM too (what launchers, containers and
@@ -328,6 +344,28 @@ mod tests {
 
     fn parse(args: &[&str]) -> RuntimeOptions {
         RuntimeOptions::from_arg_list("launch", args.iter().map(|s| (*s).to_string()))
+    }
+
+    /// YAML is the default (any extension but `.toml` / `.json`), and every format lands in the
+    /// same table. A file in the wrong format is an error (not an empty table).
+    #[test]
+    fn config_format_follows_the_extension() {
+        let yaml =
+            parse_config(Path::new("c.yaml"), "reply: PONG!\ndelay_ms: 250\n").expect("yaml");
+        assert_eq!(yaml["reply"].as_str(), Some("PONG!"));
+        assert_eq!(yaml["delay_ms"].as_integer(), Some(250));
+        let bare = parse_config(Path::new("pong.config"), "delay_ms: 250\n").expect("no ext");
+        assert_eq!(bare["delay_ms"].as_integer(), Some(250));
+        let json = parse_config(
+            Path::new("c.JSON"),
+            r#"{"reply": "PONG!", "delay_ms": 250}"#,
+        )
+        .expect("json");
+        assert_eq!(json["reply"].as_str(), Some("PONG!"));
+        assert_eq!(json["delay_ms"].as_integer(), Some(250));
+        let toml = parse_config(Path::new("c.toml"), "delay_ms = 250\n").expect("toml");
+        assert_eq!(toml["delay_ms"].as_integer(), Some(250));
+        assert!(parse_config(Path::new("c.yml"), "delay_ms = 250\n").is_err());
     }
 
     #[test]

@@ -68,14 +68,14 @@ Because the key is the Rust type, two crates sharing a type resolve to the same 
 
 - **`Cargo.toml`** — Rust build.
 - **`Reiny.toml`** — reiny's manifest: identity, published/dependency types, optional `[schema] crate` (workspace shared-schema crate), `[config]` schema + defaults. Read at build time by `reiny-build` (schema: `crates/reiny-build/src/lib.rs`, `Manifest`).
-- **launch config** (e.g. `ping-pong.toml`) — *deployment*: a `[launch]` table read by the launcher saying which launches to spawn together (`depends_on` = start after that launch is **up on the bus**, `on_exit`, etc.). Every key is an equal launch (no privileged component types); key = instance name = default bin name.
+- **launch config** (e.g. `ping-pong.yaml`) — *deployment*: a `launch:` table read by the launcher saying which launches to spawn together (`depends_on` = start after that launch is **up on the bus**, `on_exit`, etc.). Every key is an equal launch (no privileged component types); key = instance name = default bin name. **YAML is the format** for both this file and the per-launch `config:` file it points at (the `[config]` override); a `.toml` extension reads TOML instead (`.json` too for the override). All formats land in the same serde structs, so nothing downstream knows which was used.
 
 ## The `reiny` CLI (`reiny-cli`) — one binary, several non-obvious behaviors
 
 The `reiny` binary lives in **`reiny-cli`** (it depends on `reiny-launch` as a library; `reiny-launch` is now lib-only). Subcommands `new`/`init`/`add`/`check`/`build`/`run`/`compress`/`bag`/`topic`/`node`/`service`/`bridge` plus two non-subcommand entry paths handled *before* clap in `main`:
 
-- **Backward-compat launch:** `reiny <launch>.toml` (bare positional) and `reiny --config <launch>.toml` both mean `reiny run`.
-- **Renamed-launcher self mode:** if `argv[0]`'s basename isn't `reiny` (i.e. a `reiny compress --launcher <name>` artifact), it reads `<name>.toml` next to itself and launches with no args.
+- **Backward-compat launch:** `reiny <launch>.yaml` (bare positional) and `reiny --config <launch>.yaml` both mean `reiny run`.
+- **Renamed-launcher self mode:** if `argv[0]`'s basename isn't `reiny` (i.e. a `reiny compress --launcher <name>` artifact), it reads `<name>.yaml` (then `.yml`, then `.toml`) next to itself and launches with no args; `compress` keeps the source config's extension for that reason.
 
 Facts that span files:
 - `reiny check [path]` resolves the nearest `Reiny.toml` and prints its layout mode + type→topic table **without compiling protos**. It uses `reiny-build` with `default-features = false` (the `compile` feature, which pulls `prost-build`/`protoc`, is off), calling `reiny_build::describe()` (the catalog view, not package-bound — contrast `compile()`'s package-scoped `resolve_for`). Manifest validation (identifier checks, topic-collision) runs here too, so misconfig surfaces at `check` time, not just at build.

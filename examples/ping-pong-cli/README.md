@@ -25,7 +25,7 @@
 ping-pong-cli/
 ├── README.md
 ├── .gitignore        # ping/ pong/ target/ を無視(生成物)
-├── ping-pong.toml    # 手書きの launch config(reiny run が読む)
+├── ping-pong.yaml    # 手書きの launch config(reiny run が読む)
 ├── 00-clean.sh       # 生成物を消してやり直す
 ├── 01-new.sh         # reiny new  : 新規ディレクトリに ping を作る
 ├── 02-init.sh        # reiny init : 既存ディレクトリに pong を作る
@@ -44,8 +44,8 @@ ping-pong-cli/
 | `reiny init [path] --publish <T>` | `cargo init` | ディレクトリを作らず、**既存ディレクトリにその場で**雛形を足す。既存 `Cargo.toml` には reiny 依存と `build.rs` を**追記**し壊さない。`--name` 省略時はディレクトリ名を `[project].name` に。 |
 | `reiny add <path>` | `cargo add --path` | カレント launch の `Reiny.toml` `[dependencies]` に相手を追記。相手の公開型が `reiny::dependencies::<name>::<T>` として subscribe 可能になる。src は変えない。 |
 | `reiny build` | `cargo build` + codegen | `Reiny.toml` を読み、`[publications]` の proto → `reiny::publications::*`、`[dependencies]` → `reiny::dependencies::*` を生成して「型 → トピック」を埋め、bin をビルド。 |
-| `reiny run <launch.toml>` | (ランチャ) | launch config の `[launch]` 節を読み、`depends_on` 順に各 launch を子プロセス起動。`reiny <launch.toml>`(位置引数)/ 現状の `reiny --config <launch.toml>` も同義。 |
-| `reiny compress <launch.toml> --out <dir> [--launcher <name>]` | (配布) | launch config を辿り、**動かすのに要るものだけ**(到達可能な launch の bin + 実際にリンクしている `.so`/`.dll`/`.dylib` + launch config + **ランチャ reiny 本体**)を `<dir>/` に束ねる。`target/` 全体やシステムライブラリは入れない。**reiny ごと入るので `<dir>` 単体で完結**し、reiny 未インストールのマシンでもコピーするだけで動く。`--launcher <name>` で同梱する reiny を `<name>` にリネーム+`<name>.toml` に揃え、`./<name>` だけで起動できる(下記)。 |
+| `reiny run <launch.yaml>` | (ランチャ) | launch config の `[launch]` 節を読み、`depends_on` 順に各 launch を子プロセス起動。`reiny <launch.yaml>`(位置引数)/ 現状の `reiny --config <launch.yaml>` も同義。 |
+| `reiny compress <launch.yaml> --out <dir> [--launcher <name>]` | (配布) | launch config を辿り、**動かすのに要るものだけ**(到達可能な launch の bin + 実際にリンクしている `.so`/`.dll`/`.dylib` + launch config + **ランチャ reiny 本体**)を `<dir>/` に束ねる。`target/` 全体やシステムライブラリは入れない。**reiny ごと入るので `<dir>` 単体で完結**し、reiny 未インストールのマシンでもコピーするだけで動く。`--launcher <name>` で同梱する reiny を `<name>` にリネーム+`<name>.yaml` に揃え、`./<name>` だけで起動できる(下記)。 |
 
 ## 手順(将来像)
 
@@ -58,7 +58,7 @@ chmod +x *.sh        # 初回のみ
 ./02-init.sh         # reiny init pong --publish Pong
 ./03-add.sh          # 雙方向の購読を配線(reiny add)
 ./04-build.sh        # reiny build(codegen + cargo build)
-./05-run.sh          # reiny run ping-pong.toml(その場で起動。Ctrl-C で停止)
+./05-run.sh          # reiny run ping-pong.yaml(その場で起動。Ctrl-C で停止)
 ./06-compress.sh     # reiny compress(要るものだけ dist/ に束ねて配布用に)
 
 # まとめて(起動以外):
@@ -76,7 +76,7 @@ chmod +x *.sh        # 初回のみ
 ./06-compress.sh        # reiny compress ... --launcher ping-pong
 # → dist/
 #   ├── ping-pong        ← reiny をリネームして同梱(エントリポイント)
-#   ├── ping-pong.toml   ← ↑が自分の名前から自動で読む launch config
+#   ├── ping-pong.yaml   ← ↑が自分の名前から自動で読む launch config
 #   ├── ping  pong       ← launch bin
 #   └── lib/             ← 要る共有ライブラリだけ
 
@@ -86,17 +86,17 @@ cd dist && ./ping-pong  # reiny 未インストールのマシンでも、これ
 ### リネームしたランチャが「自分の名前」から config を読む
 
 同梱した `ping-pong`(中身は reiny)は、起動時に自分の実行パス(`argv[0]`)の
-basename を見て、**同じディレクトリの `<basename>.toml`** を launch config として
-自動で読みます。だから `./ping-pong` は `./ping-pong.toml` を、引数なしで拾って
+basename を見て、**同じディレクトリの `<basename>.yaml`** を launch config として
+自動で読みます。だから `./ping-pong` は `./ping-pong.yaml` を、引数なしで拾って
 `reiny run` 相当を行います。
 
 ```
-./ping-pong              ≡ reiny run ./ping-pong.toml     (自分の名前から解決)
-./reiny run x.toml       ← リネームしない(--launcher 省略)ときの明示形
+./ping-pong              ≡ reiny run ./ping-pong.yaml     (自分の名前から解決)
+./reiny run x.yaml       ← リネームしない(--launcher 省略)ときの明示形
 ```
 
 - basename が `reiny` のまま(リネームなし)のときは自動読みせず、従来通り
-  `reiny run <launch.toml>` / `reiny <launch.toml>` を要求する。
+  `reiny run <launch.yaml>` / `reiny <launch.yaml>` を要求する。
 - launch bin は実行ファイルと同じディレクトリから探す(`--bin-dir` 既定)。
 
 ### `new` と `init` の違いだけ覚える

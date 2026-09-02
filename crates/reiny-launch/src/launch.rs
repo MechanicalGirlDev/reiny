@@ -1,5 +1,5 @@
 //! Deriving a launch plan (which launches to start, and in what order) from a launch config's
-//! `[launch]` section. `reiny --config <launch>.toml` is the only entry point.
+//! `launch:` section (YAML; `.toml` reads TOML). `reiny run <launch>.yaml` is the only entry point.
 //!
 //! Unlike `HumanoidSystem`'s hs-launch there is **no known-kind / plugin distinction**. Every key is
 //! an equal launch: key = instance name = default bin name. The bins are started from the same
@@ -64,12 +64,12 @@ pub enum LaunchError {
 }
 
 impl LaunchPlan {
-    /// Derive a launch plan from a launch config (TOML) file.
+    /// Derive a launch plan from a launch config file (YAML; a `.toml` extension reads TOML).
     pub fn from_launch_config(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read launch config {}", path.display()))?;
-        let config: LaunchConfig = toml::from_str(&text)
-            .with_context(|| format!("failed to parse [launch] from {}", path.display()))?;
+        let config = parse_launch_config(path, &text)
+            .with_context(|| format!("failed to parse launch config {}", path.display()))?;
         Ok(Self::from_config(&config, path))
     }
 
@@ -201,6 +201,19 @@ fn resolve(
     }
 }
 
+/// The format follows the extension: `.toml` is TOML, anything else is YAML (which reads JSON too).
+fn parse_launch_config(path: &Path, text: &str) -> anyhow::Result<LaunchConfig> {
+    let is_toml = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
+    Ok(if is_toml {
+        toml::from_str(text)?
+    } else {
+        serde_yaml::from_str(text)?
+    })
+}
+
 /// Resolve a relative path against `base` (an absolute path is returned unchanged).
 fn resolve_relative(base: &Path, p: &Path) -> PathBuf {
     if p.is_absolute() {
@@ -214,6 +227,35 @@ fn resolve_relative(base: &Path, p: &Path) -> PathBuf {
 #[allow(clippy::expect_used, clippy::unwrap_used)] // tests may fail by panicking
 mod tests {
     use super::*;
+
+    /// YAML unless the extension says `.toml`; both spellings give the same plan, and the string
+    /// shorthand survives the trip through `serde_yaml`'s untagged enum.
+    #[test]
+    fn launch_config_is_yaml_unless_toml() {
+        let yaml = parse_launch_config(
+            Path::new("ping-pong.yaml"),
+            "launch:\n  pong: { bin: pong, on_exit: respawn }\n  ping: { bin: ping, depends_on: [pong] }\n",
+        )
+        .unwrap();
+        let toml = parse_launch_config(
+            Path::new("ping-pong.toml"),
+            "[launch]\npong = { bin = \"pong\", on_exit = \"respawn\" }\nping = { bin = \"ping\", depends_on = [\"pong\"] }\n",
+        )
+        .unwrap();
+        for c in [&yaml, &toml] {
+            assert_eq!(c.launch["pong"].on_exit(), OnExit::Respawn);
+            assert_eq!(c.launch["ping"].depends_on(), ["pong"]);
+        }
+        let bare = parse_launch_config(
+            Path::new("ping-pong"),
+            "launch: { gui: configs/gui.yaml }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            bare.launch["gui"].config(),
+            Some(Path::new("configs/gui.yaml"))
+        );
+    }
 
     /// A plan for tests. The launch config path may name something that does not exist (canonicalize
     /// fails and falls back to the given path — good enough for checking the structure).

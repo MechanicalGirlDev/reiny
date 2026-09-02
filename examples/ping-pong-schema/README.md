@@ -62,7 +62,7 @@ dependencies = ["Ping"]
 ping-pong-schema/
 ├── Cargo.toml          # cargo ワークスペース(members = schema, ping, pong)
 ├── Reiny.toml          # ★ [internals] + [schema] + [projects.*]
-├── ping-pong.toml      # launch config(schema は lib なので launch には出ない)
+├── ping-pong.yaml      # launch config(schema は lib なので launch には出ない)
 ├── proto/              # 共有 proto
 │   ├── ping.proto
 │   └── pong.proto
@@ -97,5 +97,5 @@ cargo run -p pong   # pong を起動(Ping を待ち受け)
 cargo run -p ping   # ping を起動(Ping を送信開始)
 
 # または、ランチャでまとめて
-reiny --config ping-pong.toml --bin-dir target/debug
+reiny --config ping-pong.yaml --bin-dir target/debug
 ```
