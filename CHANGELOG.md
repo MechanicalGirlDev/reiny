@@ -27,6 +27,14 @@ Versions are kept in lockstep via `[workspace.package].version`.
   unknown key (not in `[config]`) and a type mismatch each get a `warn!` naming
   the key, instead of silently keeping the default.
 
+### Fixed
+- **`reiny-ros2`** — the loopback e2e hung on Linux CI: rustdds 0.14 loses a
+  loopback-only participant's locators when the discovery DB re-publishes an
+  endpoint, so no user data was ever sent. The test now builds its participants
+  on all interfaces except on Windows, and `Ros::new`'s docs say that
+  `ROS_LOCALHOST_ONLY=1` is unusable on Linux for the same reason (separate
+  traffic with `ROS_DOMAIN_ID` instead).
+
 ## 0.5.0 — 2026-08-29
 
 Two things at once, with a design record each: **taking zenoh's shape out of

@@ -1,6 +1,7 @@
 //! An e2e that runs without ROS: a "playing ROS" ros2-client node and a bridge (`Ros`) on a `Local`
-//! bus, in one process, joined over `RustDDS`'s loopback (the same DDS domain). Topics both ways,
-//! services both ways. The DDS domain is derived from the process id so parallel runs do not collide.
+//! bus, in one process, joined over `RustDDS` (the same DDS domain). Topics both ways, services both
+//! ways. The DDS domain is derived from the process id, which is what keeps the traffic apart from a
+//! parallel run or a neighbour on the network.
 //!
 //! Ignored on Windows debug builds: the Windows UDP code of mio 0.6, which rustdds 0.14 uses,
 //! dereferences a null pointer, and Rust 1.96's UB check (debug only) aborts the event loop.
@@ -124,14 +125,22 @@ impl Message for RosEchoRes {}
 
 const WAIT: Duration = Duration::from_secs(10);
 
-/// A loopback-only DDS participant. It touches no outward-facing interface (including virtual adapters
-/// that are not connected), so same-host discovery is deterministic on any machine or CI runner.
-fn loopback_context(domain_id: u16) -> Context {
-    let participant = DomainParticipantBuilder::new(domain_id)
-        .with_only_networks([std::net::Ipv4Addr::LOCALHOST])
-        .build()
-        .expect("participant");
-    Context::from_domain_participant(participant).expect("context")
+/// A DDS participant on `domain_id`. Which interfaces it may use is decided per platform, because
+/// rustdds 0.14 is broken in the opposite direction on each:
+///
+/// - **Not Windows: every interface.** Loopback-only does discover the peer, but rustdds splits a
+///   discovered endpoint's loopback locators into a bucket `DiscoveredReaderData` cannot carry, so
+///   the discovery DB re-publishes that endpoint with an empty locator list and the writer is left
+///   with no destination for user data ("No locators for `RtpsReaderProxy`"). On Linux `lo` carries no
+///   multicast to fall back on, so nothing flows and this test hangs until its patience runs out.
+/// - **Windows: loopback only.** An all-interfaces participant fails to build on a machine that has
+///   virtual adapters which are not connected ("`UDPSender` construction fail: `AddrNotAvailable`"), and
+///   loopback-only does deliver user data there.
+fn context(domain_id: u16) -> Context {
+    let builder = DomainParticipantBuilder::new(domain_id);
+    #[cfg(windows)]
+    let builder = builder.with_only_networks([std::net::Ipv4Addr::LOCALHOST]);
+    Context::from_domain_participant(builder.build().expect("participant")).expect("context")
 }
 
 async fn open(bus: Local, id: &str) -> Cloudy {
@@ -160,7 +169,7 @@ async fn bridge_round_trips_with_a_ros_node() {
     let launch = open(bus, "g").await;
 
     // --- playing ROS ---
-    let ros_ctx = loopback_context(domain_id);
+    let ros_ctx = context(domain_id);
     let mut ros_node = ros_ctx
         .new_node(
             NodeName::new("/", "ros_side").unwrap(),
@@ -224,7 +233,7 @@ async fn bridge_round_trips_with_a_ros_node() {
     });
 
     // --- the bridge (another Context on the same DDS domain) ---
-    let ros = Ros::with_context(&cloudy, loopback_context(domain_id), "reiny_bridge").unwrap();
+    let ros = Ros::with_context(&cloudy, context(domain_id), "reiny_bridge").unwrap();
     ros.export::<State, RosState, _>(
         "/state",
         MessageTypeName::new("test_msgs", "State"),

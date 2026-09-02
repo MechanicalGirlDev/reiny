@@ -72,6 +72,11 @@ impl<'c> Ros<'c> {
     /// Create the ROS node `node_name` (in the namespace `/`) and put its spinner on tokio.
     /// The DDS domain comes from `ROS_DOMAIN_ID` (0 when unset), and `ROS_LOCALHOST_ONLY=1` keeps it
     /// to loopback (the same environment variables ROS 2 uses). Call it inside a tokio runtime.
+    ///
+    /// `ROS_LOCALHOST_ONLY=1` is unusable on Linux with rustdds 0.14: a loopback-only participant
+    /// discovers its peers, but their loopback locators are lost when the discovery DB re-publishes
+    /// the endpoint, so no user data is ever sent ("No locators for `RtpsReaderProxy`"). Leave it unset
+    /// and separate the traffic with `ROS_DOMAIN_ID` until rustdds keeps that bucket.
     pub fn new(cloudy: &'c Cloudy, node_name: &str) -> Result<Self> {
         let domain_id = std::env::var("ROS_DOMAIN_ID")
             .ok()
