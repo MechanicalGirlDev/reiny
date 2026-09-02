@@ -12,7 +12,7 @@ categories = ["network-programming", "no-std", "embedded"]
 
 [dependencies]
 # no_std の prost(alloc は要る)。ワークスペースの `prost` は std 前提なので継承しない。
-prost = { version = "0.13", default-features = false }
+prost = { version = "0.14", default-features = false }
 
 [lints]
 workspace = true

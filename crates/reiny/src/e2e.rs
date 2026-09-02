@@ -70,8 +70,9 @@ impl Topic for Described {
 /// The loopback port. These tests **run in parallel**, so every test needs its own
 /// (`rpc_e2e.rs` uses 37449 — overlapping makes a listen fail and takes another test down with it).
 const ENDPOINT: &str = "tcp/127.0.0.1:37447";
-const ISLAND_A: &str = "tcp/127.0.0.1:37451";
-const ISLAND_B: &str = "tcp/127.0.0.1:37452";
+/// The rendezvous point of the late-link test. Both sides retry-connect to it; it is opened only
+/// after both have declared, so the link is genuinely late.
+const LATE_LINK_HUB: &str = "tcp/127.0.0.1:37451";
 
 /// A peer session with multicast off. One side `listen`s; the others `connect`.
 async fn session(listen: bool) -> zenoh::Session {
@@ -339,19 +340,25 @@ async fn presence_latched_and_domain_isolation() {
 /// peer that was not connected yet, and since the publisher does not re-send, the value never came
 /// (in the field, a bag recorder joined as a fourth peer and physics connected to it first, hitting
 ///
-/// Here the publisher and the subscriber are brought up **isolated from each other** (each only
-/// listens, neither connects); the send and the subscription are done first, and only then does a
-/// third session connecting to both create the link. The live path can no longer carry anything, so
-/// only the "ask again on presence" path can deliver the value.
+/// Here the publisher and the subscriber are brought up **isolated from each other** (both retry a
+/// hub that is not up yet); the send and the subscription are done first, and only then is the hub
+/// opened and the link created. The live path can no longer carry anything, so only the "ask again
+/// on presence" path can deliver the value.
 #[tokio::test(flavor = "multi_thread")]
 async fn latched_survives_a_link_that_comes_up_late() {
+    // Both sides connect *out* to a hub that is not up yet: retrying in the background is what makes
+    // the link late. (Bridging them with a third session used to work through gossip; since zenoh
+    // 1.10 gossip advertises `get_locators_noloopback()`, so two peers listening on 127.0.0.1 never
+    // learn about each other and nothing here would ever link up.)
+    // The `#retry_...` suffix is zenoh's per-endpoint connect config: retry briskly so the link
+    // forms well inside `PATIENCE` once the hub appears.
+    let island = [(
+        "connect/endpoints",
+        format!("[\"{LATE_LINK_HUB}#retry_period_init_ms=50;retry_period_max_ms=200\"]"),
+    )];
+
     // 1) The publisher side: isolated, sends its latched value exactly once.
-    let alpha = cloudy(
-        open_session(&[("listen/endpoints", format!("[\"{ISLAND_A}\"]"))]).await,
-        "alpha",
-        "lab",
-    )
-    .await;
+    let alpha = cloudy(open_session(&island).await, "alpha", "lab").await;
     let publisher = alpha
         .publisher::<Probe>()
         .latched()
@@ -360,24 +367,15 @@ async fn latched_survives_a_link_that_comes_up_late() {
     publisher.send(Probe { seq: 11 }).await.expect("send");
 
     // 2) The subscriber side: connected to nobody, so a query at this point is bound to miss.
-    let beta = cloudy(
-        open_session(&[("listen/endpoints", format!("[\"{ISLAND_B}\"]"))]).await,
-        "beta",
-        "lab",
-    )
-    .await;
+    let beta = cloudy(open_session(&island).await, "beta", "lab").await;
     let mut sub = beta
         .subscriber::<Probe>()
         .latched()
         .build()
         .expect("latched subscriber");
 
-    // 3) The third session, connected to both. Only now does alpha's declaration reach beta.
-    let _bridge = open_session(&[(
-        "connect/endpoints",
-        format!("[\"{ISLAND_A}\", \"{ISLAND_B}\"]"),
-    )])
-    .await;
+    // 3) The hub the two have been retrying against. Only now does alpha's declaration reach beta.
+    let _hub = open_session(&[("listen/endpoints", format!("[\"{LATE_LINK_HUB}\"]"))]).await;
 
     let envelope = timeout(PATIENCE, sub.recv_envelope())
         .await

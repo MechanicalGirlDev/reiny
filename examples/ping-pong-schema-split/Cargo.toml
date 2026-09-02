@@ -27,7 +27,7 @@ reiny-build = { path = "../../crates/reiny-build" }
 pingpong-geometry = { path = "geometry" }
 pingpong-msg = { path = "msg" }
 # prost は **スキーマクレートだけ**が要る(生成 prost 型を持つのはそちら)。
-prost = "0.13"
+prost = "0.14"
 
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

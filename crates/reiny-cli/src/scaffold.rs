@@ -142,7 +142,7 @@ fn write_cargo_toml(dir: &Path, proj: &str) -> Result<()> {
              \n\
              [dependencies]\n\
              reiny = {reiny_dep}\n\
-             prost = \"0.13\"\n\
+             prost = \"0.14\"\n\
              tokio = {{ version = \"1\", features = [\"full\"] }}\n\
              tracing = \"0.1\"\n\
              tracing-subscriber = {{ version = \"0.3\", features = [\"env-filter\"] }}\n\
@@ -195,7 +195,7 @@ fn merge_cargo_toml(path: &Path, proj: &str, reiny_dep: &str, build_dep: &str) -
 /// Fill `prost` / `tokio` / `tracing` / `tracing-subscriber` into `[dependencies]`.
 fn insert_simple_deps(doc: &mut toml::Table) {
     let str_dep = |s: &str| toml::Value::String(s.to_string());
-    insert_dep(doc, "dependencies", "prost", str_dep("0.13"));
+    insert_dep(doc, "dependencies", "prost", str_dep("0.14"));
     insert_dep(doc, "dependencies", "tracing", str_dep("0.1"));
     if let Ok(v) = toml::from_str::<toml::Table>("x = { version = \"1\", features = [\"full\"] }")
         && let Some(tokio) = v.get("x").cloned()

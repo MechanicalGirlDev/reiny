@@ -31,9 +31,9 @@ reiny-build = { path = "../reiny-build", version = "0.5.0", default-features = f
 reiny = { path = "../reiny", version = "0.5.0" }
 mcap = { workspace = true }
 # `reiny topic echo` / `reiny service call` の動的 decode / encode(`@schema` の descriptor から)。
-# prost の版は reiny と同じ 0.13 系に揃える(prost-reflect 0.14 = prost 0.13)。
+# Keep prost on the same major as reiny (prost-reflect 0.16 = prost 0.14).
 prost = { workspace = true }
-prost-reflect = { version = "0.14", features = ["serde"] }
+prost-reflect = { version = "0.16", features = ["serde"] }
 serde_json = "1"
 ctrlc = { workspace = true }
 clap = { workspace = true }

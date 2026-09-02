@@ -26,7 +26,7 @@ reiny-build = { path = "../../crates/reiny-build" }
 pingpong-schema = { path = "schema" }
 # prost は **スキーマクレートだけ**が要る(生成 prost 型を持つのはそのクレート)。
 # 消費 launch(ping/pong)は型を使うだけなので prost を直接依存しない。
-prost = "0.13"
+prost = "0.14"
 
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

@@ -17,7 +17,7 @@ authors = ["nop <noplab90@gmail.com>"]
 [workspace.dependencies]
 reiny = { path = "../../crates/reiny" }
 reiny-build = { path = "../../crates/reiny-build" }
-prost = "0.13"
+prost = "0.14"
 
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

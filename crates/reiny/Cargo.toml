@@ -23,7 +23,7 @@ reiny-macros = { path = "../reiny-macros", version = "0.5.0" }
 prost = { workspace = true }
 zenoh = { workspace = true, optional = true }
 # 購読の Fifo バッファ(有界、満杯で送信側がブロック)。zenoh の FifoChannel と同じ実装。
-flume = "0.11"
+flume = "0.12"
 tokio = { workspace = true }
 toml = { workspace = true }
 # `--config` is YAML by default (`.toml` / `.json` by extension); all deserialize into one `toml::Table`.

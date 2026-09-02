@@ -20,6 +20,14 @@ Versions are kept in lockstep via `[workspace.package].version`.
   bundle round-trips. The examples' `ping-pong.toml` are now `ping-pong.yaml`.
 
 ### Changed
+- **Dependencies** — prost / prost-build / prost-types 0.13 → **0.14**,
+  prost-reflect 0.14 → 0.16, flume 0.11 → 0.12, toml 0.8 → 1.0, syn 2 → 3,
+  zenoh 1.9 → **1.10**, plus every compatible bump in the lock files.
+  **Breaking**: the generated types are prost 0.14 types, so a downstream crate
+  that names them has to move to `prost = "0.14"` in the same step.
+  zenoh 1.10 also stopped gossiping loopback locators, so two peers that only
+  listen on `127.0.0.1` no longer discover each other through a third session —
+  give them a real address or have them connect to a common endpoint.
 - **`reiny-build`** — `[config]` keys are validated as Rust identifiers and values
   as scalars at resolution time, so `reiny check` reports `delay-ms = 0` with a
   hint at the section instead of a rustc syntax error in `reiny_generated.rs`.

@@ -26,7 +26,7 @@ reiny = { path = "../reiny", version = "0.5.0", default-features = false, option
 tracing = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 # no_std の prost(alloc は要る)。ワークスペースの `prost` は std 前提なので継承しない。
-prost = { version = "0.13", default-features = false }
+prost = { version = "0.14", default-features = false }
 # フレーミング(COBS)と CRC-16/KERMIT。どちらも no_std、依存 0。
 cobs = { version = "0.5", default-features = false }
 crc = "3"
@@ -36,7 +36,7 @@ tokio-serial = { version = "5.5", optional = true }
 
 [dev-dependencies]
 # テスト用 wire 型を `#[derive(prost::Message)]` で書くため。
-prost = { version = "0.13", features = ["derive"] }
+prost = { version = "0.14", features = ["derive"] }
 tokio = { workspace = true }
 
 [[test]]

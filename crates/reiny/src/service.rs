@@ -370,7 +370,9 @@ mod tests {
     #[test]
     fn only_wrapping_variants_have_a_source() {
         use std::error::Error;
-        let decode = CallError::Decode(prost::DecodeError::new("bad"));
+        // Tag 0 is invalid, so this is a real DecodeError without the deprecated constructor.
+        let err = <() as prost::Message>::decode(&[0u8][..]).unwrap_err();
+        let decode = CallError::Decode(err);
         assert!(decode.source().is_some());
         assert!(
             CallError::Engine(anyhow::anyhow!("boom"))
