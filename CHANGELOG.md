@@ -5,7 +5,13 @@ All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
 `reiny-launch`, `reiny-cli`).
 Versions are kept in lockstep via `[workspace.package].version`.
 
-## Unreleased
+## 0.6.0 — 2026-09-17
+
+**Breaking** for downstream crates, though not on the wire: the generated types are
+prost 0.14 types, and `--config` / launch configs are YAML unless the extension says
+otherwise (see *Changed* and *Added*). A 0.5 launch still talks to a 0.6 launch.
+New: introspection by name (`raw_subscriber` / `watch_keys` / `schemas`) for tools
+that learn the types from the bus.
 
 ### Added
 - **`reiny`** — introspection **by name**, for a tool that learns the types from the
