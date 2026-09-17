@@ -1,7 +1,8 @@
 //! The `Engine` conformance test — one function, run against every engine.
 //!
 //! It pins that the five operations plus the logic above them (latest(n) / cancel-safety / latched /
-//! a service round trip / presence / fingerprints) look the same whichever engine is underneath.
+//! a service round trip / presence / fingerprints / the by-name introspection) look the same whichever
+//! engine is underneath.
 //! Someone adding an engine only has to pass this one: it is public behind the `conformance` feature,
 //! so another crate's tests can call `reiny::engine::conformance::{cloudy, exercise}`. `Local` runs
 //! in-process, `Zenoh` on loopback 37453 (apart from `e2e.rs`'s 37447 and `rpc_e2e.rs`'s 37449).
@@ -9,10 +10,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use prost::Message;
 use tokio::time::timeout;
 
-use super::{Engine, Key};
-use crate::{CallError, Cloudy, PresenceEvent, Qos, Service, Topic, shutdown::Shutdown};
+use super::{Engine, Key, Presence};
+use crate::{
+    CallError, Cloudy, Descriptor, PresenceEvent, Qos, Service, Topic, shutdown::Shutdown,
+};
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct Probe {
@@ -44,6 +48,23 @@ impl Topic for StampedV1 {
 impl Topic for StampedV2 {
     const TYPE: &'static str = "ConfStamped";
     const SCHEMA: Option<u64> = Some(0x2222);
+}
+
+/// A type that describes itself at `@schema`. reiny never interprets the set, so any bytes will do.
+#[derive(Clone, PartialEq, prost::Message)]
+struct Described {
+    #[prost(uint32, tag = "1")]
+    seq: u32,
+}
+
+const DESCRIBED_SET: &[u8] = b"conf-descriptor-set";
+
+impl Topic for Described {
+    const TYPE: &'static str = "ConfDescribed";
+    const DESCRIPTOR: Option<Descriptor> = Some(Descriptor {
+        message: "conf.Described",
+        file_set: DESCRIBED_SET,
+    });
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -230,6 +251,91 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
             .is_err(),
         "mismatching fingerprint must be dropped"
     );
+
+    // --- by name: a viewer with no types compiled in ---
+    // Raw bytes arrive with the sender's fingerprint beside them, unchecked.
+    let mut raw = b
+        .raw_subscriber(StampedV1::TYPE)
+        .build()
+        .expect("raw subscriber");
+    tokio::time::sleep(SETTLE).await;
+    stamped.send(StampedV1 { seq: 8 }).await.expect("send");
+    let envelope = timeout(PATIENCE, raw.recv())
+        .await
+        .expect("raw sample within patience")
+        .expect("stream open");
+    assert_eq!(
+        (envelope.source.as_str(), envelope.schema),
+        ("a", StampedV1::SCHEMA)
+    );
+    assert_eq!(
+        StampedV1::decode(envelope.payload.as_slice())
+            .expect("payload")
+            .seq,
+        8
+    );
+    let mut raw_late = b
+        .raw_subscriber(Probe::TYPE)
+        .latched()
+        .build()
+        .expect("raw latched subscriber");
+    let envelope = timeout(PATIENCE, raw_late.recv())
+        .await
+        .expect("latched value by name")
+        .expect("stream open");
+    assert_eq!(
+        (
+            Probe::decode(envelope.payload.as_slice())
+                .expect("payload")
+                .seq,
+            envelope.source.as_str()
+        ),
+        (42, "a")
+    );
+
+    // Every publisher of every type, whole keys: the live ones first, then a leave.
+    let mut everyone = b.watch_keys(&Key::all(DOMAIN)).expect("watch keys");
+    let mut joined = Vec::new();
+    for _ in 0..2 {
+        match timeout(PATIENCE, everyone.recv()).await.expect("join") {
+            Some(Presence::Joined(key)) => joined.push(key.to_string()),
+            other => panic!("expected a join, got {other:?}"),
+        }
+    }
+    joined.sort();
+    assert_eq!(
+        joined,
+        ["reiny/conf/a/ConfProbe", "reiny/conf/a/ConfStamped"]
+    );
+    drop(stamped);
+    assert_eq!(
+        timeout(PATIENCE, everyone.recv()).await.expect("leave"),
+        Some(Presence::Left(Key::topic(
+            DOMAIN,
+            Some("a"),
+            StampedV1::TYPE
+        )))
+    );
+
+    // `@schema` by name: the publisher and a subscriber both describe the type.
+    let described = a.publish::<Described>().expect("described publisher");
+    let listener = b.subscribe::<Described>().expect("described subscriber");
+    tokio::time::sleep(SETTLE).await;
+    let schemas = b.schemas(Described::TYPE).await.expect("schemas");
+    let got: Vec<(&str, &str, &[u8])> = schemas
+        .iter()
+        .map(|d| (d.source.as_str(), d.message.as_str(), d.file_set.as_slice()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("a", "conf.Described", DESCRIBED_SET),
+            ("b", "conf.Described", DESCRIBED_SET)
+        ]
+    );
+    // No DESCRIPTOR, no answer — and the latched responder on the type's own key stays out of it.
+    assert!(b.schemas(Probe::TYPE).await.expect("schemas").is_empty());
+    drop((described, listener));
 
     // --- services: round trip / reply_err / a destination that is not there / dropped / held → Timeout ---
     let mut server = a.serve::<Add>().expect("serve");

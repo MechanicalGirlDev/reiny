@@ -5,6 +5,9 @@
 //! goes through an [`Engine`](crate::engine::Engine) — what lives here is encode / decode, the
 //! fingerprint check, latched's "presence first, then get", latest-wins and the receive buffers (Fifo /
 //! Ring), and the same implementation runs on every engine.
+//!
+//! The `Raw*` types are the same machinery addressed **by name** — for a tool that learns the types
+//! from the bus (a viewer, a recorder) rather than naming them in code. They stop short of decoding.
 
 use std::collections::{HashSet, VecDeque};
 use std::marker::PhantomData;
@@ -16,11 +19,14 @@ use prost::Message;
 use tokio::sync::{Notify, mpsc};
 
 use crate::engine::{
-    Callback, Engine, Guard, Key, Presence as RawPresence, QueryParams, RawPublisher, RawQuery,
-    RawReplies, ReplyResult, SCHEMA_CHUNK, SUB_CHUNK, Sample,
+    self, Callback, Engine, Guard, Key, QueryParams, RawPublisher, RawQuery, RawReplies,
+    ReplyResult, SCHEMA_CHUNK, SUB_CHUNK, Sample,
 };
 use crate::shutdown::Shutdown;
-use crate::{Cloudy, Descriptor, Durability, History, Priority, Qos, Reliability, Result, Topic};
+use crate::{
+    Cloudy, Descriptor, Durability, History, Priority, Qos, Reliability, Result, Topic,
+    validate_segment,
+};
 
 /// The depth of the default receive buffer (Fifo). The same as zenoh's `API_DATA_RECEPTION_CHANNEL_SIZE`.
 const FIFO_CAPACITY: usize = 256;
@@ -36,6 +42,20 @@ pub struct Envelope<T> {
     pub value: T,
     /// The sending launch's id (the key's `<id>` segment).
     pub source: String,
+    /// The send time (unix ns). Present only when the engine has one (zenoh, with timestamping on).
+    pub timestamp: Option<u64>,
+}
+
+/// A sample of a type named at run time ([`RawSubscriber::recv`]): the bytes, undecoded, with the
+/// provenance an [`Envelope`] carries plus the sender's fingerprint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawEnvelope {
+    /// The encoded message, exactly as it was published.
+    pub payload: Vec<u8>,
+    /// The sending launch's id (the key's `<id>` segment).
+    pub source: String,
+    /// The sender's [`Topic::SCHEMA`]. `None` when it sent none, or the engine carries no attachments.
+    pub schema: Option<u64>,
     /// The send time (unix ns). Present only when the engine has one (zenoh, with timestamping on).
     pub timestamp: Option<u64>,
 }
@@ -194,6 +214,18 @@ pub(crate) fn declare_schema(cloudy: &Cloudy, key: &Key, descriptor: Descriptor)
     )
 }
 
+/// One descriptor a live launch announces at `@schema` — what [`Cloudy::schemas`] collects. The owned,
+/// off-the-bus form of a [`Descriptor`], plus who announced it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RawDescriptor {
+    /// The announcing launch's id (a publisher, subscriber or server of the type).
+    pub source: String,
+    /// The fully qualified message name (e.g. `hs.RobotState`).
+    pub message: String,
+    /// The encoded `FileDescriptorSet` holding `message` and its imports, verbatim.
+    pub file_set: Vec<u8>,
+}
+
 /// The other half of a latched publisher — one queryable on its own publish key, answering with the
 /// last value it sent and nothing more.
 fn declare_latch(
@@ -314,54 +346,15 @@ impl<'a, T> SubscriberBuilder<'a, T> {
     where
         T: Message + Default + Topic,
     {
+        let core = Core::declare(
+            self.cloudy,
+            T::TYPE,
+            self.from.as_deref(),
+            self.latched,
+            self.latest,
+        )?;
         let engine = self.cloudy.engine();
         let caps = engine.caps();
-        if self.from.is_none() && !caps.wildcard_source {
-            anyhow::bail!(
-                "subscriber of {}: this engine is point-to-point; name the source with `.from(id)`",
-                T::TYPE
-            );
-        }
-        if self.latched && !(caps.query && caps.liveliness) {
-            anyhow::bail!(
-                "subscriber of {}: this engine has no query / liveliness, which latched needs",
-                T::TYPE
-            );
-        }
-        let key = self.cloudy.key_for(self.from.as_deref(), T::TYPE);
-
-        // reiny owns the receive buffer. The engine's callback only pushes onto it (and counts).
-        let counters = Arc::new(Counters::default());
-        let (chan, on_sample): (Chan, Callback<Sample>) = if let Some(n) = self.latest {
-            let ring = Arc::new(Ring::new(n));
-            let sink = Arc::clone(&ring);
-            let counters = Arc::clone(&counters);
-            (
-                Chan::Ring(ring),
-                Box::new(move |s| {
-                    counters.received.fetch_add(1, Ordering::Relaxed);
-                    if sink.push(s) {
-                        counters.note_full(T::TYPE, true);
-                    }
-                }),
-            )
-        } else {
-            let (tx, rx) = flume::bounded(FIFO_CAPACITY);
-            let counters = Arc::clone(&counters);
-            (
-                Chan::Fifo(rx),
-                Box::new(move |s| {
-                    counters.received.fetch_add(1, Ordering::Relaxed);
-                    // The behaviour is unchanged — a full buffer still blocks the engine's thread,
-                    // as zenoh's FifoChannel does. `try_send` runs first only so that it can be counted.
-                    if let Err(flume::TrySendError::Full(s)) = tx.try_send(s) {
-                        counters.note_full(T::TYPE, false);
-                        let _ = tx.send(s);
-                    }
-                }),
-            )
-        };
-        let guard = engine.subscribe(&key, on_sample)?;
 
         // Our own presence: `reiny/<domain>/<our id>/<T>/@sub`, whatever source the subscription
         // itself names. The question it answers is "who listens to this type", not "who listens to
@@ -380,34 +373,53 @@ impl<'a, T> SubscriberBuilder<'a, T> {
             Some(descriptor) if caps.query => Some(declare_schema(self.cloudy, &mine, descriptor)?),
             _ => None,
         };
-
-        // The latched query waits for presence before firing (see the comment on `latched()`).
-        // Watching starts **after** subscribing, so live samples arriving while we wait are not lost.
-        let presence = if self.latched {
-            Some(self.cloudy.watch_key::<T>(&key)?)
-        } else {
-            None
-        };
-
-        tracing::debug!(key = %key, latched = self.latched, latest = ?self.latest, "subscriber declared");
         Ok(Subscriber {
-            chan,
-            _guard: guard,
+            core,
             _sub_token: sub_token,
             _schema: schema,
-            counters,
-            engine: Arc::clone(engine),
-            key,
-            latched: None,
-            latched_done: true,
-            presence,
-            presence_done: !self.latched,
-            queried: HashSet::new(),
-            seen: HashSet::new(),
             warned: HashSet::new(),
-            shutdown: self.cloudy.shutdown_handle(),
             _marker: PhantomData,
         })
+    }
+}
+
+/// The builder [`Cloudy::raw_subscriber`] returns — [`SubscriberBuilder`] for a type named at run time.
+#[must_use = "a builder does nothing until .build()"]
+pub struct RawSubscriberBuilder<'a> {
+    cloudy: &'a Cloudy,
+    ty: String,
+    latched: bool,
+    latest: Option<usize>,
+}
+
+impl<'a> RawSubscriberBuilder<'a> {
+    pub(crate) fn new(cloudy: &'a Cloudy, ty: String) -> Self {
+        Self {
+            cloudy,
+            ty,
+            latched: false,
+            latest: None,
+        }
+    }
+
+    /// Take a latched publisher's most recent value first ([`SubscriberBuilder::latched`]).
+    pub fn latched(mut self) -> Self {
+        self.latched = true;
+        self
+    }
+
+    /// Keep only the newest `n` samples ([`SubscriberBuilder::latest`]). A viewer drawing at frame rate
+    /// wants this: the default Fifo, left unread, blocks every subscription in the process.
+    pub fn latest(mut self, n: usize) -> Self {
+        self.latest = Some(n.max(1));
+        self
+    }
+
+    /// Declare the subscriber. The name must be one key segment — one type, no `*`.
+    pub fn build(self) -> Result<RawSubscriber> {
+        validate_segment("type", &self.ty)?;
+        let core = Core::declare(self.cloudy, &self.ty, None, self.latched, self.latest)?;
+        Ok(RawSubscriber { core })
     }
 }
 
@@ -449,7 +461,7 @@ impl Counters {
 
     /// Count a full buffer and say so **once**. Warning per sample buries the log; warning never is
     /// how a stall stays unexplained — the same trade the fingerprint-mismatch warning already makes.
-    fn note_full(&self, ty: &'static str, dropping: bool) {
+    fn note_full(&self, ty: &str, dropping: bool) {
         let counter = if dropping {
             &self.dropped
         } else {
@@ -555,33 +567,13 @@ impl Ring {
 /// }
 /// ```
 pub struct Subscriber<T> {
-    chan: Chan,
-    /// The subscription handle (merely held; dropping it undeclares).
-    _guard: Guard,
+    core: Core,
     /// Our own `…/<T>/@sub` presence token, so `Cloudy::subscribers::<T>()` can see us (merely held).
     _sub_token: Option<Guard>,
     /// The `@schema` queryable describing `T`, when it has a `DESCRIPTOR` (merely held).
     _schema: Option<Guard>,
-    /// The receive buffer's counters, shared with the engine's callback.
-    counters: Arc<Counters>,
-    /// What is needed to fire the latched query again (the engine and the subscription key).
-    engine: Arc<dyn Engine>,
-    key: Key,
-    /// The reply stream of the latched query in flight (fired on seeing presence).
-    latched: Option<Box<dyn RawReplies>>,
-    /// Whether that reply stream is drained. True when none was ever fired.
-    latched_done: bool,
-    /// When latched, the stream watching publishers join and leave.
-    presence: Option<Presence<T>>,
-    /// Whether the presence stream has ended. True from the start when not latched.
-    presence_done: bool,
-    /// The publisher ids already asked for their most recent value (forgotten on leave, re-asked on return).
-    queried: HashSet<String>,
-    /// The sources a live sample has already been delivered from. A latched reply arriving later is dropped.
-    seen: HashSet<String>,
     /// The sources already warned about a schema fingerprint mismatch (one warning per source).
     warned: HashSet<String>,
-    shutdown: Shutdown,
     _marker: PhantomData<T>,
 }
 
@@ -590,7 +582,7 @@ impl<T> Subscriber<T> {
     /// numbers matter — a non-zero `dropped` or `blocked` is a real problem, not a statistic.
     #[must_use]
     pub fn stats(&self) -> SubscriberStats {
-        self.counters.snapshot()
+        self.core.counters.snapshot()
     }
 }
 
@@ -605,6 +597,157 @@ impl<T: Message + Default + Topic> Subscriber<T> {
 
     /// The same as [`Subscriber::recv`], but it also gives the source id and the timestamp.
     pub async fn recv_envelope(&mut self) -> Option<Envelope<T>> {
+        loop {
+            // Still cancel-safe: `Core::recv` is, and nothing after it awaits.
+            let sample = self.core.recv().await?;
+            let source = sample.key.source.clone().unwrap_or_default();
+            if let Some(envelope) = unwrap_sample::<T>(&sample, source, &mut self.warned) {
+                return Some(envelope);
+            }
+        }
+    }
+}
+
+/// A subscriber for a type named at run time. Obtained from [`Cloudy::raw_subscriber`].
+///
+/// Nothing is decoded and no fingerprint is checked: every sample arrives with the sender's fingerprint
+/// beside it, for the caller to judge. It raises no `@sub` token and announces no `@schema` — a viewer
+/// watching the bus must not look like a consumer to [`Cloudy::subscribers`]. `recv` is cancel-safe and
+/// returns `None` on shutdown, as [`Subscriber::recv`] does.
+pub struct RawSubscriber {
+    core: Core,
+}
+
+impl RawSubscriber {
+    /// Receive the next sample. `None` once the channel is closed or shutdown was requested.
+    pub async fn recv(&mut self) -> Option<RawEnvelope> {
+        let sample = self.core.recv().await?;
+        Some(RawEnvelope {
+            schema: attachment_fingerprint(sample.attachment.as_deref()),
+            source: sample.key.source.unwrap_or_default(),
+            payload: sample.payload,
+            timestamp: sample.timestamp,
+        })
+    }
+
+    /// What the receive buffer has done so far ([`Subscriber::stats`]).
+    #[must_use]
+    pub fn stats(&self) -> SubscriberStats {
+        self.core.counters.snapshot()
+    }
+}
+
+/// What a typed and a raw subscriber share: the subscription, its receive buffer, and latched's
+/// "presence first, then get" with latest-wins. It hands out samples; decoding is the layer above.
+struct Core {
+    chan: Chan,
+    /// The subscription handle (merely held; dropping it undeclares).
+    _guard: Guard,
+    /// The receive buffer's counters, shared with the engine's callback.
+    counters: Arc<Counters>,
+    /// What is needed to fire the latched query again (the engine and the subscription key).
+    engine: Arc<dyn Engine>,
+    key: Key,
+    /// The reply stream of the latched query in flight (fired on seeing presence).
+    latched: Option<Box<dyn RawReplies>>,
+    /// Whether that reply stream is drained. True when none was ever fired.
+    latched_done: bool,
+    /// When latched, the stream watching publishers join and leave.
+    presence: Option<RawPresence>,
+    /// Whether the presence stream has ended. True from the start when not latched.
+    presence_done: bool,
+    /// The publisher ids already asked for their most recent value (forgotten on leave, re-asked on return).
+    queried: HashSet<String>,
+    /// The sources a live sample has already been delivered from. A latched reply arriving later is dropped.
+    seen: HashSet<String>,
+    shutdown: Shutdown,
+}
+
+impl Core {
+    /// Subscribe to `ty` (from `from`, or every source) behind a Fifo or a `latest` ring.
+    fn declare(
+        cloudy: &Cloudy,
+        ty: &str,
+        from: Option<&str>,
+        latched: bool,
+        latest: Option<usize>,
+    ) -> Result<Self> {
+        let engine = cloudy.engine();
+        let caps = engine.caps();
+        if from.is_none() && !caps.wildcard_source {
+            anyhow::bail!(
+                "subscriber of {ty}: this engine is point-to-point; name the source with `.from(id)`"
+            );
+        }
+        if latched && !(caps.query && caps.liveliness) {
+            anyhow::bail!(
+                "subscriber of {ty}: this engine has no query / liveliness, which latched needs"
+            );
+        }
+        let key = cloudy.key_for(from, ty);
+
+        // reiny owns the receive buffer. The engine's callback only pushes onto it (and counts).
+        let counters = Arc::new(Counters::default());
+        let label = ty.to_string();
+        let (chan, on_sample): (Chan, Callback<Sample>) = if let Some(n) = latest {
+            let ring = Arc::new(Ring::new(n));
+            let sink = Arc::clone(&ring);
+            let counters = Arc::clone(&counters);
+            (
+                Chan::Ring(ring),
+                Box::new(move |s| {
+                    counters.received.fetch_add(1, Ordering::Relaxed);
+                    if sink.push(s) {
+                        counters.note_full(&label, true);
+                    }
+                }),
+            )
+        } else {
+            let (tx, rx) = flume::bounded(FIFO_CAPACITY);
+            let counters = Arc::clone(&counters);
+            (
+                Chan::Fifo(rx),
+                Box::new(move |s| {
+                    counters.received.fetch_add(1, Ordering::Relaxed);
+                    // The behaviour is unchanged — a full buffer still blocks the engine's thread,
+                    // as zenoh's FifoChannel does. `try_send` runs first only so that it can be counted.
+                    if let Err(flume::TrySendError::Full(s)) = tx.try_send(s) {
+                        counters.note_full(&label, false);
+                        let _ = tx.send(s);
+                    }
+                }),
+            )
+        };
+        let guard = engine.subscribe(&key, on_sample)?;
+
+        // The latched query waits for presence before firing (see the comment on `latched()`).
+        // Watching starts **after** subscribing, so live samples arriving while we wait are not lost.
+        let presence = if latched {
+            Some(RawPresence::new(cloudy, &key)?)
+        } else {
+            None
+        };
+
+        tracing::debug!(key = %key, latched, latest = ?latest, "subscriber declared");
+        Ok(Self {
+            chan,
+            _guard: guard,
+            counters,
+            engine: Arc::clone(engine),
+            key,
+            latched: None,
+            latched_done: true,
+            presence,
+            presence_done: !latched,
+            queried: HashSet::new(),
+            seen: HashSet::new(),
+            shutdown: cloudy.shutdown_handle(),
+        })
+    }
+
+    /// The next sample — live, or a latched reply that no live sample from its source has overtaken.
+    /// Cancel-safe: no sample taken off a channel is held across an await point.
+    async fn recv(&mut self) -> Option<Sample> {
         let Self {
             chan,
             engine,
@@ -615,7 +758,6 @@ impl<T: Message + Default + Topic> Subscriber<T> {
             presence_done,
             queried,
             seen,
-            warned,
             shutdown,
             ..
         } = self;
@@ -626,8 +768,8 @@ impl<T: Message + Default + Topic> Subscriber<T> {
                 // The cue that a publisher appeared. Ask that id for its most recent value, once.
                 event = recv_presence(presence.as_mut()), if !*presence_done => {
                     match event {
-                        Some(PresenceEvent::Joined(id)) => {
-                            if queried.insert(id) {
+                        Some(engine::Presence::Joined(k)) => {
+                            if queried.insert(k.source.unwrap_or_default()) {
                                 let params = QueryParams { payload: None, attachment: None, timeout: LATCHED_TIMEOUT };
                                 match engine.query(key, params) {
                                     Ok(replies) => {
@@ -638,7 +780,7 @@ impl<T: Message + Default + Topic> Subscriber<T> {
                                 }
                             }
                         }
-                        Some(PresenceEvent::Left(id)) => { queried.remove(&id); }
+                        Some(engine::Presence::Left(k)) => { queried.remove(&k.source.unwrap_or_default()); }
                         None => *presence_done = true,
                     }
                 }
@@ -650,24 +792,18 @@ impl<T: Message + Default + Topic> Subscriber<T> {
                     };
                     let Ok(sample) = reply else { continue };
                     // latest-wins: drop a late reply from a source whose live samples we already delivered.
-                    let source = sample.key.source.clone().unwrap_or_default();
-                    if seen.contains(&source) {
+                    if seen.contains(sample.key.source.as_deref().unwrap_or_default()) {
                         continue;
                     }
-                    if let Some(envelope) = unwrap_sample::<T>(&sample, source, warned) {
-                        return Some(envelope);
-                    }
+                    return Some(sample);
                 }
                 sample = chan.recv() => {
                     let sample = sample?; // channel closed
-                    let source = sample.key.source.clone().unwrap_or_default();
                     // Only remembered while watching for latched (so a late "most recent" can be dropped).
                     if !*presence_done {
-                        seen.insert(source.clone());
+                        seen.insert(sample.key.source.clone().unwrap_or_default());
                     }
-                    if let Some(envelope) = unwrap_sample::<T>(&sample, source, warned) {
-                        return Some(envelope);
-                    }
+                    return Some(sample);
                 }
             }
         }
@@ -701,7 +837,7 @@ async fn recv_reply(replies: Option<&mut Box<dyn RawReplies>>) -> Option<ReplyRe
 }
 
 /// The presence counterpart of [`recv_reply`]. On a non-latched subscription `None` = `pending`.
-async fn recv_presence<T>(presence: Option<&mut Presence<T>>) -> Option<PresenceEvent> {
+async fn recv_presence(presence: Option<&mut RawPresence>) -> Option<engine::Presence> {
     match presence {
         Some(p) => p.recv().await,
         None => std::future::pending().await,
@@ -767,23 +903,42 @@ pub enum PresenceEvent {
 
 /// The event stream [`Cloudy::watch_publishers`] returns.
 pub struct Presence<T> {
-    rx: mpsc::UnboundedReceiver<PresenceEvent>,
-    /// The watch handle (merely held).
-    _guard: Guard,
-    shutdown: Shutdown,
+    raw: RawPresence,
     _marker: PhantomData<T>,
 }
 
 impl<T> Presence<T> {
     pub(crate) fn new(cloudy: &Cloudy, key: &Key) -> Result<Self> {
+        Ok(Self {
+            raw: RawPresence::new(cloudy, key)?,
+            _marker: PhantomData,
+        })
+    }
+
+    /// Wait for the next event. `None` on shutdown or once the channel ends.
+    pub async fn recv(&mut self) -> Option<PresenceEvent> {
+        Some(match self.raw.recv().await? {
+            engine::Presence::Joined(k) => PresenceEvent::Joined(k.source.unwrap_or_default()),
+            engine::Presence::Left(k) => PresenceEvent::Left(k.source.unwrap_or_default()),
+        })
+    }
+}
+
+/// Join / leave events carrying the whole key — what [`Cloudy::watch_keys`] returns, for a tool that
+/// learns the types from the bus instead of naming them.
+pub struct RawPresence {
+    rx: mpsc::UnboundedReceiver<engine::Presence>,
+    /// The watch handle (merely held).
+    _guard: Guard,
+    shutdown: Shutdown,
+}
+
+impl RawPresence {
+    pub(crate) fn new(cloudy: &Cloudy, key: &Key) -> Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         let guard = cloudy.engine().watch_alive(
             key,
             Box::new(move |event| {
-                let event = match event {
-                    RawPresence::Joined(k) => PresenceEvent::Joined(k.source.unwrap_or_default()),
-                    RawPresence::Left(k) => PresenceEvent::Left(k.source.unwrap_or_default()),
-                };
                 let _ = tx.send(event);
             }),
         )?;
@@ -791,12 +946,11 @@ impl<T> Presence<T> {
             rx,
             _guard: guard,
             shutdown: cloudy.shutdown_handle(),
-            _marker: PhantomData,
         })
     }
 
-    /// Wait for the next event. `None` on shutdown or once the channel ends.
-    pub async fn recv(&mut self) -> Option<PresenceEvent> {
+    /// Wait for the next event. `None` on shutdown or once the channel ends. Cancel-safe.
+    pub async fn recv(&mut self) -> Option<engine::Presence> {
         tokio::select! {
             biased;
             () = self.shutdown.wait() => None,

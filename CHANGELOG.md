@@ -8,6 +8,17 @@ Versions are kept in lockstep via `[workspace.package].version`.
 ## Unreleased
 
 ### Added
+- **`reiny`** — introspection **by name**, for a tool that learns the types from the
+  bus (a viewer) instead of naming them in code, on every engine:
+  `Cloudy::raw_subscriber(ty)` hands out `RawEnvelope { payload, source, schema,
+  timestamp }` — undecoded, fingerprint unchecked, with `.latched()` / `.latest(n)`,
+  the same receive buffers and cancel-safety as `Subscriber`, and no `@sub` token
+  (a viewer is not a consumer); `Cloudy::watch_keys(&Key)` streams joins / leaves
+  with whole keys (`Key::all(domain)` = every publisher of every type); and
+  `Cloudy::schemas(ty)` collects the `FileDescriptorSet`s launches serve at
+  `@schema`, verbatim. The one-shot list stays `engine().alive(&key, timeout)`.
+  This reverses 0.3.0 §4's "no `subscribe_raw`": `session()` was the answer then,
+  and since 0.5 it only exists on zenoh.
 - **`reiny`** — `--config <path>` is read as YAML; a `.toml` or `.json` extension
   selects that format instead. All three land in the same `toml::Table` through
   serde, so the generated `config()` and `config_table()` are unchanged. A YAML
@@ -20,6 +31,10 @@ Versions are kept in lockstep via `[workspace.package].version`.
   bundle round-trips. The examples' `ping-pong.toml` are now `ping-pong.yaml`.
 
 ### Changed
+- **`reiny`** — `Key::matches` treats `*` inside a chunk as one non-verbatim
+  segment (it compared chunks exactly), so `…/<T>/@schema/*` matches on `Local`,
+  iceoryx2 and link the way zenoh's key expressions always did. `@sub` /
+  `@service` / `@launch` stay unreachable from `*`.
 - **Dependencies** — prost / prost-build / prost-types 0.13 → **0.14**,
   prost-reflect 0.14 → 0.16, flume 0.11 → 0.12, toml 0.8 → 1.0, syn 2 → 3,
   zenoh 1.9 → **1.10**, plus every compatible bump in the lock files.

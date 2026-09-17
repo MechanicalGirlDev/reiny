@@ -47,11 +47,12 @@ mod runtime;
 mod service;
 mod shutdown;
 
-use engine::{Engine, Guard, Key, SERVICE_CHUNK, SUB_CHUNK};
+use engine::{Engine, Guard, Key, QueryParams, SCHEMA_CHUNK, SERVICE_CHUNK, SUB_CHUNK};
 use shutdown::Shutdown;
 
 pub use pubsub::{
-    Envelope, Presence, PresenceEvent, Publisher, PublisherBuilder, Subscriber, SubscriberBuilder,
+    Envelope, Presence, PresenceEvent, Publisher, PublisherBuilder, RawDescriptor, RawEnvelope,
+    RawPresence, RawSubscriber, RawSubscriberBuilder, Subscriber, SubscriberBuilder,
     SubscriberStats,
 };
 #[cfg(feature = "zenoh")]
@@ -303,6 +304,63 @@ impl Cloudy {
     /// Join / leave events for servers of the request type `S` (the server side of [`Cloudy::watch_publishers`]).
     pub fn watch_servers<S: Service>(&self) -> Result<Presence<S>> {
         self.watch_key(&self.key_for(None, S::TYPE).with_chunk(SERVICE_CHUNK))
+    }
+
+    /// A subscriber builder for the type **named** `ty` — for a tool that learns the types from the bus
+    /// ([`Cloudy::watch_keys`]) instead of naming them in code. Samples arrive undecoded, fingerprint
+    /// unchecked; see [`RawSubscriber`]. A launch names its types and uses [`Cloudy::subscriber`].
+    pub fn raw_subscriber(&self, ty: impl Into<String>) -> RawSubscriberBuilder<'_> {
+        RawSubscriberBuilder::new(self, ty.into())
+    }
+
+    /// Join / leave events, whole keys included, for every presence token matching the pattern `key` —
+    /// [`Cloudy::watch_publishers`] and friends for a tool that does not know the types in advance.
+    /// Tokens already alive arrive first as `Joined`.
+    ///
+    /// [`Key::all`]`(cloudy.domain())` is every publisher of every type; `.with_chunk(`[`engine::SUB_CHUNK`]`)`
+    /// / `.with_chunk(`[`engine::SERVICE_CHUNK`]`)` are the subscribers / servers, and
+    /// [`Key::launch`]`(domain, None)` is the launches. The one-shot list is `engine().alive(&key, timeout)`.
+    pub fn watch_keys(&self, key: &Key) -> Result<RawPresence> {
+        RawPresence::new(self, key)
+    }
+
+    /// The descriptors live launches announce at `@schema` for the type **named** `ty`: one per
+    /// publisher or subscriber of it, two per server (request and response). Sorted by source.
+    ///
+    /// Only types with a [`Topic::DESCRIPTOR`] answer — every `reiny-build` generated type has one.
+    /// The bytes come back as they were served; decoding them (`prost-reflect`) is the caller's job.
+    pub async fn schemas(&self, ty: &str) -> Result<Vec<RawDescriptor>> {
+        validate_segment("type", ty)?;
+        if !self.engine.caps().query {
+            anyhow::bail!("schemas of {ty}: this engine has no query support, which @schema needs");
+        }
+        let key = self
+            .key_for(None, ty)
+            .with_chunk(format!("{SCHEMA_CHUNK}/*"));
+        let params = QueryParams {
+            payload: None,
+            attachment: None,
+            timeout: ALIVE_TIMEOUT,
+        };
+        let mut replies = self.engine.query(&key, params)?;
+        let mut found = Vec::new();
+        while let Some(reply) = replies.next().await {
+            let Ok(sample) = reply else { continue };
+            let message = sample
+                .key
+                .chunk
+                .as_deref()
+                .and_then(|c| c.strip_prefix(SCHEMA_CHUNK)?.strip_prefix('/'));
+            if let (Some(source), Some(message)) = (sample.key.source, message) {
+                found.push(RawDescriptor {
+                    source,
+                    message: message.to_string(),
+                    file_set: sample.payload,
+                });
+            }
+        }
+        found.sort();
+        Ok(found)
     }
 
     /// The engine underneath. Reach another engine's own features through `engine().as_any().downcast_ref::<E>()`.

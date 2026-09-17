@@ -79,7 +79,8 @@ pub struct Key {
     /// token puts the verbatim `@launch` in the type slot (which `*` does not match).
     pub ty: Option<String>,
     /// The verbatim chunk after the type (`@service` / `@schema/<message>`). It matches neither `*` nor
-    /// `**` — the isolation that keeps a type's topic clean. Even in a pattern it compares exactly.
+    /// `**` — the isolation that keeps a type's topic clean. In a pattern it compares segment by segment,
+    /// where `*` stands for one non-verbatim segment (`@schema/*` = every message a type describes).
     pub chunk: Option<String>,
 }
 
@@ -152,7 +153,7 @@ impl Key {
     }
 
     /// Whether `key` matches `self` taken as a pattern. A `None` segment is `*`, a `*` type does not
-    /// match a verbatim one (`@launch`), and a chunk compares exactly.
+    /// match a verbatim one (`@launch`), and a chunk compares segment by segment with the same rule.
     #[must_use]
     pub fn matches(&self, key: &Key) -> bool {
         let ty_ok = match (&self.ty, &key.ty) {
@@ -160,13 +161,23 @@ impl Key {
             (None, None) => true,
             (Some(p), other) => other.as_ref() == Some(p),
         };
+        let chunk_ok = match (&self.chunk, &key.chunk) {
+            (None, None) => true,
+            (Some(p), Some(c)) => {
+                p.split('/').count() == c.split('/').count()
+                    && p.split('/')
+                        .zip(c.split('/'))
+                        .all(|(p, c)| p == c || (p == "*" && !c.starts_with('@')))
+            }
+            _ => false,
+        };
         self.domain == key.domain
             && self
                 .source
                 .as_ref()
                 .is_none_or(|s| key.source.as_ref() == Some(s))
             && ty_ok
-            && self.chunk == key.chunk
+            && chunk_ok
     }
 }
 
@@ -389,5 +400,26 @@ mod tests {
         assert!(!any.matches(&sub_key), "publishers::<T>() must not see it");
         assert!(!all.matches(&sub_key), "bag record's */* must not see it");
         assert_eq!(sub_key.to_string(), "reiny/lab/a/T/@sub");
+        // `*` inside a chunk is one non-verbatim segment: how `Cloudy::schemas` reaches every message.
+        let schemas = any.with_chunk(format!("{SCHEMA_CHUNK}/*"));
+        let described =
+            Key::topic("lab", Some("a"), "T").with_chunk(format!("{SCHEMA_CHUNK}/hs.T"));
+        assert!(schemas.matches(&described));
+        assert!(
+            !schemas.matches(&Key::topic("lab", Some("a"), "T")),
+            "not the latched responder"
+        );
+        assert!(
+            !schemas.matches(&described.with_chunk(SCHEMA_CHUNK)),
+            "one segment, not zero"
+        );
+        assert!(
+            !schemas.matches(&described.with_chunk("@schema/a/b")),
+            "nor two"
+        );
+        assert!(
+            !any.with_chunk("*").matches(&sub_key),
+            "`*` never reaches a verbatim segment"
+        );
     }
 }
