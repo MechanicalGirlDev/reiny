@@ -48,7 +48,7 @@ jobs:
       run:
         working-directory: examples/${{ matrix.example }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # toolchain は rust-toolchain.toml(channel = "1.96")が上方探索で効く。
       # fmt / clippy コンポーネントだけ明示的に入れておく。
