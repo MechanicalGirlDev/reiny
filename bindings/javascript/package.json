@@ -17,10 +17,10 @@
     "smoke:typescript": "tsx examples/local.ts"
   },
   "engines": { "node": ">=20" },
-  "dependencies": { "koffi": "^2.14.0" },
+  "dependencies": { "koffi": "^3.0.0" },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^24.0.0",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "typescript": "^7.0.0"
   }
 }

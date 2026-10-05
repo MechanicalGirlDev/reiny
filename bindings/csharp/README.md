@@ -1,6 +1,8 @@
 # reiny for C#
 
-The `Reiny` project targets .NET 8 and uses portable Cdecl `DllImport` calls
+The `Reiny` library and `Smoke` executable target .NET 10 (`net10.0`).
+Building requires the .NET 10 SDK; running requires the .NET 10 runtime
+(included with the SDK). The bindings use portable Cdecl `DllImport` calls
 to the additive C API in the same native library used by UniFFI.
 
 Set `REINY_FFI_LIBRARY` to an absolute path to `reiny_ffi.dll`,
