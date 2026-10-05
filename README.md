@@ -46,18 +46,59 @@ zenoh major bump is a reiny breaking change.
 
 ## Crates
 
+### Everyday Rust development
+
+For a Rust launch, depend on `reiny` and add `reiny-build` under
+`[build-dependencies]`. Install `reiny-cli` for the `reiny` command.
+
 | Crate | Role |
 | --- | --- |
 | [`reiny`](crates/reiny) | The SDK itself: `Cloudy` (the pub/sub handle) and the `#[reiny::main]` runtime |
+| [`reiny-build`](crates/reiny-build) | `build.rs` helper: compiles protos from `Reiny.toml` and generates types/topics |
+| [`reiny-cli`](crates/reiny-cli) | The `reiny` command: scaffold (new/init/add), check, build, run, compress, bag, topic / node / service introspection, `bridge serial\|udp\|iceoryx2` |
+
+### Supporting libraries
+
+These are normally used through the SDK or CLI. Depend on them directly when
+sharing message types with MCU firmware or embedding the launcher.
+
+| Crate | Role |
+| --- | --- |
 | [`reiny-core`](crates/reiny-core) | The type vocabulary (`Topic` / `Service` / `Descriptor` / `Qos`), `no_std`; re-exported by `reiny`, used directly by MCU firmware |
-| [`reiny-iceoryx2`](crates/reiny-iceoryx2) | `Engine` on iceoryx2 — launches on one host over shared memory (needs libclang to build on Windows / macOS; not in `default-members`) |
+| [`reiny-macros`](crates/reiny-macros) | The `#[reiny::main]` proc-macro (used via `reiny`) |
+| [`reiny-launch`](crates/reiny-launch) | Launcher library: spawns launch processes from a launch config's `[launch]` section, in dependency order and with respawn backoff; can be embedded without the communication SDK |
+
+### Optional integrations
+
+Choose these for the transport, ecosystem, or language your application needs.
+
+| Crate | Role |
+| --- | --- |
+| [`reiny-link`](crates/reiny-link) | reiny over anything that moves bytes: a `no_std` sans-I/O `Link` plus host-side serial / UDP transports, a tokio `Host`, and `LinkEngine` to put a `Cloudy` on the link |
+| [`reiny-iceoryx2`](crates/reiny-iceoryx2) | `Engine` on iceoryx2 — launches on one host over shared memory (needs libclang to build on Windows / macOS) |
 | [`reiny-ros2`](crates/reiny-ros2) | ROS 2 bridge library on pure-Rust DDS (`ros2-client`): typed `export` / `import` of topics and services from a bridge launch, no ROS install |
 | [`reiny-ffi`](crates/reiny-ffi) | UniFFI SDK for Python, Kotlin, Swift, and Ruby; shared C ABI for C, C++, JavaScript, TypeScript, and C# |
-| [`reiny-link`](crates/reiny-link) | reiny over anything that moves bytes: a `no_std` sans-I/O `Link` plus host-side serial / UDP transports, a tokio `Host`, and `LinkEngine` to put a `Cloudy` on the link |
-| [`reiny-macros`](crates/reiny-macros) | The `#[reiny::main]` proc-macro (used via `reiny`) |
-| [`reiny-build`](crates/reiny-build) | `build.rs` helper: compiles protos from `Reiny.toml` and generates types/topics |
-| [`reiny-launch`](crates/reiny-launch) | Launcher library: spawns launch processes from a launch config's `[launch]` section, in dependency order and with respawn backoff |
-| [`reiny-cli`](crates/reiny-cli) | The `reiny` command: scaffold (new/init/add), check, build, run, compress, bag, topic / node / service introspection, `bridge serial\|udp\|iceoryx2` |
+
+### Building this repository
+
+At the repository root, `cargo build`, `cargo test`, and `cargo clippy` select
+`reiny`, `reiny-cli`, and `reiny-build`. Their required supporting libraries are
+still built as dependencies, including `reiny-link` for the CLI's serial / UDP
+bridge. ROS 2, FFI, and iceoryx2 are not part of this default selection.
+
+Select an integration or supporting library explicitly with `-p`:
+
+```sh
+cargo build -p reiny-ros2
+cargo build -p reiny-ffi --features bindgen
+cargo build -p reiny-iceoryx2
+cargo test -p reiny-launch
+```
+
+`cargo test` at the root runs only the selected packages' tests, not their
+dependencies' own tests. Use `cargo test --workspace` for all ten crates; CI
+uses `--workspace` for Clippy and tests as well. The iceoryx2 build requires
+libclang on Windows / macOS. `cargo fmt --all --check` checks the entire workspace.
 
 ## Getting started
 
