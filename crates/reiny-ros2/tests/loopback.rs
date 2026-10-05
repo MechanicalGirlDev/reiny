@@ -15,10 +15,10 @@ use std::time::Duration;
 use reiny::engine::Local;
 use reiny::{Cloudy, Qos, RuntimeOptions, Service, Topic};
 use reiny_ros2::Ros;
+use reiny_ros2::ros2_client::dds::rustdds::DomainParticipantBuilder;
 use reiny_ros2::ros2_client::ros2::{QosPolicyBuilder, policy};
-use reiny_ros2::ros2_client::rustdds::DomainParticipantBuilder;
 use reiny_ros2::ros2_client::{
-    AService, Context, Message, MessageTypeName, Name, NodeName, NodeOptions, ServiceMapping,
+    Context, Message, MessageTypeName, Name, NodeName, NodeOptions, QosProfile, ServiceMapping,
     ServiceTypeName,
 };
 use serde::{Deserialize, Serialize};
@@ -178,12 +178,14 @@ async fn bridge_round_trips_with_a_ros_node() {
         .unwrap();
     let spinner = ros_node.spinner().unwrap();
     tokio::spawn(spinner.spin());
-    let qos = QosPolicyBuilder::new()
-        .reliability(policy::Reliability::Reliable {
-            max_blocking_time: reiny_ros2::ros2_client::ros2::Duration::from_millis(100),
-        })
-        .history(policy::History::KeepLast { depth: 10 })
-        .build();
+    let qos = QosProfile::from(
+        &QosPolicyBuilder::new()
+            .reliability(policy::Reliability::Reliable {
+                max_blocking_time: reiny_ros2::ros2_client::ros2::Duration::from_millis(100),
+            })
+            .history(policy::History::KeepLast { depth: 10 })
+            .build(),
+    );
     let state_topic = ros_node
         .create_topic(
             &Name::parse("/state").unwrap(),
@@ -205,7 +207,7 @@ async fn bridge_round_trips_with_a_ros_node() {
         .create_publisher::<RosCmd>(&cmd_topic, Some(qos.clone()))
         .unwrap();
     let ros_add = ros_node
-        .create_client::<AService<RosAddReq, RosAddRes>>(
+        .create_client::<RosAddReq, RosAddRes>(
             ServiceMapping::Enhanced,
             &Name::parse("/add").unwrap(),
             &ServiceTypeName::new("test_srvs", "Add"),
@@ -214,7 +216,7 @@ async fn bridge_round_trips_with_a_ros_node() {
         )
         .unwrap();
     let ros_echo = ros_node
-        .create_server::<AService<RosEchoReq, RosEchoRes>>(
+        .create_server::<RosEchoReq, RosEchoRes>(
             ServiceMapping::Enhanced,
             &Name::parse("/echo").unwrap(),
             &ServiceTypeName::new("test_srvs", "Echo"),

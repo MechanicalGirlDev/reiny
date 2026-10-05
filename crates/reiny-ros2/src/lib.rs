@@ -38,11 +38,11 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use prost::Message as ProstMessage;
 use reiny::{Cloudy, Durability, History, Qos, Reliability, Result, Service, Topic};
+use ros2_client::dds::rustdds::DomainParticipantBuilder;
 use ros2_client::ros2::{QosPolicies, QosPolicyBuilder, policy};
-use ros2_client::rustdds::DomainParticipantBuilder;
 use ros2_client::{
-    AService, Context, ContextOptions, Message, MessageTypeName, Name, Node, NodeName, NodeOptions,
-    ServiceMapping, ServiceTypeName,
+    Context, ContextOptions, Message, MessageTypeName, Name, Node, NodeName, NodeOptions,
+    QosProfile, ServiceMapping, ServiceTypeName,
 };
 use tokio::task::JoinHandle;
 
@@ -169,7 +169,7 @@ impl<'c> Ros<'c> {
         F: Fn(T) -> Result<R> + Send + 'static,
     {
         let name = parse_name(topic)?;
-        let policies = qos_policies(qos);
+        let policies = QosProfile::from(&qos_policies(qos));
         let publisher = {
             let mut node = lock(&self.node);
             let ros_topic = node.create_topic(&name, ty, &policies).map_err(err)?;
@@ -240,7 +240,7 @@ impl<'c> Ros<'c> {
         F: Fn(R) -> Result<T> + Send + 'static,
     {
         let name = parse_name(topic)?;
-        let policies = qos_policies(qos);
+        let policies = QosProfile::from(&qos_policies(qos));
         let subscription = {
             let mut node = lock(&self.node);
             let ros_topic = node.create_topic(&name, ty, &policies).map_err(err)?;
@@ -300,12 +300,12 @@ impl<'c> Ros<'c> {
     {
         let service_name = parse_name(name)?;
         let server = lock(&self.node)
-            .create_server::<AService<Q, P>>(
+            .create_server::<Q, P>(
                 ServiceMapping::Enhanced,
                 &service_name,
                 ty,
-                service_qos(),
-                service_qos(),
+                QosProfile::from(&service_qos()),
+                QosProfile::from(&service_qos()),
             )
             .map_err(err)?;
         let caller = self.cloudy.caller::<S>().build();
@@ -352,12 +352,12 @@ impl<'c> Ros<'c> {
     {
         let service_name = parse_name(name)?;
         let client = lock(&self.node)
-            .create_client::<AService<Q, P>>(
+            .create_client::<Q, P>(
                 ServiceMapping::Enhanced,
                 &service_name,
                 ty,
-                service_qos(),
-                service_qos(),
+                QosProfile::from(&service_qos()),
+                QosProfile::from(&service_qos()),
             )
             .map_err(err)?;
         let mut server = self.cloudy.serve::<S>()?;
