@@ -113,7 +113,10 @@ fn publisher_presence_ends_when_last_handle_is_dropped() {
     drop(publisher);
 
     // Then: an ordered presence query observes its undeclaration.
-    assert!(session.publishers("Ping".into(), 1000).unwrap().is_empty());
+    assert_eq!(
+        session.publishers("Ping".into(), 1000).unwrap(),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -167,13 +170,9 @@ fn children_keep_session_and_bus_alive() {
     publisher.send(Vec::new()).unwrap();
 
     // Then: the underlying runtime and engine remain available.
-    assert!(
-        subscription
-            .receive(1000)
-            .unwrap()
-            .unwrap()
-            .payload
-            .is_empty()
+    assert_eq!(
+        subscription.receive(1000).unwrap().unwrap().payload,
+        Vec::<u8>::new()
     );
 }
 

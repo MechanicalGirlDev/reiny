@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn empty_input_renders_nothing() {
-        assert!(render(&[], &[], false).is_empty());
-        assert!(render(&names(&["a"]), &[], false).is_empty());
+        assert_eq!(render(&[], &[], false), Vec::<String>::new());
+        assert_eq!(render(&names(&["a"]), &[], false), Vec::<String>::new());
     }
 }

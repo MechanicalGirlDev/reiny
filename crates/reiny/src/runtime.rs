@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(o.domain, "lab");
         assert_eq!(o.log_level, Level::DEBUG);
         assert_eq!(o.config_path, Some(PathBuf::from("g.toml")));
-        assert!(o.extra_args.is_empty());
+        assert_eq!(o.extra_args, Vec::<String>::new());
     }
 
     #[test]

@@ -445,11 +445,11 @@ mod tests {
 
         drop(token);
         assert_eq!(recv(&rx), Presence::Left(Key::launch("lab", Some("a"))));
-        assert!(
+        assert_eq!(
             bus.alive(&Key::launch("lab", None), Duration::from_secs(5))
                 .await
-                .unwrap()
-                .is_empty()
+                .unwrap(),
+            Vec::<Key>::new()
         );
     }
 

@@ -212,7 +212,10 @@ async fn services_round_trip_presence_and_latched_coexistence() {
         timeout(PATIENCE, watch.recv()).await.expect("leave event"),
         Some(PresenceEvent::Left("srv".to_string()))
     );
-    assert!(client.servers::<Add>().await.expect("servers").is_empty());
+    assert_eq!(
+        client.servers::<Add>().await.expect("servers"),
+        Vec::<String>::new()
+    );
 
     // --- a launch that latched-publishes and serves the same type ---
     let cfg_pub = other

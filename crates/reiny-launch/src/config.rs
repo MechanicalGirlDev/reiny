@@ -186,7 +186,7 @@ mod tests {
         assert_eq!(g.bin(), None);
         assert_eq!(g.on_exit(), OnExit::Ignore);
         assert!(g.enabled());
-        assert!(g.depends_on().is_empty());
+        assert_eq!(g.depends_on().len(), 0);
     }
 
     #[test]

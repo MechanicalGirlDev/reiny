@@ -279,7 +279,7 @@ mod tests {
         let gui = get(&p, "gui").expect("gui present");
         assert_eq!(gui.bin, "gui", "bin defaults to the launch key");
         assert_eq!(gui.on_exit, OnExit::Ignore);
-        assert!(gui.depends_on.is_empty());
+        assert_eq!(gui.depends_on, Vec::<String>::new());
         assert!(gui.args.iter().any(|a| a == "--config"));
         assert!(gui.args.iter().any(|a| a.ends_with("configs/gui.toml")));
     }
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn empty_config_yields_empty_plan() {
         let p = plan("");
-        assert!(p.launches.is_empty());
+        assert_eq!(p.launches.len(), 0);
         p.validate().unwrap();
     }
 

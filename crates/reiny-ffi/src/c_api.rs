@@ -372,7 +372,7 @@ mod tests {
         assert_eq!(boundary(|| Ok(())), 0);
         // SAFETY: the error pointer is consumed before any further bridge call.
         unsafe {
-            assert!(CStr::from_ptr(reiny_last_error()).to_bytes().is_empty());
+            assert_eq!(CStr::from_ptr(reiny_last_error()).to_bytes(), b"");
         }
     }
 }

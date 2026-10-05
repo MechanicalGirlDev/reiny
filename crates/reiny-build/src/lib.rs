@@ -1935,7 +1935,7 @@ mod tests {
         assert_eq!(ty, "Msg");
 
         let (pkg, ty) = split_message("Bare").unwrap();
-        assert!(pkg.is_empty());
+        assert_eq!(pkg, Vec::<String>::new());
         assert_eq!(ty, "Bare");
     }
 

@@ -476,7 +476,7 @@ mod tests {
             .unwrap();
             let (h, payload) = parse(&raw[..n]).unwrap();
             assert_eq!(h.kind, kind);
-            assert!(payload.is_empty());
+            assert_eq!(payload, b"");
         }
     }
 

@@ -273,15 +273,14 @@ pub struct Publisher<T> {
 impl<T: Message + Topic> Publisher<T> {
     /// Encode the message and publish it. With a `T::SCHEMA`, the fingerprint rides in the attachment.
     ///
-    /// Under `Reliable` (the default) it blocks while the send path is congested. It is `async` to keep
-    /// the shape of the API — no engine today has an await point in here.
-    #[allow(clippy::unused_async)] // API since 0.4; kept for the day an engine really does wait.
+    /// Under `Reliable` (the default) polling the future blocks while the send path is congested.
+    /// The future is lazy, even though no engine today has an await point in here.
     pub async fn send(&self, message: T) -> Result<()> {
         let buf = message.encode_to_vec();
         if self.queryable.is_some() {
             *lock(&self.last) = Some(buf.clone());
         }
-        self.raw.put(buf, fingerprint(T::SCHEMA))
+        std::future::ready(self.raw.put(buf, fingerprint(T::SCHEMA))).await
     }
 }
 
@@ -993,6 +992,25 @@ mod tests {
             attachment,
             timestamp: None,
         }
+    }
+
+    #[tokio::test]
+    async fn send_is_deferred_until_its_future_is_polled() {
+        let bus = Arc::new(crate::engine::Local::new());
+        let sender = crate::engine::conformance::cloudy(bus.clone(), "sender").await;
+        let receiver = crate::engine::conformance::cloudy(bus, "receiver").await;
+        let publisher = sender.publish::<State>().expect("publisher");
+        let mut subscriber = receiver.subscribe::<State>().expect("subscriber");
+
+        let unpolled = publisher.send(State { x: 1 });
+        // The ordered local bus delivers this sentinel after any earlier publication.
+        publisher.send(State { x: 2 }).await.expect("sentinel");
+        let message = tokio::time::timeout(Duration::from_secs(5), subscriber.recv())
+            .await
+            .expect("sample within patience")
+            .expect("subscription open");
+        assert_eq!(message.x, 2);
+        drop(unpolled);
     }
 
     /// The fingerprint travels as 8 bytes little-endian, and anything else in the attachment is

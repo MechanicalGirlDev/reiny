@@ -210,7 +210,7 @@ mod tests {
             },
         )
         .expect_err("the ROS struct has no matching field");
-        assert!(!err.to_string().is_empty());
+        assert_ne!(err.to_string(), "");
     }
 
     /// The closure form exists precisely for types the automatic path cannot serve, so the error has

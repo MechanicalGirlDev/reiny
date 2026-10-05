@@ -137,10 +137,16 @@ async fn cloudy_over_a_link() {
     );
     assert_eq!(cloudy.publishers::<Pos>().await.unwrap(), ["mcu"]);
     assert_eq!(cloudy.servers::<Add>().await.unwrap(), ["mcu"]);
-    assert!(cloudy.publishers::<Cmd>().await.unwrap().is_empty());
+    assert_eq!(
+        cloudy.publishers::<Cmd>().await.unwrap(),
+        Vec::<String>::new()
+    );
     // What the MCU listens for shows up as presence too, and does not leak into publishers::<Cmd>().
     assert_eq!(cloudy.subscribers::<Cmd>().await.unwrap(), ["mcu"]);
-    assert!(cloudy.subscribers::<Pos>().await.unwrap().is_empty());
+    assert_eq!(
+        cloudy.subscribers::<Pos>().await.unwrap(),
+        Vec::<String>::new()
+    );
 
     // MCU → Cloudy: Data (the fingerprint reaches the attachment by way of the Hello).
     let mut sub = cloudy.subscribe::<Pos>().unwrap();
@@ -263,8 +269,11 @@ async fn peer_loss_retracts_presence() {
         timeout(WAIT, watch.recv()).await.unwrap(),
         Some(PresenceEvent::Left("mcu".to_string()))
     );
-    assert!(cloudy.publishers::<Pos>().await.unwrap().is_empty());
-    assert!(cloudy.servers::<Add>().await.unwrap().is_empty());
+    assert_eq!(
+        cloudy.publishers::<Pos>().await.unwrap(),
+        Vec::<String>::new()
+    );
+    assert_eq!(cloudy.servers::<Add>().await.unwrap(), Vec::<String>::new());
 }
 
 /// A request the MCU never announced with `calls()` reaches the bridge as a bare hash it cannot name,

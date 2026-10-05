@@ -161,22 +161,21 @@ pub struct Request<S: Service> {
     key: Key,
 }
 
-// `reply` / `reply_err` have been `async fn` since 0.4. No engine today has an await point in them, but
-// the shape is kept for the day one really does wait.
-#[allow(clippy::unused_async)]
+// Replies stay lazy futures, even though no engine today has an await point in them.
 impl<S: Service> Request<S> {
     /// Send the reply. With an `S::Response::SCHEMA`, the fingerprint rides in the attachment.
     pub async fn reply(self, response: S::Response) -> Result<()> {
-        self.query.reply(
+        std::future::ready(self.query.reply(
             &self.key,
             response.encode_to_vec(),
             fingerprint(S::Response::SCHEMA),
-        )
+        ))
+        .await
     }
 
     /// Answer with an error. The caller receives this string as [`CallError::Remote`].
     pub async fn reply_err(self, message: impl Into<String>) -> Result<()> {
-        self.query.reply_err(message.into().into_bytes())
+        std::future::ready(self.query.reply_err(message.into().into_bytes())).await
     }
 }
 

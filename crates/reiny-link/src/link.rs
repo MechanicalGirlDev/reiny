@@ -1098,7 +1098,7 @@ mod tests {
         assert_eq!(b.decode::<Cmd>(&f), None, "wrong type");
         assert!(b.next().is_none());
         // The handle goes stale on the next next().
-        assert!(b.payload(&f).is_empty());
+        assert_eq!(b.payload(&f), b"");
     }
 
     /// A stale handle must decode to `None`, not to a default-valued message. An empty payload is a
@@ -1123,7 +1123,7 @@ mod tests {
         assert_eq!(b.decode::<Pos>(&first), Some(Pos { x: 42 }));
         // Pulling the next frame invalidates the previous handle.
         assert!(matches!(b.next(), Some(Event::Data(_))));
-        assert!(b.payload(&first).is_empty());
+        assert_eq!(b.payload(&first), b"");
         assert_eq!(b.decode::<Pos>(&first), None, "stale handle decoded anyway");
     }
 

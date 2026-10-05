@@ -35,10 +35,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # toolchain は rust-toolchain.toml(channel = "1.96")が効く。
-      # fmt / clippy コンポーネントだけ明示的に入れておく。
-      - name: Install Rust 1.96 (rustfmt, clippy)
-        run: rustup toolchain install 1.96 --profile minimal --component rustfmt --component clippy
+      # Install validation components for the repository's selected toolchain.
+      - name: Install repository Rust toolchain (rustfmt, clippy)
+        run: rustup component add rustfmt clippy
 
       # protoc は protoc-bin-vendored で同梱されるため別途インストール不要。
 

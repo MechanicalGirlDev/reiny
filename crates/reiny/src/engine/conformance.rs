@@ -173,11 +173,9 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
 
     // --- subscriber presence (`@sub`): who is listening, publisher or no publisher ---
     // `Sum` has neither a publisher nor another subscriber here, so the answer is unambiguous.
-    assert!(
-        a.subscribers::<Sum>()
-            .await
-            .expect("subscribers")
-            .is_empty()
+    assert_eq!(
+        a.subscribers::<Sum>().await.expect("subscribers"),
+        Vec::<String>::new()
     );
     let mut watch_subs = a.watch_subscribers::<Sum>().expect("watch subscribers");
     let listener = b.subscribe::<Sum>().expect("subscriber");
@@ -187,7 +185,10 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
     );
     assert_eq!(a.subscribers::<Sum>().await.expect("subscribers"), ["b"]);
     // A listener is not a publisher: `@sub` must not leak into the type's own key.
-    assert!(a.publishers::<Sum>().await.expect("publishers").is_empty());
+    assert_eq!(
+        a.publishers::<Sum>().await.expect("publishers"),
+        Vec::<String>::new()
+    );
     drop(listener);
     assert_eq!(
         timeout(PATIENCE, watch_subs.recv()).await.expect("leave"),
@@ -206,11 +207,9 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
         timeout(PATIENCE, watch.recv()).await.expect("leave"),
         Some(PresenceEvent::Left("a".to_string()))
     );
-    assert!(
-        b.publishers::<Probe>()
-            .await
-            .expect("publishers")
-            .is_empty()
+    assert_eq!(
+        b.publishers::<Probe>().await.expect("publishers"),
+        Vec::<String>::new()
     );
 
     // --- latched (Qos::STATE): a late subscriber receives the most recent value ---
@@ -334,7 +333,7 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
         ]
     );
     // No DESCRIPTOR, no answer — and the latched responder on the type's own key stays out of it.
-    assert!(b.schemas(Probe::TYPE).await.expect("schemas").is_empty());
+    assert_eq!(b.schemas(Probe::TYPE).await.expect("schemas").len(), 0);
     drop((described, listener));
 
     // --- services: round trip / reply_err / a destination that is not there / dropped / held → Timeout ---
