@@ -1,0 +1,14 @@
+[bindings.python]
+cdylib_name = "reiny_ffi"
+
+[bindings.kotlin]
+package_name = "dev.mechanicalgirl.reiny"
+cdylib_name = "reiny_ffi"
+
+[bindings.swift]
+module_name = "Reiny"
+ffi_module_name = "ReinyFFI"
+generate_module_map = true
+
+[bindings.ruby]
+cdylib_name = "reiny_ffi"

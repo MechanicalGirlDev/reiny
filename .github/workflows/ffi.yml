@@ -1,0 +1,73 @@
+name: multilingual FFI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bindings/**"
+      - "crates/reiny-ffi/**"
+      - "crates/reiny/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ffi.yml"
+  pull_request:
+    paths:
+      - "bindings/**"
+      - "crates/reiny-ffi/**"
+      - "crates/reiny/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ffi.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    env:
+      REINY_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreiny_ffi.so
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build the native library and matching generator
+        run: cargo build -p reiny-ffi --features bindgen
+      - name: Generate standard UniFFI languages
+        run: |
+          for lang in python kotlin swift ruby; do
+            target/debug/reiny-bindgen generate \
+              --library "$REINY_FFI_LIBRARY" --language "$lang" \
+              --out-dir "bindings/generated/$lang" --no-format
+          done
+      - name: Python native smoke
+        run: |
+          cp "$REINY_FFI_LIBRARY" bindings/generated/python/
+          PYTHONPATH=bindings/generated/python python bindings/python/smoke.py
+      - name: JavaScript and TypeScript native smoke
+        working-directory: bindings/javascript
+        run: |
+          npm ci
+          npm run check
+          npm test
+          npm run smoke
+          npm run smoke:typescript
+      - name: C and C++ native smoke
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Icrates/reiny-ffi/include \
+            bindings/c/smoke.c -Ltarget/debug -lreiny_ffi -o target/debug/c-smoke
+          c++ -std=c++17 -Wall -Wextra -Werror -Icrates/reiny-ffi/include \
+            bindings/cpp/smoke.cpp -Ltarget/debug -lreiny_ffi -o target/debug/cpp-smoke
+          LD_LIBRARY_PATH=target/debug target/debug/c-smoke
+          LD_LIBRARY_PATH=target/debug target/debug/cpp-smoke
+      - name: C# native smoke
+        run: dotnet run --project bindings/csharp/Smoke/Smoke.csproj

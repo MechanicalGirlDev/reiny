@@ -1,0 +1,26 @@
+{
+  "name": "@reiny/ffi",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Node.js JavaScript and TypeScript bindings for reiny",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    }
+  },
+  "files": ["index.js", "index.d.ts", "README.md", "examples"],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.js",
+    "smoke": "node examples/local.js",
+    "smoke:typescript": "tsx examples/local.ts"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": { "koffi": "^2.14.0" },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

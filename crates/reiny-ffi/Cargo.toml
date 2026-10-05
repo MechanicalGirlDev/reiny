@@ -1,0 +1,39 @@
+[package]
+name = "reiny-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "UniFFI and C bindings for reiny's multilingual pub/sub API"
+readme = "README.md"
+
+[lib]
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[features]
+default = ["zenoh"]
+zenoh = ["reiny/zenoh"]
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "reiny-bindgen"
+path = "src/bin/bindgen.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+reiny = { path = "../reiny", version = "0.6.0", default-features = false }
+uniffi = "=0.32.2"
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+flume = "0.12"
+
+[dev-dependencies]
+prost.workspace = true
+tempfile = "3"
+# Only tests inspect the active ephemeral TCP locator; no unstable API is exported.
+zenoh = { workspace = true, features = ["unstable"] }
+
+[lints]
+workspace = true

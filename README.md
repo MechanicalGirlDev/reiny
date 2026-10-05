@@ -52,6 +52,7 @@ zenoh major bump is a reiny breaking change.
 | [`reiny-core`](crates/reiny-core) | The type vocabulary (`Topic` / `Service` / `Descriptor` / `Qos`), `no_std`; re-exported by `reiny`, used directly by MCU firmware |
 | [`reiny-iceoryx2`](crates/reiny-iceoryx2) | `Engine` on iceoryx2 — launches on one host over shared memory (needs libclang to build on Windows / macOS; not in `default-members`) |
 | [`reiny-ros2`](crates/reiny-ros2) | ROS 2 bridge library on pure-Rust DDS (`ros2-client`): typed `export` / `import` of topics and services from a bridge launch, no ROS install |
+| [`reiny-ffi`](crates/reiny-ffi) | UniFFI SDK for Python, Kotlin, Swift, and Ruby; shared C ABI for C, C++, JavaScript, TypeScript, and C# |
 | [`reiny-link`](crates/reiny-link) | reiny over anything that moves bytes: a `no_std` sans-I/O `Link` plus host-side serial / UDP transports, a tokio `Host`, and `LinkEngine` to put a `Cloudy` on the link |
 | [`reiny-macros`](crates/reiny-macros) | The `#[reiny::main]` proc-macro (used via `reiny`) |
 | [`reiny-build`](crates/reiny-build) | `build.rs` helper: compiles protos from `Reiny.toml` and generates types/topics |
@@ -59,6 +60,9 @@ zenoh major bump is a reiny breaking change.
 | [`reiny-cli`](crates/reiny-cli) | The `reiny` command: scaffold (new/init/add), check, build, run, compress, bag, topic / node / service introspection, `bridge serial\|udp\|iceoryx2` |
 
 ## Getting started
+
+For non-Rust launches, see [the multilingual FFI SDK](crates/reiny-ffi).
+It uses the same type names and Protobuf wire bytes as Rust launches.
 
 Use the `reiny` CLI to scaffold a launch project.
 
