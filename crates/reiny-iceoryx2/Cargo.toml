@@ -13,7 +13,7 @@ categories = ["network-programming", "asynchronous"]
 [dependencies]
 # Engine trait と Local だけ(zenoh は引かない)。
 reiny = { path = "../reiny", version = "0.6.0", default-features = false }
-iceoryx2 = "0.9"
+iceoryx2 = "0.10"
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

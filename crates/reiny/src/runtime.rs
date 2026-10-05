@@ -189,7 +189,6 @@ impl RuntimeOptions {
     }
 
     /// Open the default engine (zenoh) when there is no `engine`.
-    #[allow(clippy::unused_async)] // a build without zenoh has no await point here
     async fn take_engine(&mut self) -> Result<Arc<dyn Engine>> {
         if let Some(engine) = self.engine.take() {
             return Ok(engine);
@@ -201,9 +200,10 @@ impl RuntimeOptions {
         }
         #[cfg(not(feature = "zenoh"))]
         {
-            anyhow::bail!(
+            std::future::ready(Err(anyhow::anyhow!(
                 "no engine: built without the zenoh engine, so RuntimeOptions::engine must be set"
-            )
+            )))
+            .await
         }
     }
 }

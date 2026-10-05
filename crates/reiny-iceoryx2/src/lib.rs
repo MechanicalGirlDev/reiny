@@ -186,7 +186,7 @@ fn next_id() -> u64 {
 
 /// The [`Engine`] on top of iceoryx2. Wrap it in an `Arc` and hand it to `RuntimeOptions::engine`.
 pub struct Iceoryx2 {
-    node: Mutex<Node<S>>,
+    node: Arc<Mutex<Node<S>>>,
     config: Config,
     state: Arc<Mutex<State>>,
     /// Wake the engine thread (after a registration or a removal).
@@ -267,9 +267,11 @@ impl Iceoryx2 {
             .listener_builder()
             .create()
             .map_err(|e| err(e).context("creating the wake listener"))?;
+        let node = Arc::new(Mutex::new(node));
         let state = Arc::new(Mutex::new(State::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let thread = Thread {
+            node: Arc::clone(&node),
             config: config.clone(),
             state: Arc::clone(&state),
             stop: Arc::clone(&stop),
@@ -280,7 +282,7 @@ impl Iceoryx2 {
             .spawn(move || thread.run())
             .map_err(err)?;
         Ok(Self {
-            node: Mutex::new(node),
+            node,
             config,
             state,
             wake,
@@ -367,7 +369,7 @@ impl Iceoryx2 {
 
     /// The presence keys currently standing. Dead processes' leftovers are cleaned up first.
     fn alive_now(&self, pattern: &Key) -> Vec<Key> {
-        let _ = Node::<S>::try_cleanup_dead_nodes(&self.config);
+        let _ = lock(&self.node).try_cleanup_dead_nodes();
         list_alive(&self.config)
             .into_iter()
             .filter(|k| pattern.matches(k))
@@ -543,6 +545,7 @@ impl Engine for Iceoryx2 {
 // ---------------------------------------------------------------------------
 
 struct Thread {
+    node: Arc<Mutex<Node<S>>>,
     config: Config,
     state: Arc<Mutex<State>>,
     stop: Arc<AtomicBool>,
@@ -617,9 +620,9 @@ impl Thread {
                     .wait_and_process_once_with_timeout(|_| CallbackProgression::Continue, POLL);
             }
             let mut woke = false;
-            let _ = self.wake_listener.try_wait_all(|_| woke = true);
+            let _ = self.wake_listener.try_wait(|_| woke = true);
             for (listener, drain) in &entries {
-                let _ = listener.try_wait_all(|_| {});
+                let _ = listener.try_wait(|_| {});
                 match drain {
                     Drain::Sub(subscriber, pattern, on_sample) => {
                         drain_subscriber(subscriber, pattern, on_sample);
@@ -647,7 +650,7 @@ impl Thread {
     }
 
     fn poll_presence(&self) {
-        let _ = Node::<S>::try_cleanup_dead_nodes(&self.config);
+        let _ = lock(&self.node).try_cleanup_dead_nodes();
         let alive = list_alive(&self.config);
         let mut state = lock(&self.state);
         for watcher in &mut state.watchers {
