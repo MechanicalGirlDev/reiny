@@ -1,8 +1,9 @@
 //! The reiny SDK.
 //!
-//! A launch publishes and subscribes by **naming a type and nothing else**. The type → topic
-//! mapping is generated from `Reiny.toml` by `reiny-build` (each launch's `build.rs`) and embedded by
-//! implementing [`Topic`] for every type. User code never touches a topic name (a string).
+//! The type vocabulary is generated from `main.yaml`'s `schema` block by `reiny-build` and
+//! embedded through [`Topic`]. Managed modules use named [`Cloudy::input`] and
+//! [`Cloudy::output`] ports resolved by the deployment; standalone code can address types
+//! directly. User code does not construct transport topic strings.
 //!
 //! ```ignore
 //! use reiny::prelude::*;
@@ -39,6 +40,7 @@ pub mod bridge;
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod e2e;
 pub mod engine;
+mod managed;
 mod pubsub;
 #[cfg(all(test, feature = "zenoh"))]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -50,11 +52,13 @@ mod shutdown;
 use engine::{Engine, Guard, Key, QueryParams, SCHEMA_CHUNK, SERVICE_CHUNK, SUB_CHUNK};
 use shutdown::Shutdown;
 
+pub use managed::MODULE_REPORT_ENV;
 pub use pubsub::{
     Envelope, Presence, PresenceEvent, Publisher, PublisherBuilder, RawDescriptor, RawEnvelope,
     RawPresence, RawSubscriber, RawSubscriberBuilder, Subscriber, SubscriberBuilder,
     SubscriberStats,
 };
+pub use reiny_core::bindings;
 #[cfg(feature = "zenoh")]
 pub use runtime::ZenohSource;
 pub use runtime::{DOMAIN_ENV, RuntimeOptions, run_with};
@@ -148,6 +152,7 @@ pub struct Cloudy {
     config: Option<toml::Table>,
     /// The startup arguments reiny did not interpret (a launch's own `--port`, say).
     extra_args: Vec<String>,
+    module: managed::ModuleRuntime,
 }
 
 impl Cloudy {
@@ -189,6 +194,7 @@ impl Cloudy {
             _launch: launch,
             config,
             extra_args,
+            module: managed::ModuleRuntime::default(),
         })
     }
 
@@ -373,7 +379,7 @@ impl Cloudy {
     /// The door through which a bridge (`reiny::bridge::forward`) holds "the zenoh `Cloudy`" and "the
     /// link `Cloudy`" in one process. The `@launch` token is declared on the new engine as well.
     pub async fn with_engine(&self, engine: Arc<dyn Engine>) -> Result<Self> {
-        Self::new(
+        let mut cloudy = Self::new(
             engine,
             self.id.clone(),
             self.domain.clone(),
@@ -381,7 +387,9 @@ impl Cloudy {
             self.config.clone(),
             self.extra_args.clone(),
         )
-        .await
+        .await?;
+        cloudy.configure_module(self.module.bindings.clone(), None)?;
+        Ok(cloudy)
     }
 
     /// The zenoh session inside. The escape hatch to features reiny does not wrap (queryables,

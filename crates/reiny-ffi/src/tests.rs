@@ -81,10 +81,12 @@ fn rust_receives_ffi_encoded_protobuf() {
 fn subscription_filters_source_and_domain() {
     // Given: declarations for several sources and domains.
     let bus = LocalBus::new();
-    let a = bus.connect("a".into(), "test".into()).unwrap();
-    let b = bus.connect("b".into(), "test".into()).unwrap();
-    let other = bus.connect("a".into(), "other".into()).unwrap();
-    let subscription = a.subscriber("Ping".into(), Some("b".into())).unwrap();
+    let a = bus.connect("robot/left".into(), "test".into()).unwrap();
+    let b = bus.connect("robot/right".into(), "test".into()).unwrap();
+    let other = bus.connect("robot/left".into(), "other".into()).unwrap();
+    let subscription = a
+        .subscriber("Ping".into(), Some("robot/right".into()))
+        .unwrap();
     let wrong_source = a.publisher("Ping".into(), None).unwrap();
     let wrong_domain = other.publisher("Ping".into(), None).unwrap();
     let expected = b.publisher("Ping".into(), None).unwrap();
@@ -95,10 +97,9 @@ fn subscription_filters_source_and_domain() {
     expected.send(vec![3]).unwrap();
 
     // Then: only the expected source in the expected domain reaches the FIFO.
-    assert_eq!(
-        subscription.receive(1000).unwrap().unwrap().payload,
-        vec![3]
-    );
+    let received = subscription.receive(1000).unwrap().unwrap();
+    assert_eq!(received.payload, vec![3]);
+    assert_eq!(received.source, "robot/right");
 }
 
 #[test]
@@ -144,13 +145,17 @@ fn foreign_arguments_reject_invalid_key_segments() {
     // When/Then: malformed foreign names cannot address unintended keys.
     for invalid in ["", "a/b", "*", "a b", "@launch", "a?"] {
         assert!(session.publisher(invalid.into(), None).is_err());
+        assert!(bus.connect("sender".into(), invalid.into()).is_err());
+    }
+    for invalid in [
+        "", "*", "a b", "@launch", "a?", "/a", "a/", "a//b", "a/./b", "a/../b",
+    ] {
         assert!(
             session
                 .subscriber("Ping".into(), Some(invalid.into()))
                 .is_err()
         );
         assert!(bus.connect(invalid.into(), "test".into()).is_err());
-        assert!(bus.connect("sender".into(), invalid.into()).is_err());
     }
 }
 

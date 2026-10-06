@@ -106,6 +106,7 @@ impl Default for Meta {
 
 impl Meta {
     fn new(key: &Key, attachment: Option<&[u8]>, flags: u8) -> Result<Self> {
+        key.validate()?;
         let text = key.to_string();
         let attachment = attachment.unwrap_or(&[]);
         let key_len = u8::try_from(text.len())
@@ -131,7 +132,7 @@ impl Meta {
     }
 
     fn key(&self) -> Option<Key> {
-        Key::parse(std::str::from_utf8(&self.key[..usize::from(self.key_len)]).ok()?)
+        Key::parse(std::str::from_utf8(self.key.get(..usize::from(self.key_len))?).ok()?)
     }
 
     fn attachment(&self) -> Option<Vec<u8>> {
@@ -159,11 +160,29 @@ fn service_name(text: &str) -> Result<ServiceName> {
 
 /// The presence service's name. `@` is avoided because whether iceoryx2 accepts it was never checked.
 fn alive_name(key: &Key) -> String {
-    format!("reiny-alive/{}", key.to_string().replace('@', "_at_"))
+    format!(
+        "reiny-alive/{}",
+        key.to_string().replace('_', "_us_").replace('@', "_at_")
+    )
 }
 
 fn parse_alive(name: &str) -> Option<Key> {
-    Key::parse(&name.strip_prefix("reiny-alive/")?.replace("_at_", "@"))
+    let mut encoded = name.strip_prefix("reiny-alive/")?;
+    let mut text = String::with_capacity(encoded.len());
+    while !encoded.is_empty() {
+        if let Some(tail) = encoded.strip_prefix("_at_") {
+            text.push('@');
+            encoded = tail;
+        } else if let Some(tail) = encoded.strip_prefix("_us_") {
+            text.push('_');
+            encoded = tail;
+        } else {
+            let c = encoded.chars().next()?;
+            text.push(c);
+            encoded = &encoded[c.len_utf8()..];
+        }
+    }
+    Key::parse(&text)
 }
 
 fn type_of(key: &Key) -> Result<&str> {
@@ -403,6 +422,8 @@ impl Engine for Iceoryx2 {
     }
 
     fn publisher(&self, key: &Key, qos: &Qos) -> Result<Box<dyn RawPublisher>> {
+        // Fail at declaration, not on the first put, if the complete namespace cannot fit.
+        Meta::new(key, None, 0)?;
         let ty = type_of(key)?;
         let publisher = self
             .pubsub(&key.domain, ty)?
@@ -428,6 +449,7 @@ impl Engine for Iceoryx2 {
     }
 
     fn subscribe(&self, key: &Key, on_sample: Callback<Sample>) -> Result<Guard> {
+        Meta::new(key, None, 0)?;
         let ty = type_of(key)?;
         let subscriber = self
             .pubsub(&key.domain, ty)?
@@ -452,6 +474,7 @@ impl Engine for Iceoryx2 {
     }
 
     fn declare_alive(&self, key: &Key) -> Result<Guard> {
+        key.validate()?;
         let factory: AliveFactory = lock(&self.node)
             .service_builder(&service_name(&alive_name(key))?)
             .publish_subscribe::<u8>()
@@ -465,11 +488,15 @@ impl Engine for Iceoryx2 {
     }
 
     fn alive(&self, key: &Key, _timeout: Duration) -> BoxFuture<'_, Result<Vec<Key>>> {
+        if let Err(error) = key.validate() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
         let keys = self.alive_now(key);
         Box::pin(std::future::ready(Ok(keys)))
     }
 
     fn watch_alive(&self, key: &Key, on_event: Callback<Presence>) -> Result<Guard> {
+        key.validate()?;
         let id = next_id();
         lock(&self.state).watchers.push(WatchEntry {
             id,
@@ -481,6 +508,7 @@ impl Engine for Iceoryx2 {
     }
 
     fn respond(&self, key: &Key, on_query: QueryCallback) -> Result<Guard> {
+        Meta::new(key, None, 0)?;
         let ty = type_of(key)?;
         let server = self
             .rr(&key.domain, ty)?
@@ -506,6 +534,7 @@ impl Engine for Iceoryx2 {
     }
 
     fn query(&self, key: &Key, params: QueryParams) -> Result<Box<dyn RawReplies>> {
+        key.validate()?;
         let ty = type_of(key)?;
         let started = Instant::now();
         let ports = self.rr_ports(&key.domain, ty)?;
@@ -531,6 +560,7 @@ impl Engine for Iceoryx2 {
         );
         Ok(Box::new(Iox2Replies {
             pending,
+            pattern: key.clone(),
             deadline: tokio::time::Instant::now() + params.timeout,
         }))
     }
@@ -821,6 +851,7 @@ impl RawQuery for Iox2Query {
 
 struct Iox2Replies {
     pending: Pending,
+    pattern: Key,
     deadline: tokio::time::Instant,
 }
 
@@ -838,6 +869,9 @@ impl RawReplies for Iox2Replies {
                             Err(payload)
                         } else {
                             let Some(key) = meta.key() else { continue };
+                            if !self.pattern.matches(&key) {
+                                continue;
+                            }
                             Ok(Sample {
                                 key,
                                 payload,
@@ -882,8 +916,11 @@ mod tests {
     fn meta_round_trips_every_kind_of_key() {
         for original in [
             key(),
+            Key::topic("lab", Some("deployment/robot/ctrl"), "RobotState"),
             Key::topic("lab", None, "RobotState"),
             Key::launch("lab", Some("ctrl")),
+            Key::topic("lab", Some("deployment/robot/ctrl"), "@ready"),
+            Key::topic("lab", Some("deployment/robot/ctrl"), "@stop"),
             key().with_chunk(SERVICE_CHUNK),
             key().with_chunk("@schema/hs.RobotState"),
         ] {
@@ -918,6 +955,8 @@ mod tests {
         let too_long = Key::topic("lab", Some("ctrl"), &long_type);
         let err = Meta::new(&too_long, None, 0).expect_err("the key does not fit");
         assert!(err.to_string().contains("longer than"), "{err}");
+        let source = format!("deployment/{}", "x".repeat(KEY_MAX));
+        assert!(Meta::new(&Key::topic("lab", Some(&source), "T"), None, 0).is_err());
 
         let big = vec![0u8; ATTACHMENT_MAX + 1];
         let err = Meta::new(&key(), Some(&big), 0).expect_err("the attachment does not fit");
@@ -956,6 +995,8 @@ mod tests {
         let mut short = Meta::new(&key(), None, 0).unwrap();
         short.key_len = 5; // "reiny" alone is not a key
         assert_eq!(short.key(), None);
+        short.key_len = u8::MAX;
+        assert_eq!(short.key(), None);
     }
 
     /// Presence is a service name, and `@` is deliberately avoided in one. The escaping has to survive
@@ -964,6 +1005,9 @@ mod tests {
     fn alive_names_escape_at_and_round_trip() {
         for original in [
             Key::launch("lab", Some("ctrl")),
+            Key::launch("lab", Some("deployment/_at_/_us_/ctrl")),
+            Key::topic("lab", Some("deployment/_at_/ctrl"), "@ready"),
+            Key::topic("lab", Some("deployment/_us_/ctrl"), "@stop"),
             key(),
             key().with_chunk(SERVICE_CHUNK),
         ] {

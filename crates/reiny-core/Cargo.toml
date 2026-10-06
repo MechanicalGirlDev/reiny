@@ -10,9 +10,13 @@ description = "reiny's type vocabulary (Topic / Service / Descriptor / Qos) — 
 keywords = ["reiny", "pubsub", "no-std", "embedded"]
 categories = ["network-programming", "no-std", "embedded"]
 
+[features]
+bindings = ["dep:serde"]
+
 [dependencies]
 # no_std の prost(alloc は要る)。ワークスペースの `prost` は std 前提なので継承しない。
 prost = { version = "0.14", default-features = false }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"], optional = true }
 
 [lints]
 workspace = true

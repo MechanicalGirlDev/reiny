@@ -70,6 +70,104 @@ impl Service for Echo {
 const WAIT: Duration = Duration::from_secs(5);
 
 #[tokio::test(flavor = "multi_thread")]
+async fn hierarchical_peer_namespace_keeps_type_identity_and_exact_routing() {
+    use reiny::engine::{Key, QueryParams};
+
+    const PEER: &str = "deployment/arm/mcu";
+    let mut mcu_link = HostLink::host(PEER).unwrap();
+    mcu_link.publishes::<Pos>().unwrap();
+    mcu_link.subscribes::<Cmd>().unwrap();
+    mcu_link.serves::<Add>().unwrap();
+    let (mcu, cloudy) = link_to_cloudy(mcu_link, "deployment/host/bridge").await;
+
+    // Presence history is the handshake signal on the engine side; declarations precede Data.
+    let mut watch = cloudy.watch_publishers::<Pos>().unwrap();
+    assert_eq!(
+        timeout(WAIT, watch.recv()).await.unwrap(),
+        Some(PresenceEvent::Joined(PEER.to_string()))
+    );
+    assert_eq!(cloudy.publishers::<Pos>().await.unwrap(), [PEER]);
+    assert_eq!(cloudy.subscribers::<Cmd>().await.unwrap(), [PEER]);
+    assert_eq!(cloudy.servers::<Add>().await.unwrap(), [PEER]);
+    let mut exact = cloudy.subscriber::<Pos>().from(PEER).build().unwrap();
+    let mut recursive = cloudy.subscribe::<Pos>().unwrap();
+    assert!(mcu.send(&Pos { x: 9 }).unwrap());
+    for envelope in [
+        timeout(WAIT, exact.recv_envelope()).await.unwrap().unwrap(),
+        timeout(WAIT, recursive.recv_envelope())
+            .await
+            .unwrap()
+            .unwrap(),
+    ] {
+        assert_eq!(envelope.source, PEER);
+        assert_eq!(envelope.value.x, 9);
+    }
+
+    let (data_tx, mut data_rx) = tokio::sync::mpsc::unbounded_channel();
+    let peer_task = {
+        let mcu = Arc::clone(&mcu);
+        tokio::spawn(async move {
+            while let Some(event) = mcu.recv().await {
+                match event {
+                    HostEvent::Request { hash, seq, payload } => {
+                        assert_eq!(hash, wire::type_hash(Add::TYPE));
+                        let add = <Add as prost::Message>::decode(payload.as_slice()).unwrap();
+                        mcu.reply::<Add>(seq, &Sum { s: add.a + add.b }).unwrap();
+                    }
+                    HostEvent::Data { .. } => data_tx.send(event).unwrap(),
+                    HostEvent::Connected { .. } | HostEvent::Disconnected => {}
+                }
+            }
+        })
+    };
+    let cmd = cloudy.publish::<Cmd>().unwrap();
+    cmd.send(Cmd { v: 11 }).await.unwrap();
+    let event = timeout(WAIT, data_rx.recv()).await.unwrap().unwrap();
+    let HostEvent::Data { hash, .. } = &event else {
+        panic!("expected Data")
+    };
+    assert_eq!(*hash, wire::type_hash(Cmd::TYPE));
+    assert_eq!(event.decode::<Cmd>(), Some(Cmd { v: 11 }));
+
+    // A real answering peer makes a widened or chunk-erasing request fail this test, not time out.
+    let exact_key = Key::topic("lab", Some(PEER), Add::TYPE);
+    for key in [
+        Key::topic("lab", Some("deployment/arm"), Add::TYPE),
+        Key::topic("other", Some(PEER), Add::TYPE),
+        exact_key.with_chunk("@schema/probe.Add"),
+    ] {
+        let mut replies = cloudy
+            .engine()
+            .query(
+                &key,
+                QueryParams {
+                    payload: Some(prost::Message::encode_to_vec(&Add { a: 2, b: 3 })),
+                    attachment: None,
+                    timeout: WAIT,
+                },
+            )
+            .unwrap();
+        assert!(
+            timeout(WAIT, replies.next()).await.unwrap().is_none(),
+            "{key}"
+        );
+    }
+    let sum = timeout(
+        WAIT,
+        cloudy
+            .caller::<Add>()
+            .to(PEER)
+            .build()
+            .call(Add { a: 2, b: 3 }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(sum.s, 5);
+    peer_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)] // one pass end to end (a link is a pair; splitting it saves nothing)
 async fn cloudy_over_a_link() {
     let (mcu_end, host_end) = tokio::io::duplex(4096);

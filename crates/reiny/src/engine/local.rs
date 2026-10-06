@@ -69,6 +69,7 @@ impl Engine for Local {
     }
 
     fn publisher(&self, key: &Key, _qos: &Qos) -> Result<Box<dyn RawPublisher>> {
+        key.validate()?;
         Ok(Box::new(LocalPublisher {
             key: key.clone(),
             tx: self.tx.clone(),
@@ -76,36 +77,44 @@ impl Engine for Local {
     }
 
     fn subscribe(&self, key: &Key, on_sample: Callback<Sample>) -> Result<Guard> {
+        key.validate()?;
         let id = next_id();
         self.register(Op::Subscribe(id, key.clone(), on_sample));
         Ok(self.guard(Slot::Subscriber, id))
     }
 
     fn declare_alive(&self, key: &Key) -> Result<Guard> {
+        key.validate()?;
         let id = next_id();
         self.register(Op::Token(id, key.clone()));
         Ok(self.guard(Slot::Token, id))
     }
 
     fn alive(&self, key: &Key, _timeout: Duration) -> BoxFuture<'_, Result<Vec<Key>>> {
+        if let Err(error) = key.validate() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
         let (tx, rx) = oneshot::channel();
         self.register(Op::Alive(key.clone(), tx));
         Box::pin(async move { Ok(rx.await.unwrap_or_default()) })
     }
 
     fn watch_alive(&self, key: &Key, on_event: Callback<Presence>) -> Result<Guard> {
+        key.validate()?;
         let id = next_id();
         self.register(Op::Watch(id, key.clone(), on_event));
         Ok(self.guard(Slot::Watcher, id))
     }
 
     fn respond(&self, key: &Key, on_query: QueryCallback) -> Result<Guard> {
+        key.validate()?;
         let id = next_id();
         self.register(Op::Respond(id, key.clone(), on_query));
         Ok(self.guard(Slot::Responder, id))
     }
 
     fn query(&self, key: &Key, params: QueryParams) -> Result<Box<dyn RawReplies>> {
+        key.validate()?;
         let (reply, rx) = mpsc::unbounded_channel();
         self.register(Op::Query {
             key: key.clone(),

@@ -47,6 +47,7 @@ impl Engine for Zenoh {
     }
 
     fn publisher(&self, key: &Key, qos: &Qos) -> Result<Box<dyn RawPublisher>> {
+        key.validate()?;
         // zenoh's `#[internal_trait]` also grows the QoS setters as inherent methods, so they are
         // callable without importing `QoSBuilderTrait` (= without opening the `internal` feature).
         let publisher = self
@@ -61,6 +62,8 @@ impl Engine for Zenoh {
     }
 
     fn subscribe(&self, key: &Key, on_sample: Callback<Sample>) -> Result<Guard> {
+        key.validate()?;
+        let pattern = key.clone();
         let subscriber = self
             .session
             .declare_subscriber(key.to_string())
@@ -68,7 +71,9 @@ impl Engine for Zenoh {
                 if sample.kind() != SampleKind::Put {
                     return;
                 }
-                if let Some(sample) = convert(&sample) {
+                if let Some(sample) = convert(&sample)
+                    && pattern.matches(&sample.key)
+                {
                     on_sample(sample);
                 }
             })
@@ -78,6 +83,7 @@ impl Engine for Zenoh {
     }
 
     fn declare_alive(&self, key: &Key) -> Result<Guard> {
+        key.validate()?;
         let token = self
             .session
             .liveliness()
@@ -88,12 +94,13 @@ impl Engine for Zenoh {
     }
 
     fn alive(&self, key: &Key, timeout: Duration) -> BoxFuture<'_, Result<Vec<Key>>> {
-        let key = key.to_string();
+        let pattern = key.clone();
         Box::pin(async move {
+            pattern.validate()?;
             let replies = self
                 .session
                 .liveliness()
-                .get(key)
+                .get(pattern.to_string())
                 .timeout(timeout)
                 .await
                 .map_err(anyhow::Error::msg)?;
@@ -101,6 +108,7 @@ impl Engine for Zenoh {
             while let Ok(reply) = replies.recv_async().await {
                 if let Ok(sample) = reply.result()
                     && let Some(key) = Key::parse(sample.key_expr().as_str())
+                    && pattern.matches(&key)
                 {
                     keys.push(key);
                 }
@@ -110,6 +118,8 @@ impl Engine for Zenoh {
     }
 
     fn watch_alive(&self, key: &Key, on_event: Callback<Presence>) -> Result<Guard> {
+        key.validate()?;
+        let pattern = key.clone();
         let subscriber = self
             .session
             .liveliness()
@@ -119,6 +129,9 @@ impl Engine for Zenoh {
                 let Some(key) = Key::parse(sample.key_expr().as_str()) else {
                     return;
                 };
+                if !pattern.matches(&key) {
+                    return;
+                }
                 on_event(match sample.kind() {
                     SampleKind::Put => Presence::Joined(key),
                     SampleKind::Delete => Presence::Left(key),
@@ -130,13 +143,20 @@ impl Engine for Zenoh {
     }
 
     fn respond(&self, key: &Key, on_query: QueryCallback) -> Result<Guard> {
+        key.validate()?;
+        let responder = key.clone();
         let queryable = self
             .session
             .declare_queryable(key.to_string())
             .callback(move |query: Query| {
-                let Some(key) = Key::parse(query.key_expr().as_str()) else {
-                    return; // drop = finalize
-                };
+                // Foreign Zenoh selectors can be valid without a logical Key
+                // representation (including the original one-depth wildcard).
+                // Zenoh already selected this responder at the requested depth.
+                let key =
+                    Key::parse(query.key_expr().as_str()).unwrap_or_else(|| responder.clone());
+                if !key.matches(&responder) {
+                    return; // **/* may also intersect an ordinary segment inside a chunk.
+                }
                 let payload = query.payload().map(|p| p.to_bytes().into_owned());
                 let attachment = query.attachment().map(|a| a.to_bytes().into_owned());
                 on_query(Box::new(ZenohQuery {
@@ -152,6 +172,7 @@ impl Engine for Zenoh {
     }
 
     fn query(&self, key: &Key, params: QueryParams) -> Result<Box<dyn RawReplies>> {
+        key.validate()?;
         // Consolidation off: reiny's replies differ per key, and two replies on the same key are not
         // "duplicates" but "different answers" (services).
         let mut get = self
@@ -166,7 +187,10 @@ impl Engine for Zenoh {
             get = get.attachment(attachment);
         }
         let replies = get.wait().map_err(anyhow::Error::msg)?;
-        Ok(Box::new(ZenohReplies { replies }))
+        Ok(Box::new(ZenohReplies {
+            replies,
+            pattern: key.clone(),
+        }))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -215,6 +239,7 @@ impl RawQuery for ZenohQuery {
         payload: Vec<u8>,
         attachment: Option<Vec<u8>>,
     ) -> Result<()> {
+        key.validate()?;
         let mut reply = self.query.reply(key.to_string(), payload);
         if let Some(attachment) = attachment {
             reply = reply.attachment(attachment);
@@ -232,6 +257,7 @@ impl RawQuery for ZenohQuery {
 
 struct ZenohReplies {
     replies: FifoChannelHandler<Reply>,
+    pattern: Key,
 }
 
 impl RawReplies for ZenohReplies {
@@ -242,7 +268,9 @@ impl RawReplies for ZenohReplies {
                 let reply = self.replies.recv_async().await.ok()?;
                 match reply.result() {
                     Ok(sample) => {
-                        if let Some(sample) = convert(sample) {
+                        if let Some(sample) = convert(sample)
+                            && self.pattern.matches(&sample.key)
+                        {
                             return Some(Ok(sample));
                         }
                     }

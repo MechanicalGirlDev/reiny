@@ -15,18 +15,23 @@
 
 #![no_std]
 
+#[cfg(feature = "bindings")]
+extern crate alloc;
+
+#[cfg(feature = "bindings")]
+pub mod bindings;
+
 mod qos;
 
 pub use qos::{Durability, History, Priority, Qos, Reliability};
 
 use prost::Message;
 
-/// The type → topic mapping. `reiny-build` reads `Reiny.toml` and implements it for every message
-/// type.
+/// The type → topic vocabulary generated from `main.yaml`'s `schema` block.
 ///
 /// A topic is **addressed by type**. The type `Ping` is published to `reiny/<domain>/<id>/Ping`
-/// and subscribed to as `reiny/<domain>/*/Ping` (the same type from every publisher in the same
-/// domain). `<id>` is the runtime instance id, `<domain>` a logical namespace, and `TYPE` the type
+/// and subscribed to as `reiny/<domain>/**/Ping` in standalone code. Managed inputs select one
+/// exact publisher namespace. `<id>` is the possibly nested instance namespace, and `TYPE` the type
 /// segment of the key (e.g. `Ping`). The same type yields the same `TYPE` whichever crate — the
 /// publisher's or the subscriber's — it is compiled in.
 ///
@@ -81,7 +86,7 @@ pub struct Descriptor {
 /// request type → response type. The request type's [`Topic::TYPE`] is the type segment of the
 /// key.
 ///
-/// `reiny-build` generates the impls from `Reiny.toml`'s `[services]`. Writing one by hand is a
+/// `reiny-build` generates the impls from `main.yaml`'s `schema.services`. Writing one by hand is a
 /// single line:
 ///
 /// ```ignore

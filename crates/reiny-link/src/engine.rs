@@ -165,6 +165,16 @@ async fn run(host: Arc<Host>, domain: String, state: Arc<Mutex<State>>) {
     while let Some(event) = host.recv().await {
         match event {
             HostEvent::Connected { id, types } => {
+                if Key::launch(&domain, Some(&id)).validate().is_err()
+                    || types.iter().any(|t| {
+                        Key::topic(&domain, Some(&id), &t.name).validate().is_err()
+                            || wire::type_hash(&t.name) != t.hash
+                    })
+                {
+                    tracing::warn!(%id, "link: peer Hello has an invalid namespace or type identity");
+                    drop_peer(&domain, &state);
+                    continue;
+                }
                 let mut st = lock(&state);
                 let old = st
                     .peer
@@ -262,6 +272,12 @@ impl Engine for LinkEngine {
     }
 
     fn publisher(&self, key: &Key, _qos: &Qos) -> Result<Box<dyn RawPublisher>> {
+        key.validate()?;
+        anyhow::ensure!(
+            key.domain == self.domain && key.chunk.is_none() && !key.is_verbatim_type(),
+            "link engine: key '{key}' is not a data topic in domain '{}'",
+            self.domain
+        );
         Ok(Box::new(LinkPublisher {
             host: Arc::clone(&self.host),
             hash: wire::type_hash(type_of(key)?),
@@ -269,6 +285,7 @@ impl Engine for LinkEngine {
     }
 
     fn subscribe(&self, key: &Key, on_sample: Callback<Sample>) -> Result<Guard> {
+        key.validate()?;
         let id = next_id();
         lock(&self.state)
             .subscribers
@@ -277,6 +294,7 @@ impl Engine for LinkEngine {
     }
 
     fn declare_alive(&self, key: &Key) -> Result<Guard> {
+        key.validate()?;
         let id = next_id();
         let mut st = lock(&self.state);
         st.tokens.push((id, key.clone()));
@@ -285,6 +303,9 @@ impl Engine for LinkEngine {
     }
 
     fn alive(&self, key: &Key, _timeout: Duration) -> BoxFuture<'_, Result<Vec<Key>>> {
+        if let Err(error) = key.validate() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
         let keys: Vec<Key> = lock(&self.state)
             .alive_keys(&self.domain)
             .into_iter()
@@ -294,6 +315,7 @@ impl Engine for LinkEngine {
     }
 
     fn watch_alive(&self, key: &Key, on_event: Callback<Presence>) -> Result<Guard> {
+        key.validate()?;
         let id = next_id();
         let mut st = lock(&self.state);
         // Replay what is already declared as Joined first (zenoh's `history(true)`).
@@ -307,6 +329,7 @@ impl Engine for LinkEngine {
     }
 
     fn respond(&self, key: &Key, on_query: QueryCallback) -> Result<Guard> {
+        key.validate()?;
         let id = next_id();
         lock(&self.state)
             .responders
@@ -315,6 +338,7 @@ impl Engine for LinkEngine {
     }
 
     fn query(&self, key: &Key, params: QueryParams) -> Result<Box<dyn RawReplies>> {
+        key.validate()?;
         let ty = type_of(key)?.to_string();
         let hash = wire::type_hash(&ty);
         let Some(payload) = params.payload else {
@@ -327,12 +351,9 @@ impl Engine for LinkEngine {
             return Ok(Box::new(Ready(hit.map(Ok))));
         };
         let peer_id = lock(&self.state).peer.as_ref().map(|p| p.id.clone());
-        if key
-            .source
-            .as_deref()
-            .is_some_and(|s| peer_id.as_deref() != Some(s))
-        {
-            return Ok(Box::new(Ready(None))); // addressed at someone other than the peer: no replies
+        let peer_key = Key::topic(&self.domain, peer_id.as_deref(), &ty);
+        if !key.matches(&peer_key) {
+            return Ok(Box::new(Ready(None))); // wrong namespace, domain or chunk: no replies
         }
         let host = Arc::clone(&self.host);
         let domain = self.domain.clone();

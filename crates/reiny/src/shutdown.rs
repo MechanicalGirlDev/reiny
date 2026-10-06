@@ -67,13 +67,18 @@ mod tests {
 
     #[tokio::test]
     async fn wait_returns_after_trigger() {
+        // Given a registered waiter, with no timing dependency on the spawned trigger.
         let s = Shutdown::new();
-        let s2 = s.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            s2.trigger();
-        });
-        tokio::time::timeout(Duration::from_secs(1), s.wait())
+        let waiting = s.wait();
+        tokio::pin!(waiting);
+        assert!(matches!(
+            std::future::poll_fn(|cx| { std::task::Poll::Ready(waiting.as_mut().poll(cx)) }).await,
+            std::task::Poll::Pending
+        ));
+        // When shutdown is triggered, the existing waiter is released.
+        s.trigger();
+        // Then the wait completes within its bounded failure deadline.
+        tokio::time::timeout(Duration::from_secs(1), waiting)
             .await
             .expect("wait should return promptly after trigger");
     }

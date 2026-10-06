@@ -191,6 +191,7 @@ impl<'a, T> PublisherBuilder<'a, T> {
             _schema: schema,
             last,
             _marker: PhantomData,
+            managed: None,
         })
     }
 }
@@ -268,6 +269,7 @@ pub struct Publisher<T> {
     _schema: Option<Guard>,
     last: Arc<Mutex<Option<Vec<u8>>>>,
     _marker: PhantomData<T>,
+    pub(crate) managed: Option<Arc<()>>,
 }
 
 impl<T: Message + Topic> Publisher<T> {
@@ -378,6 +380,7 @@ impl<'a, T> SubscriberBuilder<'a, T> {
             _schema: schema,
             warned: HashSet::new(),
             _marker: PhantomData,
+            managed: None,
         })
     }
 }
@@ -574,6 +577,7 @@ pub struct Subscriber<T> {
     /// The sources already warned about a schema fingerprint mismatch (one warning per source).
     warned: HashSet<String>,
     _marker: PhantomData<T>,
+    pub(crate) managed: Option<Arc<()>>,
 }
 
 impl<T> Subscriber<T> {
@@ -599,6 +603,11 @@ impl<T: Message + Default + Topic> Subscriber<T> {
         loop {
             // Still cancel-safe: `Core::recv` is, and nothing after it awaits.
             let sample = self.core.recv().await?;
+            if self.managed.is_some()
+                && attachment_fingerprint(sample.attachment.as_deref()) != T::SCHEMA
+            {
+                continue;
+            }
             let source = sample.key.source.clone().unwrap_or_default();
             if let Some(envelope) = unwrap_sample::<T>(&sample, source, &mut self.warned) {
                 return Some(envelope);
@@ -671,6 +680,9 @@ impl Core {
         latched: bool,
         latest: Option<usize>,
     ) -> Result<Self> {
+        if let Some(source) = from {
+            crate::managed::config::validate_namespace(source)?;
+        }
         let engine = cloudy.engine();
         let caps = engine.caps();
         if from.is_none() && !caps.wildcard_source {

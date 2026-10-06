@@ -63,7 +63,7 @@ fn segment(name: &str, value: &str) -> Result<(), FfiError> {
 pub struct Message {
     /// Protobuf wire bytes; binary data and embedded NULs are preserved.
     pub payload: Vec<u8>,
-    /// Sending launch id.
+    /// Complete sending launch namespace.
     pub source: String,
     /// Optional Protobuf schema fingerprint, matching `Topic::SCHEMA`.
     pub schema: Option<u64>,
@@ -212,9 +212,6 @@ impl Session {
         source: Option<String>,
     ) -> Result<Arc<Subscription>, FfiError> {
         segment("type", &topic)?;
-        if let Some(source) = &source {
-            segment("source", source)?;
-        }
         let engine = self.cloudy.engine();
         let key = self.key(topic, source);
         let (sender, receiver) = flume::bounded(256);

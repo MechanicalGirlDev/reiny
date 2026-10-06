@@ -32,6 +32,9 @@ use crate::{Qos, Result};
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 pub mod conformance;
 mod local;
+#[cfg(any(test, feature = "conformance"))]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+pub mod namespace_conformance;
 #[cfg(feature = "zenoh")]
 mod zenoh;
 
@@ -61,6 +64,10 @@ pub const SUB_CHUNK: &str = "@sub";
 /// The presence token of the launch itself (`reiny/<domain>/<id>/@launch`), so that a launch with no
 /// publishers at all still appears in `reiny node list`.
 pub const LAUNCH_CHUNK: &str = "@launch";
+/// The presence token of a launch that has completed managed startup.
+pub const READY_CHUNK: &str = "@ready";
+/// The queryable that requests a managed launch to stop.
+pub const STOP_CHUNK: &str = "@stop";
 /// The chunk of the queryable that announces a descriptor (`…/<T>/@schema/<message>`).
 pub const SCHEMA_CHUNK: &str = "@schema";
 
@@ -73,7 +80,7 @@ pub const SCHEMA_CHUNK: &str = "@schema";
 pub struct Key {
     /// The logical namespace.
     pub domain: String,
-    /// The sending launch's id. `None` = all of them (`*`).
+    /// The sending launch's canonical slash-separated namespace. `None` = all depths (`**`).
     pub source: Option<String>,
     /// The type segment ([`Topic::TYPE`](crate::Topic::TYPE)). `None` = all of them (`*`). A launch's
     /// token puts the verbatim `@launch` in the type slot (which `*` does not match).
@@ -85,7 +92,7 @@ pub struct Key {
 }
 
 impl Key {
-    /// A type's key. `source: None` means `*`.
+    /// A type's key. `source: None` means `**`; `Some` is always an exact namespace.
     #[must_use]
     pub fn topic(domain: &str, source: Option<&str>, ty: &str) -> Self {
         Self {
@@ -107,7 +114,8 @@ impl Key {
         }
     }
 
-    /// The all-sources, all-types pattern `reiny/<domain>/*/*` (it does not reach the verbatim chunks).
+    /// The all-sources, all-types pattern `reiny/<domain>/*/**` (zenoh's canonical `**/*`).
+    /// Engine filtering keeps it apart from type chunks and verbatim type slots.
     #[must_use]
     pub fn all(domain: &str) -> Self {
         Self {
@@ -133,7 +141,47 @@ impl Key {
         }
     }
 
-    /// Parse the zenoh form `reiny/<domain>/<source>/<ty>[/<chunk>]`. `None` when the shape differs.
+    /// Validate the canonical address components without turning a concrete source into a pattern.
+    ///
+    /// # Errors
+    /// Returns an error for empty / relative path segments, wildcard concrete sources or types,
+    /// reserved source segments, or a chunk without a verbatim boundary.
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            ordinary_segment(&self.domain),
+            "invalid key domain '{}'",
+            self.domain
+        );
+        if let Some(source) = &self.source {
+            anyhow::ensure!(
+                source.split('/').all(ordinary_segment),
+                "invalid key source '{source}': expected a canonical namespace, not a pattern"
+            );
+        }
+        if let Some(ty) = &self.ty {
+            anyhow::ensure!(
+                ordinary_segment(ty)
+                    || matches!(ty.as_str(), LAUNCH_CHUNK | READY_CHUNK | STOP_CHUNK),
+                "invalid key type '{ty}'"
+            );
+        }
+        if let Some(chunk) = &self.chunk {
+            let mut segments = chunk.split('/');
+            let first = segments.next().unwrap_or("");
+            anyhow::ensure!(
+                first.starts_with('@')
+                    && ordinary_segment(&first[1..])
+                    && !matches!(first, LAUNCH_CHUNK | READY_CHUNK | STOP_CHUNK)
+                    && segments.all(|s| s == "*" || ordinary_segment(s)),
+                "invalid key chunk '{chunk}': expected a verbatim chunk followed by ordinary segments"
+            );
+        }
+        Ok(())
+    }
+
+    /// Parse `reiny/<domain>/<namespace>/<ty>[/@chunk/…]`. The type is the last segment
+    /// before a verbatim chunk, or the terminal `@launch` / `@ready` / `@stop` slot.
+    /// `None` when the shape differs. Only `**` denotes an all-depth source pattern.
     #[must_use]
     pub fn parse(key: &str) -> Option<Self> {
         let mut parts = key.split('/');
@@ -141,19 +189,39 @@ impl Key {
             return None;
         }
         let domain = parts.next()?.to_string();
-        let source = wildcard_to_none(parts.next()?);
-        let ty = wildcard_to_none(parts.next()?);
         let tail: Vec<&str> = parts.collect();
-        Some(Self {
+        // Zenoh canonicalizes `**/*` into `*/**`, including before a verbatim chunk.
+        let (source, ty, chunk) = if tail.starts_with(&["*", "**"]) {
+            (None, None, (tail.len() > 2).then(|| tail[2..].join("/")))
+        } else {
+            let boundary = tail.iter().position(|s| s.starts_with('@'));
+            let type_at = match boundary {
+                Some(i) if matches!(tail[i], LAUNCH_CHUNK | READY_CHUNK | STOP_CHUNK) => i,
+                Some(i) => i.checked_sub(1)?,
+                None => tail.len().checked_sub(1)?,
+            };
+            if type_at == 0 {
+                return None; // A namespace is never empty, even though zenoh's ** can match zero.
+            }
+            let source = tail[..type_at].join("/");
+            (
+                (source != "**").then_some(source),
+                wildcard_to_none(tail[type_at]),
+                (tail.len() > type_at + 1).then(|| tail[type_at + 1..].join("/")),
+            )
+        };
+        let key = Self {
             domain,
             source,
             ty,
-            chunk: (!tail.is_empty()).then(|| tail.join("/")),
-        })
+            chunk,
+        };
+        key.validate().ok()?;
+        Some(key)
     }
 
-    /// Whether `key` matches `self` taken as a pattern. A `None` segment is `*`, a `*` type does not
-    /// match a verbatim one (`@launch`), and a chunk compares segment by segment with the same rule.
+    /// Whether `key` matches `self` taken as a pattern. A `None` source reaches every namespace depth;
+    /// a `None` type is `*` and does not match verbatim slots. Chunks compare segment by segment.
     #[must_use]
     pub fn matches(&self, key: &Key) -> bool {
         let ty_ok = match (&self.ty, &key.ty) {
@@ -185,15 +253,23 @@ fn wildcard_to_none(segment: &str) -> Option<String> {
     (segment != "*").then(|| segment.to_string())
 }
 
+fn ordinary_segment(segment: &str) -> bool {
+    !matches!(segment, "." | "..") && crate::validate_segment("key segment", segment).is_ok()
+}
+
 impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{KEY_ROOT}/{}/{}/{}",
-            self.domain,
-            self.source.as_deref().unwrap_or("*"),
-            self.ty.as_deref().unwrap_or("*")
-        )?;
+        if self.source.is_none() && self.ty.is_none() {
+            write!(f, "{KEY_ROOT}/{}/*/**", self.domain)?;
+        } else {
+            write!(
+                f,
+                "{KEY_ROOT}/{}/{}/{}",
+                self.domain,
+                self.source.as_deref().unwrap_or("**"),
+                self.ty.as_deref().unwrap_or("*")
+            )?;
+        }
         if let Some(chunk) = &self.chunk {
             write!(f, "/{chunk}")?;
         }
@@ -338,11 +414,11 @@ mod tests {
     fn key_round_trips_through_the_zenoh_form() {
         for text in [
             "reiny/lab/ctrl/RobotState",
-            "reiny/lab/*/RobotState",
-            "reiny/lab/*/*",
+            "reiny/lab/**/RobotState",
+            "reiny/lab/*/**",
             "reiny/lab/ctrl/@launch",
-            "reiny/lab/*/@launch",
-            "reiny/lab/*/Add/@service",
+            "reiny/lab/**/@launch",
+            "reiny/lab/**/Add/@service",
             "reiny/lab/ctrl/RobotState/@schema/hs.RobotState",
         ] {
             let key = Key::parse(text).expect(text);
@@ -355,13 +431,13 @@ mod tests {
                 .as_deref(),
             Some("ctrl")
         );
-        assert_eq!(Key::parse("reiny/lab/*/RobotState").unwrap().source, None);
+        assert_eq!(Key::parse("reiny/lab/**/RobotState").unwrap().source, None);
         assert_eq!(
             Key::parse("reiny/lab/ctrl/@launch").unwrap(),
             Key::launch("lab", Some("ctrl"))
         );
         assert_eq!(
-            Key::parse("reiny/lab/*/*/@service").unwrap(),
+            Key::parse("reiny/lab/*/**/@service").unwrap(),
             Key::all("lab").with_chunk(SERVICE_CHUNK)
         );
         for bad in [
@@ -384,7 +460,7 @@ mod tests {
         assert!(!any.matches(&Key::topic("lab", Some("a"), "T").with_chunk(SERVICE_CHUNK)));
         assert!(Key::launch("lab", None).matches(&Key::launch("lab", Some("a"))));
         let all = Key::all("lab");
-        assert_eq!(all.to_string(), "reiny/lab/*/*");
+        assert_eq!(all.to_string(), "reiny/lab/*/**");
         assert!(all.matches(&Key::topic("lab", Some("a"), "T")));
         assert!(!all.matches(&Key::launch("lab", Some("a"))), "verbatim");
         assert!(!all.matches(&Key::topic("lab", Some("a"), "T").with_chunk(SERVICE_CHUNK)));

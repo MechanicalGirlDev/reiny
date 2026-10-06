@@ -12,7 +12,10 @@ use tokio::time::timeout;
 
 use zenoh::Wait;
 
-use crate::engine::Zenoh;
+use crate::engine::{
+    BoxFuture, Callback, Caps, Engine, Guard, Key, Presence, QueryCallback, QueryParams,
+    RawPublisher, RawReplies, Sample, Zenoh,
+};
 use crate::{Cloudy, Descriptor, History, PresenceEvent, Qos, Topic, shutdown::Shutdown};
 
 /// A wire type just for these tests. `impl Topic` is hand-written because that is precisely reiny's
@@ -113,30 +116,153 @@ async fn cloudy(session: zenoh::Session, id: &str, domain: &str) -> Cloudy {
     .expect("cloudy")
 }
 
-const SETTLE: Duration = Duration::from_millis(600);
 const PATIENCE: Duration = Duration::from_secs(5);
 
-/// Wait until the listening session has `peers` links. A fixed sleep is not enough under a loaded
-/// parallel run — a get or a declaration fired before the link exists never reaches the other side.
+/// All callers have already constructed their Cloudy instances. History subscribes atomically to
+/// their launch-token arrivals, including the local launch, instead of polling transport counts.
 pub(crate) async fn wait_peers(session: &zenoh::Session, peers: usize) {
-    let deadline = tokio::time::Instant::now() + PATIENCE;
-    loop {
-        let linked = session.info().peers_zid().await.count();
-        if linked >= peers {
-            return;
+    let launches = session
+        .liveliness()
+        .declare_subscriber("reiny/**/@launch")
+        .history(true)
+        .wait()
+        .expect("launch readiness observer");
+    timeout(PATIENCE, async {
+        let mut seen = std::collections::HashSet::new();
+        while seen.len() < peers + 1 {
+            let event = launches
+                .recv_async()
+                .await
+                .expect("launch observer remains open");
+            if event.kind() == zenoh::sample::SampleKind::Put {
+                seen.insert(event.key_expr().to_string());
+            }
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "only {linked}/{peers} peers linked within patience"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    })
+    .await
+    .expect("all peer launch declarations reach this session");
+}
+
+fn subscriber_signal(session: &zenoh::Session, key: String) -> (Guard, flume::Receiver<()>) {
+    let observer = session.declare_publisher(key).wait().expect("observer");
+    let (tx, rx) = flume::unbounded();
+    let listener = observer
+        .matching_listener()
+        .callback(move |status| {
+            if status.matching() {
+                let _ = tx.send(());
+            }
+        })
+        .wait()
+        .expect("matching listener");
+    (Box::new((observer, listener)), rx)
+}
+
+fn queryable_signal(session: &zenoh::Session, key: String) -> (Guard, flume::Receiver<()>) {
+    let observer = session.declare_querier(key).wait().expect("observer");
+    let (tx, rx) = flume::unbounded();
+    let listener = observer
+        .matching_listener()
+        .callback(move |status| {
+            if status.matching() {
+                let _ = tx.send(());
+            }
+        })
+        .wait()
+        .expect("matching listener");
+    (Box::new((observer, listener)), rx)
+}
+
+async fn matched_signal(matched: &flume::Receiver<()>) {
+    timeout(PATIENCE, matched.recv_async())
+        .await
+        .expect("remote declaration reaches the observer")
+        .expect("matching listener remains open");
+}
+
+/// Observe completion of the real SDK buffer callback, not just a parallel native subscription.
+/// In particular, a ring must have received the entire burst before we start draining it.
+struct Observed {
+    zenoh: Zenoh,
+    buffered: flume::Sender<Sample>,
+}
+
+impl Engine for Observed {
+    fn caps(&self) -> Caps {
+        self.zenoh.caps()
     }
+
+    fn publisher(&self, key: &Key, qos: &Qos) -> crate::Result<Box<dyn RawPublisher>> {
+        self.zenoh.publisher(key, qos)
+    }
+
+    fn subscribe(&self, key: &Key, on_sample: Callback<Sample>) -> crate::Result<Guard> {
+        let buffered = self.buffered.clone();
+        self.zenoh.subscribe(
+            key,
+            Box::new(move |sample| {
+                on_sample(sample.clone());
+                let _ = buffered.send(sample);
+            }),
+        )
+    }
+
+    fn declare_alive(&self, key: &Key) -> crate::Result<Guard> {
+        self.zenoh.declare_alive(key)
+    }
+
+    fn alive(&self, key: &Key, duration: Duration) -> BoxFuture<'_, crate::Result<Vec<Key>>> {
+        self.zenoh.alive(key, duration)
+    }
+
+    fn watch_alive(&self, key: &Key, on_event: Callback<Presence>) -> crate::Result<Guard> {
+        self.zenoh.watch_alive(key, on_event)
+    }
+
+    fn respond(&self, key: &Key, on_query: QueryCallback) -> crate::Result<Guard> {
+        self.zenoh.respond(key, on_query)
+    }
+
+    fn query(&self, key: &Key, params: QueryParams) -> crate::Result<Box<dyn RawReplies>> {
+        self.zenoh.query(key, params)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self.zenoh.as_any()
+    }
+}
+
+async fn buffered_samples(buffered: &flume::Receiver<Sample>, ty: &str, count: usize) {
+    timeout(PATIENCE, async {
+        for _ in 0..count {
+            let sample = buffered
+                .recv_async()
+                .await
+                .expect("buffer observer remains open");
+            assert_eq!(sample.key.ty.as_deref(), Some(ty));
+        }
+    })
+    .await
+    .expect("all samples reach the SDK buffers");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn presence_latched_and_domain_isolation() {
     let alpha = cloudy(session(true).await, "alpha", "lab").await;
-    let beta = cloudy(session(false).await, "beta", "lab").await;
+    let (buffered_tx, buffered) = flume::unbounded();
+    let beta = Cloudy::new(
+        Arc::new(Observed {
+            zenoh: Zenoh::from_session(session(false).await),
+            buffered: buffered_tx,
+        }),
+        "beta".to_string(),
+        "lab".to_string(),
+        Shutdown::new(),
+        None,
+        Vec::new(),
+    )
+    .await
+    .expect("cloudy");
     let gamma = cloudy(session(false).await, "gamma", "other").await;
     // Until the sessions are connected (beta / gamma attached to alpha).
     wait_peers(alpha.session().expect("zenoh engine"), 2).await;
@@ -154,13 +280,17 @@ async fn presence_latched_and_domain_isolation() {
     assert!(err.to_string().contains("KeepLast(3)"), "{err}");
 
     // --- latched (= `Qos::STATE`): send once, up front, and never re-send ---
+    let (_latched_observer, latched_ready) = queryable_signal(
+        beta.session().unwrap(),
+        "reiny/lab/alpha/ReinyE2eProbe".to_string(),
+    );
     let publisher = alpha
         .publisher::<Probe>()
         .qos(Qos::STATE)
         .build()
         .expect("latched publisher");
     publisher.send(Probe { seq: 7 }).await.expect("send");
-    tokio::time::sleep(SETTLE).await;
+    matched_signal(&latched_ready).await;
 
     // --- a late subscriber still receives that one sample ---
     let mut late = beta
@@ -174,28 +304,13 @@ async fn presence_latched_and_domain_isolation() {
         .expect("stream should not end");
     assert_eq!(envelope.value.seq, 7);
     assert_eq!(envelope.source, "alpha", "the source id comes off the key");
+    drop(late);
 
     // --- presence: a live publisher is visible by id ---
     let live = beta.publishers::<Probe>().await.expect("publishers()");
     assert_eq!(live, ["alpha"]);
 
-    // --- domain isolation: on the same fabric, a different domain sees nothing ---
-    let other = gamma.publishers::<Probe>().await.expect("publishers()");
-    assert!(
-        other.is_empty(),
-        "must not be visible across domains: {other:?}"
-    );
-    let mut outsider = gamma
-        .subscriber::<Probe>()
-        .latched()
-        .build()
-        .expect("subscriber");
-    assert!(
-        timeout(Duration::from_millis(800), outsider.recv())
-            .await
-            .is_err(),
-        "a latched value must not cross domains"
-    );
+    domain_isolation(&alpha, &gamma, &publisher).await;
 
     // --- leaving: dropping the publisher drops the liveliness token too ---
     let mut watch = beta.watch_publishers::<Probe>().expect("watch_publishers");
@@ -214,7 +329,53 @@ async fn presence_latched_and_domain_isolation() {
     let live = beta.publishers::<Probe>().await.expect("publishers()");
     assert!(live.is_empty(), "still there after the drop: {live:?}");
 
+    schema_fingerprints(&alpha, &beta, &buffered).await;
+    schema_discovery(&alpha, &beta).await;
+    receive_buffers(&alpha, &beta, &buffered).await;
+}
+
+async fn domain_isolation(alpha: &Cloudy, gamma: &Cloudy, publisher: &crate::Publisher<Probe>) {
+    // --- domain isolation: on the same fabric, a different domain sees nothing ---
+    let other = gamma.publishers::<Probe>().await.expect("publishers()");
+    assert!(
+        other.is_empty(),
+        "must not be visible across domains: {other:?}"
+    );
+    let (_isolation_observer, isolated_ready) = subscriber_signal(
+        alpha.session().unwrap(),
+        "reiny/other/delta/ReinyE2eProbe".to_string(),
+    );
+    let mut outsider = gamma
+        .subscriber::<Probe>()
+        .latched()
+        .build()
+        .expect("subscriber");
+    matched_signal(&isolated_ready).await;
+    // Use the same physical sender for both domains, with an ordered valid sentinel.
+    let delta = cloudy(alpha.session().unwrap().clone(), "delta", "other").await;
+    let sentinel = delta
+        .publisher::<Probe>()
+        .latched()
+        .build()
+        .expect("sentinel");
+    publisher.send(Probe { seq: 8 }).await.expect("lab sample");
+    sentinel
+        .send(Probe { seq: 9 })
+        .await
+        .expect("other-domain sentinel");
+    let isolated = timeout(PATIENCE, outsider.recv_envelope())
+        .await
+        .expect("other-domain delivery")
+        .expect("open outsider");
+    assert_eq!((isolated.value.seq, isolated.source.as_str()), (9, "delta"));
+}
+
+async fn schema_fingerprints(alpha: &Cloudy, beta: &Cloudy, buffered: &flume::Receiver<Sample>) {
     // --- schema fingerprints: same topic, different shape, nothing arrives ---
+    let (_stamped_observer, stamped_ready) = subscriber_signal(
+        alpha.session().unwrap(),
+        "reiny/lab/alpha/ReinyE2eStamped".to_string(),
+    );
     let stamped = alpha
         .publisher::<StampedV1>()
         .build()
@@ -227,27 +388,39 @@ async fn presence_latched_and_domain_isolation() {
         .subscriber::<StampedV2>()
         .build()
         .expect("mismatching subscriber");
-    tokio::time::sleep(SETTLE).await;
+    matched_signal(&stamped_ready).await;
     stamped.send(StampedV1 { seq: 42 }).await.expect("send");
+    buffered_samples(buffered, StampedV1::TYPE, 2).await;
 
     let got = timeout(PATIENCE, same.recv())
         .await
         .expect("the same fingerprint arrives")
         .expect("stream should not end");
     assert_eq!(got.seq, 42);
-    assert!(
-        timeout(Duration::from_millis(800), different.recv())
-            .await
-            .is_err(),
-        "a sample with a different fingerprint must be dropped (protobuf is permissive: it would decode)"
-    );
+    // Both real SDK callbacks completed above. Polling once must consume the
+    // mismatching frame without producing a value, rather than waiting for silence.
+    let mut rejected = std::pin::pin!(different.recv());
+    std::future::poll_fn(|cx| {
+        assert!(
+            std::future::Future::poll(rejected.as_mut(), cx).is_pending(),
+            "a mismatching fingerprint must not decode"
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
+}
 
+async fn schema_discovery(alpha: &Cloudy, beta: &Cloudy) {
     // --- @schema: a publisher with a DESCRIPTOR announces it beside its own key ---
+    let (_schema_observer, schema_ready) = queryable_signal(
+        beta.session().unwrap(),
+        "reiny/lab/alpha/ReinyE2eDescribed/@schema/e2e.Described".to_string(),
+    );
     let described = alpha
         .publisher::<Described>()
         .build()
         .expect("described publisher");
-    tokio::time::sleep(SETTLE).await;
+    matched_signal(&schema_ready).await;
     let replies = beta
         .session()
         .expect("zenoh engine")
@@ -284,8 +457,14 @@ async fn presence_latched_and_domain_isolation() {
         .collect();
     assert!(leaked.is_empty(), "@schema is visible to **: {leaked:?}");
     drop(described);
+}
 
+async fn receive_buffers(alpha: &Cloudy, beta: &Cloudy, buffered: &flume::Receiver<Sample>) {
     // --- latest(n): letting samples pile up unread drops the oldest (the default Fifo keeps all 5) ---
+    let (_burst_observer, burst_ready) = subscriber_signal(
+        alpha.session().unwrap(),
+        "reiny/lab/alpha/ReinyE2eProbe".to_string(),
+    );
     let burst = alpha.publisher::<Probe>().build().expect("burst publisher");
     let mut ring = beta
         .subscriber::<Probe>()
@@ -293,18 +472,29 @@ async fn presence_latched_and_domain_isolation() {
         .build()
         .expect("ring subscriber");
     let mut fifo = beta.subscriber::<Probe>().build().expect("fifo subscriber");
-    tokio::time::sleep(SETTLE).await;
+    matched_signal(&burst_ready).await;
     for seq in 1..=5 {
         burst.send(Probe { seq }).await.expect("send");
     }
-    tokio::time::sleep(SETTLE).await;
+    buffered_samples(buffered, Probe::TYPE, 10).await;
+    assert_eq!(ring.stats().received, 5);
+    assert_eq!(ring.stats().dropped, 3);
+    assert_eq!(fifo.stats().received, 5);
     let mut kept = Vec::new();
-    while let Ok(Some(m)) = timeout(Duration::from_millis(300), ring.recv()).await {
+    for _ in 0..2 {
+        let m = timeout(PATIENCE, ring.recv())
+            .await
+            .expect("ring sample")
+            .expect("open");
         kept.push(m.seq);
     }
     assert_eq!(kept, [4, 5], "latest(2) returns the two newest, in order");
     let mut all = Vec::new();
-    while let Ok(Some(m)) = timeout(Duration::from_millis(300), fifo.recv()).await {
+    for _ in 0..5 {
+        let m = timeout(PATIENCE, fifo.recv())
+            .await
+            .expect("fifo sample")
+            .expect("open");
         all.push(m.seq);
     }
     assert_eq!(all, [1, 2, 3, 4, 5], "the default Fifo drops nothing");
@@ -321,7 +511,7 @@ async fn presence_latched_and_domain_isolation() {
         }
     }
     burst.send(Probe { seq: 99 }).await.expect("send");
-    tokio::time::sleep(SETTLE).await;
+    buffered_samples(buffered, Probe::TYPE, 2).await;
     for sub in [&mut ring, &mut fifo] {
         // After it arrives, provoke a "start taking it out, then drop" with an already-expired recv.
         let got = match timeout(Duration::ZERO, sub.recv()).await {

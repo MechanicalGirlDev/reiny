@@ -3419,6 +3419,7 @@ name = "reiny-core"
 version = "0.6.0"
 dependencies = [
  "prost",
+ "serde",
 ]
 
 [[package]]

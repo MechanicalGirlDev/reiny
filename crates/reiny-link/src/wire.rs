@@ -271,7 +271,7 @@ pub struct Hello<'a> {
 }
 
 impl<'a> Hello<'a> {
-    /// The sequence of type entries. It stops wherever the shape breaks down.
+    /// The complete sequence of type entries, checked by [`hello_parse`].
     #[must_use]
     pub fn entries(&self) -> HelloEntries<'a> {
         HelloEntries {
@@ -321,12 +321,24 @@ pub fn hello_parse(payload: &[u8]) -> Result<Hello<'_>, WireError> {
     let flags = r.u8().ok_or(WireError::Malformed)?;
     let id = r.str().ok_or(WireError::Malformed)?;
     let count = r.u8().ok_or(WireError::Malformed)?;
+    // Check the entire descriptor before exposing any of it. A truncated table must not look
+    // like a valid Hello announcing fewer types or losing the end of a namespace.
+    let entries = &payload[r.pos..];
+    for _ in 0..count {
+        r.u32().ok_or(WireError::Malformed)?;
+        r.u8().ok_or(WireError::Malformed)?;
+        r.u64().ok_or(WireError::Malformed)?;
+        r.str().ok_or(WireError::Malformed)?;
+    }
+    if r.pos != payload.len() {
+        return Err(WireError::Malformed);
+    }
     Ok(Hello {
         ack: flags & HELLO_ACK != 0,
         bridge: flags & HELLO_BRIDGE != 0,
         id,
         count: usize::from(count),
-        entries: &payload[r.pos..],
+        entries,
     })
 }
 
@@ -646,13 +658,13 @@ mod tests {
     }
 
     #[test]
-    fn hello_stops_at_truncation() {
+    fn hello_rejects_truncation() {
         let mut buf = [0u8; 128];
         let n = hello_write(
             &mut buf,
             false,
             false,
-            "x",
+            "deployment/robot/controller",
             [HelloEntry {
                 hash: 1,
                 flags: flags::PUB,
@@ -662,16 +674,25 @@ mod tests {
             .into_iter(),
         )
         .unwrap();
-        // A Hello cut short mid-entry: the id still reads, and the entries stop at zero.
-        let hello = hello_parse(&buf[..n - 3]).unwrap();
-        assert_eq!(hello.id, "x");
-        assert_eq!(hello.entries().count(), 0);
+        // No partial descriptor is exposed, even when its id was readable.
+        for len in 0..n {
+            assert!(
+                hello_parse(&buf[..len]).is_err(),
+                "truncated to {len} bytes"
+            );
+        }
+        assert_eq!(hello_parse(&buf[..n]).unwrap().entries().count(), 1);
+        buf[n] = 0;
+        assert!(
+            hello_parse(&buf[..=n]).is_err(),
+            "trailing descriptor bytes"
+        );
         assert!(hello_parse(&[]).is_err());
     }
 
-    /// A name whose bytes are not UTF-8 stops the iteration rather than surfacing as a bad `&str`.
+    /// Invalid type names reject the whole descriptor rather than exposing a partial table.
     #[test]
-    fn hello_stops_at_invalid_utf8_name() {
+    fn hello_rejects_invalid_utf8_name() {
         let mut buf = [0u8; 64];
         let n = hello_write(
             &mut buf,
@@ -688,7 +709,7 @@ mod tests {
         )
         .unwrap();
         buf[n - 1] = 0xff; // wreck the last byte of the name
-        assert_eq!(hello_parse(&buf[..n]).unwrap().entries().count(), 0);
+        assert!(hello_parse(&buf[..n]).is_err());
     }
 
     /// The writer refuses what the format cannot express, instead of writing a truncated length.
@@ -699,6 +720,22 @@ mod tests {
         // An id longer than 255 bytes: the length prefix is a u8.
         assert_eq!(
             hello_write(&mut buf, false, false, &long, core::iter::empty()),
+            Err(WireError::TooLarge)
+        );
+        assert_eq!(
+            hello_write(
+                &mut buf,
+                false,
+                false,
+                "deployment/robot",
+                [HelloEntry {
+                    hash: 1,
+                    flags: flags::PUB,
+                    schema: None,
+                    name: &long
+                }]
+                .into_iter()
+            ),
             Err(WireError::TooLarge)
         );
         // More than 255 entries: the count is a u8.

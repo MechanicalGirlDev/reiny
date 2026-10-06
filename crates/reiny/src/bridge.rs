@@ -33,7 +33,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::engine::{
-    Engine, Guard, Key, Presence, QueryParams, RawPublisher, RawQuery, SERVICE_CHUNK, Sample,
+    Engine, Guard, Key, LAUNCH_CHUNK, Presence, QueryParams, READY_CHUNK, RawPublisher, RawQuery,
+    SERVICE_CHUNK, STOP_CHUNK, Sample,
 };
 use crate::{Cloudy, Qos, Result};
 
@@ -145,6 +146,7 @@ impl Flow {
             Key::all(&domain),
             Key::all(&domain).with_chunk(SERVICE_CHUNK),
             Key::launch(&domain, None),
+            Key::topic(&domain, None, READY_CHUNK),
         ] {
             let tx = ops.clone();
             watchers.push(from.engine().watch_alive(
@@ -230,14 +232,17 @@ impl Flow {
             }
         }
         tracing::debug!(key = %key, "bridge: joined");
-        let topic = Key {
-            chunk: None,
-            ..key.clone()
+        let topic = match key.ty.as_deref() {
+            Some(LAUNCH_CHUNK) => Key::topic(&key.domain, key.source.as_deref(), STOP_CHUNK),
+            _ => Key {
+                chunk: None,
+                ..key.clone()
+            },
         };
-        if key.is_verbatim_type() {
-            return; // @launch: the token and nothing else
+        if key.is_verbatim_type() && key.ty.as_deref() != Some(LAUNCH_CHUNK) {
+            return; // Readiness is a token only; launch presence also carries the stop route.
         }
-        if key.chunk.is_none() {
+        if key.chunk.is_none() && !key.is_verbatim_type() {
             // A publisher token: subscribe to that type on from (if this is the first time for it).
             if let Some(ty) = key.ty.clone() {
                 *self.type_refs.entry(ty.clone()).or_insert(0) += 1;
@@ -288,9 +293,12 @@ impl Flow {
         }
         self.injected.remove(&source);
         tracing::debug!(%key, "bridge: left");
-        let topic = Key {
-            chunk: None,
-            ..key.clone()
+        let topic = match key.ty.as_deref() {
+            Some(LAUNCH_CHUNK) => Key::topic(&key.domain, key.source.as_deref(), STOP_CHUNK),
+            _ => Key {
+                chunk: None,
+                ..key.clone()
+            },
         };
         if key.chunk.is_none()
             && !key.is_verbatim_type()
