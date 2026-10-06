@@ -2,10 +2,10 @@
 
 All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
 `reiny-link`, `reiny-iceoryx2`, `reiny-ros2`, `reiny-build`, `reiny-macros`,
-`reiny-launch`, `reiny-cli`).
+`reiny-launch`, `reiny-cli`, `reiny-ffi`).
 Versions are kept in lockstep via `[workspace.package].version`.
 
-## Unreleased
+## 0.7.0 — 2026-10-06
 
 **Breaking.** `Reiny.toml` and YAML/TOML launch configs are replaced by one
 `main.yaml` per directory. The guide is `docs/modules.md`; the field schema is
@@ -32,6 +32,9 @@ hashes are unchanged; the source segment is now the module namespace.
 - **`reiny-core`** - `bindings` module (module bindings and reports) behind
   the optional `bindings` feature (`serde` with `alloc`); `no_std` builds are
   unaffected.
+- **`reiny-ffi`** - UniFFI and C bindings for multilingual pub/sub, source
+  filtering, discovery and cooperative shutdown. Foreign-language sources
+  preserve the full hierarchical namespace.
 
 ### Changed
 - **`reiny-build`** - reads the `schema` block of the nearest `main.yaml`
