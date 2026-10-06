@@ -18,6 +18,10 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
 }
 ```
 
+That's the standalone API. A module started by a `main.yaml` deployment opens
+its declared ports by name with `cloudy.input::<T>(name)` and
+`cloudy.output::<T>(name)`, then calls `cloudy.ready()`.
+
 `#[reiny::main]` is re-exported from
 [`reiny-macros`](https://crates.io/crates/reiny-macros). Build-time code
 generation is done by [`reiny-build`](https://crates.io/crates/reiny-build),

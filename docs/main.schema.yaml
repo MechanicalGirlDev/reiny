@@ -1,0 +1,102 @@
+# JSON Schema (draft 2020-12) for reiny `main.yaml`, written as YAML.
+# Mirrors ModuleManifest in crates/reiny-launch/src/modules.rs; the Rust
+# structs win on any disagreement. Cross-field rules (run vs modules, build
+# only with run, root-only keys, port wiring) are checked by reiny, not here.
+$schema: "https://json-schema.org/draft/2020-12/schema"
+title: reiny main.yaml
+type: object
+additionalProperties: false
+required: [version]
+properties:
+  version: { const: 1 }
+  deployment: { type: string, description: "Root only. Deployment identity." }
+  domain: { type: string, description: "Root only. Defaults to the deployment name." }
+  providers:
+    type: object
+    additionalProperties: { $ref: "#/$defs/provider" }
+  modules:
+    type: object
+    additionalProperties: { $ref: "#/$defs/moduleCall" }
+  run: { $ref: "#/$defs/run" }
+  build: { $ref: "#/$defs/build" }
+  in: { $ref: "#/$defs/ports" }
+  out: { $ref: "#/$defs/ports" }
+  resources:
+    type: object
+    additionalProperties: { $ref: "#/$defs/resource" }
+  schema:
+    description: "Build-time catalog for reiny-build. Never run as runtime actions."
+$defs:
+  port:
+    type: object
+    additionalProperties: false
+    required: [type]
+    properties:
+      type: { type: string }
+      from: { type: string, description: "<sibling>.<port> or in.<port>" }
+  ports:
+    type: object
+    additionalProperties: { $ref: "#/$defs/port" }
+  gitSource:
+    type: object
+    additionalProperties: false
+    required: [git, ref]
+    properties:
+      git: { type: string }
+      ref: { type: string }
+      path: { type: string, default: "." }
+  moduleCall:
+    type: object
+    additionalProperties: false
+    required: [source]
+    properties:
+      source:
+        oneOf:
+          - { type: string, description: "Directory relative to the calling main.yaml" }
+          - { $ref: "#/$defs/gitSource" }
+      providers:
+        type: object
+        additionalProperties: { type: string }
+      in: { $ref: "#/$defs/ports" }
+      out: { $ref: "#/$defs/ports" }
+  provider:
+    type: object
+    additionalProperties: false
+    required: [type]
+    properties:
+      type: { enum: [process, artifact] }
+      bin_dir: { type: string, default: "." }
+      zenoh_config: { type: string }
+      connect: { type: array, items: { type: string } }
+  run:
+    type: object
+    additionalProperties: false
+    required: [provider, bin]
+    properties:
+      provider: { type: string }
+      bin: { type: string }
+      config: { type: string }
+      args: { type: array, items: { type: string } }
+      restart: { enum: [manual, on_failure, always], default: manual }
+      on_failure: { enum: [report, suspend_deployment], default: report }
+  build:
+    type: object
+    additionalProperties: false
+    required: [type]
+    properties:
+      type: { const: cargo }
+      manifest: { type: string, default: Cargo.toml }
+      package: { type: string }
+      profile: { type: string, default: release }
+      features: { type: array, items: { type: string } }
+      default_features: { type: boolean, default: true }
+      locked: { type: boolean, default: true }
+  resource:
+    type: object
+    additionalProperties: false
+    required: [type, provider, source]
+    properties:
+      type: { const: artifact.file }
+      provider: { type: string }
+      source: { type: string }
+      sha256: { type: string }

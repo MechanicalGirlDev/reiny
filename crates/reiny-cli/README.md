@@ -7,14 +7,24 @@ The `reiny` command for
 cargo install reiny-cli
 ```
 
-Subcommands:
+Deployments (every command takes a root directory or its `main.yaml`, default `.`):
 
-- `reiny new` / `reiny init` — scaffold a launch project (a standalone cargo project)
-- `reiny add` — append a dependency type to the target's `Reiny.toml` `[dependencies]`
-- `reiny build` — run `cargo build` in the cwd (code generation is handled by the launch's `build.rs`)
-- `reiny run` — read a launch config and spawn the launch processes
-- `reiny compress` — bundle the reachable launch binaries, `.so`s, launch config, and launcher into one self-contained directory
+- `reiny plan` - resolve module sources and show modules and connections, without building
+- `reiny apply` - prepare artifacts, start or reconcile managed processes and wait for readiness (`--detach` returns after readiness)
+- `reiny run` - the same contract as `apply`, in the foreground
+- `reiny status` / `reiny stop` - read live state, or stop cooperatively and reap owned processes
+- `reiny update` - move Git module refs and rewrite `lock.yaml`
+- `reiny compress` - build and bundle a self-contained deployment
 
-`reiny <launch>.toml` (a bare positional argument) is shorthand for `reiny run`.
+Modules and schema:
+
+- `reiny new` / `reiny init` - scaffold a leaf module with `main.yaml` and a Cargo build declaration
+- `reiny add` - add a local schema dependency to `main.yaml`
+- `reiny check` - validate composition or describe the schema without compiling
+- `reiny build` - prepare declared build artifacts without starting processes
+
+Bus tools: `bag`, `topic`, `node`, `service`, `bridge`.
+
+The `main.yaml` format is documented in `docs/modules.md` in the repository.
 
 License: MIT

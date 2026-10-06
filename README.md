@@ -11,7 +11,8 @@ launches publish and subscribe by **Rust type**, never by topic string.
 - Subscribing to type `T` receives `reiny/<domain>/*/T` (the same type from every publisher)
 
 The type → topic mapping is generated at build time by `reiny-build` (each
-launch's `build.rs`) from a `Reiny.toml`, so user code never names a topic string.
+launch's `build.rs`) from the `schema` block of a `main.yaml`, so user code never
+names a topic string.
 `<domain>` is a logical namespace (`--domain` / `REINY_DOMAIN`, default
 `"default"`): launches in different domains never see each other, even on one LAN.
 
@@ -28,6 +29,12 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
     Ok(())
 }
 ```
+
+That's the **standalone** API. A module running inside a `main.yaml`
+deployment opens its declared ports by name instead
+(`cloudy.input::<Pong>("pong")`, `cloudy.output::<Ping>("ping")`, then
+`cloudy.ready()`), so the deployment decides who talks to whom. See
+[`docs/modules.md`](docs/modules.md).
 
 Request/response rides the same model — the **request type is the address**:
 
@@ -54,8 +61,8 @@ For a Rust launch, depend on `reiny` and add `reiny-build` under
 | Crate | Role |
 | --- | --- |
 | [`reiny`](crates/reiny) | The SDK itself: `Cloudy` (the pub/sub handle) and the `#[reiny::main]` runtime |
-| [`reiny-build`](crates/reiny-build) | `build.rs` helper: compiles protos from `Reiny.toml` and generates types/topics |
-| [`reiny-cli`](crates/reiny-cli) | The `reiny` command: scaffold (new/init/add), check, build, run, compress, bag, topic / node / service introspection, `bridge serial\|udp\|iceoryx2` |
+| [`reiny-build`](crates/reiny-build) | `build.rs` helper: compiles protos from the `main.yaml` schema block and generates types/topics |
+| [`reiny-cli`](crates/reiny-cli) | The `reiny` command: plan / apply / run / status / stop / update / compress for deployments, scaffold (new/init/add), check, build, bag, topic / node / service introspection, `bridge serial\|udp\|iceoryx2` |
 
 ### Supporting libraries
 
@@ -66,7 +73,7 @@ sharing message types with MCU firmware or embedding the launcher.
 | --- | --- |
 | [`reiny-core`](crates/reiny-core) | The type vocabulary (`Topic` / `Service` / `Descriptor` / `Qos`), `no_std`; re-exported by `reiny`, used directly by MCU firmware |
 | [`reiny-macros`](crates/reiny-macros) | The `#[reiny::main]` proc-macro (used via `reiny`) |
-| [`reiny-launch`](crates/reiny-launch) | Launcher library: spawns launch processes from a launch config's `[launch]` section, in dependency order and with respawn backoff; can be embedded without the communication SDK |
+| [`reiny-launch`](crates/reiny-launch) | Deployment library: resolves `main.yaml` module trees, pins Git sources, prepares artifacts and supervises managed processes; can be embedded without the communication SDK |
 
 ### Optional integrations
 
@@ -105,12 +112,20 @@ libclang on Windows / macOS. `cargo fmt --all --check` checks the entire workspa
 For non-Rust launches, see [the multilingual FFI SDK](crates/reiny-ffi).
 It uses the same type names and Protobuf wire bytes as Rust launches.
 
-Use the `reiny` CLI to scaffold a launch project.
+Use the `reiny` CLI to scaffold a module and run a deployment. Each directory
+has one `main.yaml`; the format, wiring rules and lifecycle are described in
+[`docs/modules.md`](docs/modules.md).
 
 ```sh
 cargo install reiny-cli   # installs the `reiny` command
-reiny new my-launch
-reiny check my-launch       # show the type → topic map (no build)
+reiny new my-module
+reiny check my-module      # validate and show the type → topic map (no build)
+
+cd examples/ping-pong-relay
+reiny plan                 # resolved modules and connections, nothing built
+reiny apply --detach       # build, start, wait for readiness, then return
+reiny status
+reiny stop
 ```
 
 Record and replay the bus, `ros2 bag`-style (format is [MCAP](https://mcap.dev),
@@ -138,13 +153,13 @@ reiny service call CalibrationCommand '{"start":{}}' --to hs-control
 
 See [`examples/`](examples) for runnable demos (each is its own cargo workspace).
 For larger workspaces, [`examples/ping-pong-schema`](examples/ping-pong-schema)
-shows the `[schema]` shared-schema crate that compiles the message catalog once
+shows the `schema.schema` shared-schema crate that compiles the message catalog once
 instead of per launch, and
 [`examples/ping-pong-schema-split`](examples/ping-pong-schema-split) splits that
 catalog across several independently publishable schema crates without
 generating shared leaf types twice.
 [`examples/ping-pong-service`](examples/ping-pong-service) is the request/response
-sample (`[services]` in `Reiny.toml`).
+sample (`services` in the `main.yaml` schema block).
 
 ## License
 

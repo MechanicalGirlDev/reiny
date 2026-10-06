@@ -5,6 +5,47 @@ All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
 `reiny-launch`, `reiny-cli`).
 Versions are kept in lockstep via `[workspace.package].version`.
 
+## Unreleased
+
+**Breaking.** `Reiny.toml` and YAML/TOML launch configs are replaced by one
+`main.yaml` per directory. The guide is `docs/modules.md`; the field schema is
+`docs/main.schema.yaml`. Topic keys keep the short type name, so Link type
+hashes are unchanged; the source segment is now the module namespace.
+
+### Added
+- **`reiny-launch`** - module trees: a root `main.yaml` names the deployment,
+  domain and providers; composite modules call children by local path
+  (resolved relative to the caller) or by `{ git, ref, path }`, pinned in the
+  root `lock.yaml`; leaf modules declare `run` and an optional Cargo `build`.
+  Ports are wired explicitly with `from`; nothing is inferred from types.
+  Built-in providers are `process` and `artifact` (`artifact.file` resources).
+- **`reiny-launch` / `reiny-cli`** - a managed deployment owner: `apply`
+  prepares artifacts, reconciles processes, waits for explicit readiness and
+  compares reported port schemas. Unchanged modules keep their process. One
+  owner per deployment, controlled only by its authenticated local channel.
+- **`reiny-cli`** - `plan`, `apply [--detach]`, `status`, `stop` and `update`.
+  `run` now has the same contract as `apply`, in the foreground.
+- **`reiny`** - managed ports: `Cloudy::input::<T>(name)`,
+  `Cloudy::output::<T>(name)` and `Cloudy::ready()`, plus a `@stop` request
+  handler. Duplicate output transport types in one executable are rejected.
+  Managed mode requires attachment support, so `LinkEngine` is refused there.
+- **`reiny-core`** - `bindings` module (module bindings and reports) behind
+  the optional `bindings` feature (`serde` with `alloc`); `no_std` builds are
+  unaffected.
+
+### Changed
+- **`reiny-build`** - reads the `schema` block of the nearest `main.yaml`
+  instead of `Reiny.toml`.
+- **`reiny-cli`** - `new` / `init` / `add` / `check` / `build` work on
+  `main.yaml`. `build` prepares declared artifacts and rejects raw Cargo
+  arguments. `compress` bundles the module tree without flattening it.
+
+### Removed
+- `Reiny.toml` and launch configs (`launch:` / `depends_on`). The bare
+  `reiny <path>` and `reiny --config <path>` shorthands now take a module root
+  and mean `reiny apply` in the foreground. `--ready-timeout` now bounds explicit
+  module readiness (default 30 s) instead of waiting for `depends_on`.
+
 ## 0.6.0 — 2026-09-17
 
 **Breaking** for downstream crates, though not on the wire: the generated types are

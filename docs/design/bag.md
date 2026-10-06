@@ -1,5 +1,7 @@
 # reiny bag 設計 —— `reiny bag record / play / info`
 
+> **歴史的資料。** この設計記録は当時の `Reiny.toml` / launch config / `reiny run` を前提にしています。現行の規範は [`../modules.md`](../modules.md)（`main.yaml`）です。
+
 対象: `reiny-cli`（本体）、`reiny`（小さな口を 2 つ）、`reiny-build`（descriptor の同梱）。
 起点: `d55838a`（0.3.0 段 4 まで）。行番号はすべてこのコミット時点のもの。
 依存: zenoh 1.9/1.10（前設計と同じ）、`mcap` 0.25（Foxglove 公式クレート）。

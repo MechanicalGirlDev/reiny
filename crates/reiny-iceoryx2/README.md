@@ -3,7 +3,7 @@
 [reiny](https://github.com/MechanicalGirlDev/reiny) on
 [iceoryx2](https://github.com/eclipse-iceoryx/iceoryx2): launches on one host
 talk over shared memory instead of zenoh. Same `Cloudy`, same types, same
-`Reiny.toml` — only the engine changes:
+`main.yaml` schema; only the engine changes:
 
 ```rust
 use std::sync::Arc;

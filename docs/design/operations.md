@@ -1,5 +1,7 @@
 # reiny 運用の設計 —— `depends_on` の待ち / subscriber presence / バッファの計数 / `topic pub`
 
+> **歴史的資料。** この設計記録は当時の `Reiny.toml` / launch config / `reiny run` を前提にしています。現行の規範は [`../modules.md`](../modules.md)（`main.yaml`）です。
+
 対象: `reiny` / `reiny-launch` / `reiny-cli` / `reiny-link`（`reiny-core` / `reiny-build` /
 `reiny-macros` / `reiny-iceoryx2` / `reiny-ros2` は触らない）。
 起点: 0.5.0 のエンジン抽象まで（`docs/design/0.5.0.md` §11）。**0.5.0 に同梱して出す。**

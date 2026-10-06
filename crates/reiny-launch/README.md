@@ -1,13 +1,14 @@
 # reiny-launch
 
-The launcher library for
-[reiny](https://github.com/MechanicalGirlDev/reiny). It reads the `launch:`
-section of a launch config (e.g. `ping-pong.yaml`; YAML, or TOML with a `.toml`
-extension) and spawns/supervises the
-launch processes together (`depends_on`, `on_exit`, and so on).
+The deployment library for
+[reiny](https://github.com/MechanicalGirlDev/reiny). It resolves a tree of
+`main.yaml` modules (local or revision-pinned Git sources), checks their port
+wiring, prepares declared Cargo builds and file artifacts, and supervises the
+resulting managed processes.
 
-You normally use it via `reiny run` from
+You normally use it through `reiny plan` / `apply` / `run` from
 [`reiny-cli`](https://crates.io/crates/reiny-cli); this crate provides the
-underlying functionality as a library.
+underlying functionality as a library and links no communication bus. The
+`main.yaml` format is documented in `docs/modules.md` in the repository.
 
 License: MIT
