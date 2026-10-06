@@ -1,0 +1,33 @@
+version: 1
+deployment: "ping-pong-ring"
+providers:
+  process:
+    type: "process"
+    bin_dir: "target/debug"
+in: {}
+out:
+  pong_pong:
+    type: "pong.Pong"
+    from: "pong.pong"
+  ping_ping:
+    type: "ping.Ping"
+    from: "ping.ping"
+modules:
+  pong:
+    source: "pong"
+    in:
+      ping:
+        type: "ping.Ping"
+        from: "ping.ping"
+    out:
+      pong:
+        type: "pong.Pong"
+  ping:
+    source: "ping"
+    in:
+      pong:
+        type: "pong.Pong"
+        from: "pong.pong"
+    out:
+      ping:
+        type: "ping.Ping"

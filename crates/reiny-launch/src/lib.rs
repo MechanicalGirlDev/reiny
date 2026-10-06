@@ -1,13 +1,23 @@
-//! The reiny launcher. It derives a launch plan from a launch config's `[launch]` section, starts
-//! each launch bin as a child process in dependency order, and monitors them under their `on_exit` policy.
+//! Declarative modules, revision-pinned sources, immutable builds and owned deployments.
 //!
-//! Unlike `HumanoidSystem`'s hs-launch there are **no known kinds (control/gui/policy/physics) and no
-//! plugin distinction**. Every key is an equal "launch": key = instance name = default bin name.
+//! Endpoint aliases resolve to their executable publisher, without forwarding data.
+//! Communication observation is supplied by the CLI; this crate remains engine-neutral.
 
-mod config;
-mod launch;
-mod runner;
+mod acquire;
+mod artifacts;
+mod deployment;
+mod modules;
+mod prepared;
 
-pub use config::{LaunchConfig, LaunchEntry, LaunchSpec, OnExit};
-pub use launch::{LaunchError, LaunchPlan, ResolvedLaunch};
-pub use runner::{Ready, run_launch, run_launch_dirs};
+pub use acquire::GitSource;
+pub use artifacts::{BuildKind, BuildSpec};
+pub use deployment::{
+    DeploymentClient, DeploymentPhase, DeploymentStatus, ModuleObserver, ModuleStatus,
+    StopSubscription, last_status, serve,
+};
+pub use modules::{
+    ArtifactResource, DeploymentPlan, ExecutableModule, FailurePolicy, ModuleCall, ModuleError,
+    ModuleManifest, ModuleSource, PortSpec, ProviderKind, ProviderSpec, ResourceSpec,
+    RestartPolicy, RunSpec,
+};
+pub use prepared::{PreparedDeployment, PreparedModule};

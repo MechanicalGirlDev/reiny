@@ -1,0 +1,15 @@
+version: 1
+in: {}
+out: {}
+run:
+  provider: "process"
+  bin: "calc"
+  restart: "always"
+build:
+  type: "cargo"
+  manifest: "../Cargo.toml"
+  package: "calc"
+  profile: "debug"
+  features: []
+  default_features: true
+  locked: true

@@ -1,7 +1,4 @@
-//! ping — 最初の一球を打ち、Pong が返るたびに次の Ping を打ち返す(設定例の相手役)。
-//!
-//! 注意: これは reiny の到達目標を示す設計サンプル。umbrella crate `reiny` と
-//! `reiny-build`(Reiny.toml パーサ + codegen)は未実装なので、まだビルドは通らない。
+//! ping demonstrates explicit typed ports in a namespaced deployment.
 
 use reiny::prelude::*;
 
@@ -10,8 +7,35 @@ use crate::publications::Ping;
 
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {
-    let pings = cloudy.publish::<Ping>()?;
-    let mut pongs = cloudy.subscribe::<Pong>()?;
+    let pings = cloudy.output::<Ping>("ping")?;
+    let mut pongs = cloudy.input::<Pong>("pong")?;
+    // Arm an exact readiness watch before advertising our own readiness.
+    let (parent, _) = cloudy.id().rsplit_once('/').ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "ping must run inside a namespaced composition",
+        )
+    })?;
+    let pong = format!("{parent}/pong");
+    let mut readiness = cloudy.watch_keys(&reiny::engine::Key::topic(
+        cloudy.domain(),
+        Some(&pong),
+        "@ready",
+    ))?;
+    cloudy.ready()?;
+    let ready = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while let Some(event) = readiness.recv().await {
+            match event {
+                reiny::engine::Presence::Joined(_) => return true,
+                reiny::engine::Presence::Left(_) => {}
+            }
+        }
+        false
+    })
+    .await?;
+    if !ready {
+        return Ok(());
+    }
 
     let mut seq = 0;
     pings
@@ -23,7 +47,6 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
     tracing::info!(seq, "ping →");
 
     while let Some(pong) = pongs.recv().await {
-        // pong.message は pong 側の設定(reply)で決まる。
         tracing::info!(seq = pong.seq, reply = %pong.message, "← pong");
         seq += 1;
         pings

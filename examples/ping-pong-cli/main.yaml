@@ -1,0 +1,27 @@
+version: 1
+deployment: ping-pong-cli
+providers:
+  process:
+    type: process
+    bin_dir: target/debug
+in: {}
+out:
+  ping:
+    type: ping.Ping
+    from: ping.ping
+  pong:
+    type: pong.Pong
+    from: pong.pong
+modules:
+  ping:
+    source: ping
+    in:
+      pong: { type: pong.Pong, from: pong.pong }
+    out:
+      ping: { type: ping.Ping }
+  pong:
+    source: pong
+    in:
+      ping: { type: ping.Ping, from: ping.ping }
+    out:
+      pong: { type: pong.Pong }

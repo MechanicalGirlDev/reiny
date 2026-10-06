@@ -5,7 +5,7 @@
 //! running publisher / server announces. Only what cannot be written without knowing reiny's and
 //! zenoh's conventions lives here; the statistics and the printing belong to each subcommand.
 //!
-//! Synchronous. zenoh's `.wait()` is enough and tokio is not needed (nor is it anywhere else in the CLI).
+//! Bus calls are synchronous via zenoh's `.wait()`; deployment and bridge adapters use their own runtimes.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -80,7 +80,7 @@ impl BusArgs {
     }
 }
 
-/// The three segments of a key `reiny/<domain>/<source>/<TYPE>`. A side chunk (`/@…`) is rejected (None).
+/// The domain, hierarchical source and type of a topic. Side chunks are rejected.
 pub(crate) struct KeyParts<'a> {
     pub(crate) domain: &'a str,
     pub(crate) source: &'a str,
@@ -89,15 +89,20 @@ pub(crate) struct KeyParts<'a> {
 
 impl<'a> KeyParts<'a> {
     pub(crate) fn parse(key: &'a str) -> Option<Self> {
-        let mut segs = key.split('/');
-        if segs.next()? != KEY_ROOT {
-            return None;
-        }
-        let domain = segs.next()?;
-        let source = segs.next()?;
-        let ty = segs.next()?;
-        // Exactly four segments (with a side chunk `/@schema/...` it is not a type's topic).
-        if segs.next().is_some() {
+        let rest = key.strip_prefix("reiny/")?;
+        let (domain, rest) = rest.split_once('/')?;
+        let (source, ty) = rest.rsplit_once('/')?;
+        if domain.is_empty()
+            || source
+                .split('/')
+                .any(|part| part.is_empty() || part.starts_with('@'))
+            || ty.is_empty()
+            || (ty.starts_with('@')
+                && !matches!(
+                    ty,
+                    LAUNCH_CHUNK | reiny::engine::READY_CHUNK | reiny::engine::STOP_CHUNK
+                ))
+        {
             return None;
         }
         Some(Self { domain, source, ty })
@@ -110,9 +115,14 @@ impl<'a> KeyParts<'a> {
     }
 }
 
-/// Take `<id>` out of `reiny/<domain>/<id>/…` (for reading presence).
+/// Take the complete source namespace from a topic or presence key.
 pub(crate) fn key_source(key: &str) -> &str {
-    key.split('/').nth(2).unwrap_or_default()
+    KeyParts::parse(key)
+        .or_else(|| {
+            key.split_once("/@")
+                .and_then(|(base, _)| KeyParts::parse(base))
+        })
+        .map_or("", |parts| parts.source)
 }
 
 /// Read a zenoh attachment as reiny's fingerprint (8 bytes LE). `None` when the shape differs.
@@ -163,7 +173,7 @@ pub(crate) fn collect_schemas(
 /// The result is `<base key>` → `[(fqn, the FileDescriptorSet pruned to that message)]` (a service's
 /// key announces two: the request and the response).
 ///
-/// `pattern` is `reiny/<domain>/*/*` (every type) or `reiny/<domain>/*/<TYPE>` (one).
+/// `pattern` is `reiny/<domain>/*/**` (every type) or `reiny/<domain>/**/<TYPE>` (one).
 pub(crate) fn collect_schemas_all(
     session: &zenoh::Session,
     pattern: &str,
@@ -206,12 +216,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn key_parts_parse_four_segments_only() {
+    fn key_parts_parse_hierarchical_sources_without_side_chunks() {
         let p = KeyParts::parse("reiny/lab/ctrl/RobotState").unwrap();
         assert_eq!((p.domain, p.source, p.ty), ("lab", "ctrl", "RobotState"));
         assert!(KeyParts::parse("reiny/lab/ctrl").is_none());
         assert!(KeyParts::parse("reiny/lab/ctrl/RobotState/@schema/hs.RobotState").is_none());
         assert!(KeyParts::parse("other/lab/ctrl/RobotState").is_none());
+        let nested = KeyParts::parse("reiny/lab/robot/control/RobotState").unwrap();
+        assert_eq!(
+            (nested.domain, nested.source, nested.ty),
+            ("lab", "robot/control", "RobotState")
+        );
+        assert!(
+            KeyParts::parse("reiny/lab/robot/control/RobotState/@schema/hs.RobotState").is_none()
+        );
     }
 
     #[test]
@@ -222,9 +240,17 @@ mod tests {
     }
 
     #[test]
-    fn key_source_is_third_segment() {
+    fn key_source_preserves_module_path() {
         assert_eq!(key_source("reiny/lab/ctrl/RobotState"), "ctrl");
         assert_eq!(key_source("reiny/lab/ctrl/@launch"), "ctrl");
         assert_eq!(key_source("reiny"), "");
+        assert_eq!(
+            key_source("reiny/lab/robot/control/@launch"),
+            "robot/control"
+        );
+        assert_eq!(
+            key_source("reiny/lab/robot/control/Calib/@service"),
+            "robot/control"
+        );
     }
 }

@@ -1,8 +1,4 @@
-//! asker — 1 秒ごとに `Add` を call して `Sum` を受け取る。
-//!
-//! `call::<Add>(…)` は `reiny/<domain>/*/Add` へ撃ち、最初の応答を採る。宛先やタイムアウトを
-//! 固定するなら `cloudy.caller::<Add>().to("calc").timeout(…).build()`。server が居ない間は
-//! `CallError::NoReply` が即座に返る(ハングしない)ので、ループはそのまま続ける。
+//! asker demonstrates explicit typed ports in a namespaced deployment.
 
 use std::time::Duration;
 
@@ -12,10 +8,20 @@ use crate::internals::Add;
 
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {
+    // Select the sibling service within this composition, including when nested.
+    let (parent, _) = cloudy.id().rsplit_once('/').ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "asker must run inside a namespaced composition",
+        )
+    })?;
     let adder = cloudy
         .caller::<Add>()
+        .to(format!("{parent}/calc"))
         .timeout(Duration::from_secs(2))
         .build();
+    cloudy.ready()?;
+    cloudy.ready()?;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut n = 0;
 
@@ -26,7 +32,6 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
                 n += 1;
                 match adder.call(Add { a: n, b: n * 10 }).await {
                     Ok(sum) => tracing::info!(a = n, b = n * 10, sum = sum.sum, "← Sum"),
-                    // NoReply(server 不在)/ Remote(断られた)/ Timeout を出し分けられる。
                     Err(e) => tracing::warn!(error = %e, "Add failed"),
                 }
             }

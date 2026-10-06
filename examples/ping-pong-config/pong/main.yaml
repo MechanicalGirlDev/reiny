@@ -1,0 +1,38 @@
+version: 1
+in:
+  ping:
+    type: "ping.Ping"
+out:
+  pong:
+    type: "pong.Pong"
+run:
+  provider: "process"
+  bin: "pong"
+  config: "../pong.config.yaml"
+  restart: "always"
+build:
+  type: "cargo"
+  manifest: "../Cargo.toml"
+  package: "pong"
+  profile: "debug"
+  features: []
+  default_features: true
+  locked: true
+schema:
+  project:
+    name: "pong"
+    version: "0.1.0"
+    description: "pong module"
+    authors: ["nop <noplab90@gmail.com>"]
+    license: "MIT"
+  publications:
+    Pong:
+      proto: "proto/pong.proto"
+      message: "pong.Pong"
+  dependencies:
+    ping:
+      version: "0.1"
+      path: "../ping"
+  config:
+    reply: "pong"
+    delay_ms: 0

@@ -1,0 +1,19 @@
+version: 1
+in:
+  ping:
+    type: "pingpong.Ping"
+out:
+  pong:
+    type: "pingpong.Pong"
+run:
+  provider: "process"
+  bin: "pong"
+  restart: "always"
+build:
+  type: "cargo"
+  manifest: "../Cargo.toml"
+  package: "pong"
+  profile: "debug"
+  features: []
+  default_features: true
+  locked: true

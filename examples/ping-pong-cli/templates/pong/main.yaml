@@ -1,0 +1,22 @@
+version: 1
+in:
+  ping: { type: ping.Ping }
+out:
+  pong: { type: pong.Pong }
+run:
+  provider: process
+  bin: pong
+build:
+  type: cargo
+  manifest: Cargo.toml
+  package: pong
+  profile: debug
+  features: []
+  default_features: true
+  locked: true
+schema:
+  project: { name: pong }
+  publications:
+    Pong: { proto: proto/pong.proto, message: pong.Pong }
+  dependencies:
+    ping: { path: ../ping }

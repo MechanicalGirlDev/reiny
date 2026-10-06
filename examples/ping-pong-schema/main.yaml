@@ -1,0 +1,54 @@
+version: 1
+deployment: "ping-pong-schema"
+providers:
+  process:
+    type: "process"
+    bin_dir: "target/debug"
+in: {}
+out:
+  pong_pong:
+    type: "pong.Pong"
+    from: "pong.pong"
+  ping_ping:
+    type: "ping.Ping"
+    from: "ping.ping"
+modules:
+  pong:
+    source: "pong"
+    in:
+      ping:
+        type: "ping.Ping"
+        from: "ping.ping"
+    out:
+      pong:
+        type: "pong.Pong"
+  ping:
+    source: "ping"
+    in:
+      pong:
+        type: "pong.Pong"
+        from: "pong.pong"
+    out:
+      ping:
+        type: "ping.Ping"
+schema:
+  internals:
+    Ping:
+      proto: "proto/ping.proto"
+      message: "ping.Ping"
+    Pong:
+      proto: "proto/pong.proto"
+      message: "pong.Pong"
+  schema:
+    crate: "pingpong-schema"
+  projects:
+    ping:
+      version: "0.2.0"
+      description: "ping module"
+      publications: ["Ping"]
+      dependencies: ["Pong"]
+    pong:
+      version: "0.2.0"
+      description: "pong module"
+      publications: ["Pong"]
+      dependencies: ["Ping"]

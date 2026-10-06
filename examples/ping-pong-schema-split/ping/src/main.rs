@@ -1,8 +1,4 @@
-//! ping — 最初の一球を打ち、Pong が返るたびに次の Ping を打ち返す。
-//!
-//! 分割スキーマ版: `Ping`/`Pong` は pingpong-msg、`Point` は pingpong-geometry が生成した型で、
-//! `crate::internals` はその **和**。`Point` が 1 つの型であることは、msg の `Ping.at` に
-//! geometry の `Point` を直接入れられることで確かめられる(二重生成されていたら型が合わない)。
+//! ping demonstrates explicit typed ports in a namespaced deployment.
 
 use reiny::prelude::*;
 
@@ -10,16 +6,41 @@ use crate::internals::{Ping, Point, Pong};
 
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {
-    let pings = cloudy.publish::<Ping>()?;
-    let mut pongs = cloudy.subscribe::<Pong>()?;
+    let pings = cloudy.output::<Ping>("ping")?;
+    let mut pongs = cloudy.input::<Pong>("pong")?;
+    // Arm an exact readiness watch before advertising our own readiness.
+    let (parent, _) = cloudy.id().rsplit_once('/').ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "ping must run inside a namespaced composition",
+        )
+    })?;
+    let pong = format!("{parent}/pong");
+    let mut readiness = cloudy.watch_keys(&reiny::engine::Key::topic(
+        cloudy.domain(),
+        Some(&pong),
+        "@ready",
+    ))?;
+    cloudy.ready()?;
+    let ready = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while let Some(event) = readiness.recv().await {
+            match event {
+                reiny::engine::Presence::Joined(_) => return true,
+                reiny::engine::Presence::Left(_) => {}
+            }
+        }
+        false
+    })
+    .await?;
+    if !ready {
+        return Ok(());
+    }
 
     let mut seq = 0;
     let serve = |seq: u64, cloudy: &Cloudy| Ping {
         seq,
         message: "ping".into(),
         sent_unix: cloudy.now_unix(),
-        // geometry 区画の型をそのまま入れる。extern_path が効いていないとここが
-        // 「pingpong_msg 側の Point」との型不一致でコンパイルできない。
         at: Some(Point {
             x: f64::from(u32::try_from(seq % 10).unwrap_or(0)),
             y: 0.0,

@@ -1,448 +1,343 @@
-//! `reiny new` / `reiny init` / `reiny add` — scaffolding a launch and wiring up its dependencies.
-//!
-//! `new` and `init` differ only in whether they create the directory; what they write
-//! (`Cargo.toml` / `Reiny.toml` / `build.rs` / `proto/` / `src/main.rs`) is the same.
-//! `add` appends another project to our own `Reiny.toml`'s `[dependencies]` (it does not touch `src`).
+//! Create executable modules and add local schema dependencies in `main.yaml`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use serde_yaml::{Mapping, Value};
 
-/// `reiny new <path> --publish <T>`. Creates `<path>` and writes the scaffold into it.
 pub(crate) fn new(path: &Path, publish: Option<&str>, name: Option<&str>) -> Result<()> {
     if path.exists() {
-        bail!(
-            "{} already exists — use `reiny init {}` to scaffold in place",
-            path.display(),
-            path.display()
-        );
+        bail!("{} already exists; use `reiny init`", path.display());
     }
     std::fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
     scaffold(path, publish, name)?;
-    println!(
-        "created launch '{}' at {}",
-        project_name(path, name)?,
-        path.display()
-    );
+    println!("created module at {}", path.display());
     Ok(())
 }
 
-/// `reiny init [path] --publish <T>`. Adds the scaffold in place, creating no directory.
 pub(crate) fn init(path: Option<&Path>, publish: Option<&str>, name: Option<&str>) -> Result<()> {
     let dir = match path {
-        Some(p) => p.to_path_buf(),
-        None => std::env::current_dir().context("resolving current dir")?,
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir().context("resolving current directory")?,
     };
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir)?;
     scaffold(&dir, publish, name)?;
-    println!(
-        "initialized launch '{}' in {}",
-        project_name(&dir, name)?,
-        dir.display()
-    );
+    println!("initialized module in {}", dir.display());
     Ok(())
 }
 
-/// Write the whole scaffold into `dir`. Existing files are left intact (`Cargo.toml` is merged into).
 fn scaffold(dir: &Path, publish: Option<&str>, name: Option<&str>) -> Result<()> {
     let proj = project_name(dir, name)?;
-
     write_cargo_toml(dir, &proj)?;
-    write_if_absent(&dir.join("Reiny.toml"), &reiny_toml(&proj, publish))?;
+    // An existing package's binary defaults to its package name, not the directory name.
+    let cargo: toml::Table = toml::from_str(&std::fs::read_to_string(dir.join("Cargo.toml"))?)?;
+    let bin = cargo
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(toml::Value::as_str)
+        .context("Cargo.toml requires package.name")?;
+    write_if_absent(
+        &dir.join("main.yaml"),
+        &main_yaml(&proj, bin, publish, dir.join("Cargo.lock").is_file())?,
+    )?;
     write_if_absent(&dir.join("build.rs"), BUILD_RS)?;
-
     if let Some(ty) = publish {
-        let lower = ty.to_lowercase();
-        std::fs::create_dir_all(dir.join("proto")).context("creating proto/")?;
+        std::fs::create_dir_all(dir.join("proto"))?;
         write_if_absent(
-            &dir.join("proto").join(format!("{lower}.proto")),
+            &dir.join("proto")
+                .join(format!("{}.proto", ty.to_lowercase())),
             &proto(ty),
         )?;
     }
-
-    std::fs::create_dir_all(dir.join("src")).context("creating src/")?;
-    write_if_absent(&dir.join("src").join("main.rs"), &main_rs(publish))?;
+    std::fs::create_dir_all(dir.join("src"))?;
+    write_if_absent(&dir.join("src/main.rs"), &main_rs(publish))?;
     Ok(())
 }
 
-/// `reiny add <path>`. Appends another project to the current launch's `Reiny.toml` `[dependencies]`.
+/// Add only `schema.dependencies`; YAML comments/formatting are normalized on insertion.
 pub(crate) fn add(dep_path: &Path) -> Result<()> {
-    let cwd = std::env::current_dir().context("resolving current dir")?;
-    let my_manifest = cwd.join("Reiny.toml");
-    if !my_manifest.is_file() {
-        bail!(
-            "no Reiny.toml in {} — run this inside a launch project",
-            cwd.display()
-        );
-    }
-
-    let dep_manifest = dep_path.join("Reiny.toml");
-    let dep_text = std::fs::read_to_string(&dep_manifest)
-        .with_context(|| format!("reading dependency manifest {}", dep_manifest.display()))?;
-    let dep: DepManifest =
-        toml::from_str(&dep_text).with_context(|| format!("parsing {}", dep_manifest.display()))?;
-    let dep_name = dep
-        .project
-        .as_ref()
-        .map(|p| p.name.clone())
-        .with_context(|| format!("{} has no [project].name", dep_manifest.display()))?;
-    let version = dep
-        .project
-        .and_then(|p| p.version)
-        .map_or_else(|| "0.1".to_string(), |v| major_minor(&v));
-
-    // A relative path is used as-is (a Reiny.toml path resolves against its own manifest dir).
-    let dep_path_str = dep_path.to_string_lossy().replace('\\', "/");
-    let entry = format!("{dep_name} = {{ version = \"{version}\", path = \"{dep_path_str}\" }}");
-
-    let text = std::fs::read_to_string(&my_manifest)
-        .with_context(|| format!("reading {}", my_manifest.display()))?;
-    match insert_dependency(&text, &dep_name, &entry) {
-        InsertResult::Added(updated) => {
-            std::fs::write(&my_manifest, updated)
-                .with_context(|| format!("writing {}", my_manifest.display()))?;
-            println!("added dependency '{dep_name}' (path = {dep_path_str})");
-        }
-        InsertResult::AlreadyPresent => {
-            println!("dependency '{dep_name}' already declared — nothing to do");
-        }
-    }
-    Ok(())
+    add_in(&std::env::current_dir()?, dep_path)
 }
 
-// ---------------------------------------------------------------------------
-// Cargo.toml (newly generated, or merged into an existing one)
-// ---------------------------------------------------------------------------
-
-/// Prepare `Cargo.toml` with path dependencies on the reiny crates embedded. With one already there,
-/// only `[package].name` and the reiny dependencies are filled in; nothing else is disturbed.
-fn write_cargo_toml(dir: &Path, proj: &str) -> Result<()> {
-    let (reiny_dep, build_dep) = if let Some((reiny, build)) = locate_reiny_crates(dir) {
-        (
-            format!("{{ path = {:?} }}", reiny.to_string_lossy()),
-            format!("{{ path = {:?} }}", build.to_string_lossy()),
-        )
-    } else {
-        eprintln!(
-            "warning: reiny crates not found above {} — using version deps (won't build offline)",
-            dir.display()
-        );
-        ("\"0.3\"".to_string(), "\"0.3\"".to_string())
-    };
-
-    let path = dir.join("Cargo.toml");
-    if path.is_file() {
-        merge_cargo_toml(&path, proj, &reiny_dep, &build_dep)
-    } else {
-        let body = format!(
-            "[package]\n\
-             name = \"{proj}\"\n\
-             version = \"0.1.0\"\n\
-             edition = \"2021\"\n\
-             \n\
-             [dependencies]\n\
-             reiny = {reiny_dep}\n\
-             prost = \"0.14\"\n\
-             tokio = {{ version = \"1\", features = [\"full\"] }}\n\
-             tracing = \"0.1\"\n\
-             tracing-subscriber = {{ version = \"0.3\", features = [\"env-filter\"] }}\n\
-             \n\
-             [build-dependencies]\n\
-             reiny-build = {build_dep}\n"
-        );
-        std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
-        Ok(())
-    }
-}
-
-/// Fill the reiny dependencies, build-deps and `[package].name` into an existing `Cargo.toml` (keeping the rest).
-fn merge_cargo_toml(path: &Path, proj: &str, reiny_dep: &str, build_dep: &str) -> Result<()> {
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let mut doc: toml::Table =
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-
-    let pkg = doc
-        .entry("package".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    if let Some(t) = pkg.as_table_mut() {
-        t.entry("name".to_string())
-            .or_insert_with(|| toml::Value::String(proj.to_string()));
-        t.entry("version".to_string())
-            .or_insert_with(|| toml::Value::String("0.1.0".to_string()));
-        t.entry("edition".to_string())
-            .or_insert_with(|| toml::Value::String("2021".to_string()));
-    }
-
-    let reiny_val: toml::Value = toml::from_str(&format!("x = {reiny_dep}"))
-        .ok()
-        .and_then(|t: toml::Table| t.get("x").cloned())
-        .unwrap_or_else(|| toml::Value::String("0.1".to_string()));
-    let build_val: toml::Value = toml::from_str(&format!("x = {build_dep}"))
-        .ok()
-        .and_then(|t: toml::Table| t.get("x").cloned())
-        .unwrap_or_else(|| toml::Value::String("0.1".to_string()));
-
-    insert_dep(&mut doc, "dependencies", "reiny", reiny_val);
-    insert_simple_deps(&mut doc);
-    insert_dep(&mut doc, "build-dependencies", "reiny-build", build_val);
-
-    let rendered = toml::to_string_pretty(&doc).context("re-serializing Cargo.toml")?;
-    std::fs::write(path, rendered).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
-}
-
-/// Fill `prost` / `tokio` / `tracing` / `tracing-subscriber` into `[dependencies]`.
-fn insert_simple_deps(doc: &mut toml::Table) {
-    let str_dep = |s: &str| toml::Value::String(s.to_string());
-    insert_dep(doc, "dependencies", "prost", str_dep("0.14"));
-    insert_dep(doc, "dependencies", "tracing", str_dep("0.1"));
-    if let Ok(v) = toml::from_str::<toml::Table>("x = { version = \"1\", features = [\"full\"] }")
-        && let Some(tokio) = v.get("x").cloned()
-    {
-        insert_dep(doc, "dependencies", "tokio", tokio);
-    }
-    if let Ok(v) =
-        toml::from_str::<toml::Table>("x = { version = \"0.3\", features = [\"env-filter\"] }")
-        && let Some(sub) = v.get("x").cloned()
-    {
-        insert_dep(doc, "dependencies", "tracing-subscriber", sub);
-    }
-}
-
-/// Set `doc[table][key]` to `value` unless it is already set.
-fn insert_dep(doc: &mut toml::Table, table: &str, key: &str, value: toml::Value) {
-    let t = doc
-        .entry(table.to_string())
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    if let Some(tbl) = t.as_table_mut() {
-        tbl.entry(key.to_string()).or_insert(value);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Appending to Reiny.toml's [dependencies] (keeping the text as it is)
-// ---------------------------------------------------------------------------
-
-enum InsertResult {
-    Added(String),
-    AlreadyPresent,
-}
-
-/// Insert the line `entry` at the end of the `[dependencies]` section, creating the section at the end
-/// of the file if there is none. The text is edited rather than the TOML re-serialized, so comments and formatting survive.
-fn insert_dependency(text: &str, dep_name: &str, entry: &str) -> InsertResult {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut dep_header: Option<usize> = None;
-    for (i, line) in lines.iter().enumerate() {
-        if line.trim() == "[dependencies]" {
-            dep_header = Some(i);
-            break;
-        }
-    }
-
-    let Some(start) = dep_header else {
-        // No such section → create one at the end.
-        let mut out = text.trim_end().to_string();
-        out.push_str("\n\n[dependencies]\n");
-        out.push_str(entry);
-        out.push('\n');
-        return InsertResult::Added(out);
-    };
-
-    // The section's extent (up to the next table header, or EOF).
-    let mut end = lines.len();
-    for (i, line) in lines.iter().enumerate().skip(start + 1) {
-        let t = line.trim_start();
-        if t.starts_with('[') {
-            end = i;
-            break;
-        }
-    }
-
-    // Already declared?
-    let already = lines[start + 1..end].iter().any(|l| {
-        let t = l.trim_start();
-        t.strip_prefix(dep_name)
-            .is_some_and(|rest| rest.trim_start().starts_with('='))
-    });
-    if already {
-        return InsertResult::AlreadyPresent;
-    }
-
-    // Insert right after the last non-empty line inside the section.
-    let mut insert_at = start + 1;
-    for (i, line) in lines.iter().enumerate().take(end).skip(start + 1) {
-        if !line.trim().is_empty() {
-            insert_at = i + 1;
-        }
-    }
-
-    let mut out: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
-    out.insert(insert_at, entry.to_string());
-    let mut joined = out.join("\n");
-    if text.ends_with('\n') {
-        joined.push('\n');
-    }
-    InsertResult::Added(joined)
-}
-
-// ---------------------------------------------------------------------------
-// Templates
-// ---------------------------------------------------------------------------
-
-const BUILD_RS: &str = "//! Reiny.toml-driven code generation.\n\
-//! It generates `reiny::publications::*` from [publications]' protos and\n\
-//! `reiny::dependencies::<project>::*` from the dependencies' public types, embedding type → topic.\n\
-fn main() {\n\
-    reiny_build::compile().expect(\"reiny codegen from Reiny.toml\");\n\
-}\n";
-
-fn reiny_toml(proj: &str, publish: Option<&str>) -> String {
-    let publications = match publish {
-        Some(ty) => {
-            let lower = ty.to_lowercase();
-            format!("{ty} = {{ proto = \"proto/{lower}.proto\", message = \"{lower}.{ty}\" }}\n")
-        }
-        None => String::new(),
-    };
-    format!(
-        "[project]\n\
-         # The project name = the process / instance name (not a topic).\n\
-         name = \"{proj}\"\n\
-         version = \"0.1.0\"\n\
-         \n\
-         # The types this project publishes (type = topic).\n\
-         [publications]\n\
-         {publications}\
-         \n\
-         # The other projects it depends on. `reiny add <path>` appends here.\n\
-         [dependencies]\n"
+fn add_in(dir: &Path, dep_path: &Path) -> Result<()> {
+    let manifest = dir.join("main.yaml");
+    let dep_manifest = dir.join(dep_path).join("main.yaml");
+    let dependency: DepManifest = serde_yaml::from_str(
+        &std::fs::read_to_string(&dep_manifest)
+            .with_context(|| format!("reading {}", dep_manifest.display()))?,
     )
+    .with_context(|| format!("parsing {}", dep_manifest.display()))?;
+    let project = dependency
+        .schema
+        .and_then(|schema| schema.project)
+        .with_context(|| format!("{} requires schema.project", dep_manifest.display()))?;
+    let version = project
+        .version
+        .as_deref()
+        .map_or_else(|| "0.1".to_owned(), major_minor);
+    let path = dep_path.to_string_lossy().replace('\\', "/");
+    let text = std::fs::read_to_string(&manifest)
+        .with_context(|| format!("reading {}", manifest.display()))?;
+    let mut doc: Value =
+        serde_yaml::from_str(&text).with_context(|| format!("parsing {}", manifest.display()))?;
+    if insert_dependency(&mut doc, &project.name, &version, &path)? {
+        std::fs::write(&manifest, serde_yaml::to_string(&doc)?)?;
+        println!(
+            "added schema dependency '{}' (YAML formatting normalized)",
+            project.name
+        );
+    } else {
+        println!("schema dependency '{}' already declared", project.name);
+    }
+    Ok(())
+}
+
+fn insert_dependency(doc: &mut Value, name: &str, version: &str, path: &str) -> Result<bool> {
+    let root = doc
+        .as_mapping_mut()
+        .context("main.yaml must be a mapping")?;
+    let schema = root
+        .entry(Value::from("schema"))
+        .or_insert_with(|| Value::Mapping(Mapping::new()))
+        .as_mapping_mut()
+        .context("schema must be a mapping")?;
+    let dependencies = schema
+        .entry(Value::from("dependencies"))
+        .or_insert_with(|| Value::Mapping(Mapping::new()))
+        .as_mapping_mut()
+        .context("schema.dependencies must be a mapping")?;
+    let key = Value::from(name);
+    if dependencies.contains_key(&key) {
+        return Ok(false);
+    }
+    let entry = Mapping::from_iter([
+        (Value::from("version"), Value::from(version)),
+        (Value::from("path"), Value::from(path)),
+    ]);
+    dependencies.insert(key, Value::Mapping(entry));
+    Ok(true)
+}
+
+fn write_cargo_toml(dir: &Path, proj: &str) -> Result<()> {
+    let path = dir.join("Cargo.toml");
+    let existing = path.is_file();
+    let mut doc: toml::Table = if existing {
+        toml::from_str(&std::fs::read_to_string(&path)?)
+            .with_context(|| format!("parsing {}", path.display()))?
+    } else {
+        toml::Table::new()
+    };
+    let package = doc
+        .entry("package")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .context("Cargo.toml package must be a table")?;
+    for (key, value) in [("name", proj), ("version", "0.1.0"), ("edition", "2021")] {
+        package.entry(key).or_insert_with(|| value.into());
+    }
+    if !existing {
+        // New modules are independently buildable even inside the SDK workspace.
+        doc.insert("workspace".into(), toml::Value::Table(toml::Table::new()));
+    }
+    let crates = locate_reiny_crates(dir);
+    for (section, name, local) in [
+        ("dependencies", "reiny", crates.as_ref().map(|(sdk, _)| sdk)),
+        (
+            "build-dependencies",
+            "reiny-build",
+            crates.as_ref().map(|(_, build)| build),
+        ),
+    ] {
+        let dependency = match local {
+            Some(path) => toml::Value::Table(toml::Table::from_iter([(
+                "path".into(),
+                path.to_string_lossy().replace('\\', "/").into(),
+            )])),
+            None => env!("CARGO_PKG_VERSION").into(),
+        };
+        insert_dep(&mut doc, section, name, dependency)?;
+    }
+    let simple: toml::Table = toml::from_str(
+        "prost = \"0.14\"\ntracing = \"0.1\"\ntokio = { version = \"1\", features = [\"full\"] }\ntracing-subscriber = { version = \"0.3\", features = [\"env-filter\"] }\n",
+    )?;
+    for (name, value) in simple {
+        insert_dep(&mut doc, "dependencies", &name, value)?;
+    }
+    let rendered = toml::to_string_pretty(&doc)?;
+    if existing {
+        println!(
+            "merging missing Cargo.toml entries; existing values retained, formatting normalized"
+        );
+    }
+    std::fs::write(&path, rendered).with_context(|| format!("writing {}", path.display()))
+}
+
+fn insert_dep(doc: &mut toml::Table, section: &str, name: &str, value: toml::Value) -> Result<()> {
+    doc.entry(section)
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .with_context(|| format!("Cargo.toml {section} must be a table"))?
+        .entry(name)
+        .or_insert(value);
+    Ok(())
+}
+
+const BUILD_RS: &str = "//! main.yaml schema code generation.\nfn main() {\n    reiny_build::compile().expect(\"reiny schema code generation\");\n}\n";
+
+fn main_yaml(proj: &str, bin: &str, publish: Option<&str>, locked: bool) -> Result<String> {
+    let mut doc = Mapping::from_iter([
+        (Value::from("version"), Value::from(1)),
+        (Value::from("deployment"), Value::from(proj)),
+        (
+            Value::from("providers"),
+            serde_yaml::from_str("{process: {type: process}}")?,
+        ),
+        (Value::from("build"), serde_yaml::from_str("{type: cargo}")?),
+        (
+            Value::from("run"),
+            Value::Mapping(Mapping::from_iter([
+                (Value::from("provider"), Value::from("process")),
+                (Value::from("bin"), Value::from(bin)),
+            ])),
+        ),
+        (Value::from("in"), Value::Mapping(Mapping::new())),
+        (Value::from("out"), Value::Mapping(Mapping::new())),
+    ]);
+    if let Some(build) = doc
+        .get_mut(Value::from("build"))
+        .and_then(Value::as_mapping_mut)
+    {
+        build.insert(Value::from("locked"), Value::from(locked));
+    }
+    let mut publications = Mapping::new();
+    if let Some(ty) = publish {
+        let lower = ty.to_lowercase();
+        let message = format!("{lower}.{ty}");
+        publications.insert(
+            Value::from(ty),
+            Value::Mapping(Mapping::from_iter([
+                (
+                    Value::from("proto"),
+                    Value::from(format!("proto/{lower}.proto")),
+                ),
+                (Value::from("message"), Value::from(message.clone())),
+            ])),
+        );
+        doc.insert(
+            Value::from("out"),
+            Value::Mapping(Mapping::from_iter([(
+                Value::from(lower),
+                Value::Mapping(Mapping::from_iter([(
+                    Value::from("type"),
+                    Value::from(message),
+                )])),
+            )])),
+        );
+    }
+    doc.insert(
+        Value::from("schema"),
+        Value::Mapping(Mapping::from_iter([
+            (
+                Value::from("project"),
+                Value::Mapping(Mapping::from_iter([
+                    (Value::from("name"), Value::from(proj)),
+                    (Value::from("version"), Value::from("0.1.0")),
+                ])),
+            ),
+            (Value::from("publications"), Value::Mapping(publications)),
+            (Value::from("dependencies"), Value::Mapping(Mapping::new())),
+        ])),
+    );
+    Ok(serde_yaml::to_string(&doc)?)
 }
 
 fn proto(ty: &str) -> String {
-    let lower = ty.to_lowercase();
     format!(
-        "syntax = \"proto3\";\n\
-         \n\
-         package {lower};\n\
-         \n\
-         // {ty}: a message sent at a fixed interval.\n\
-         message {ty} {{\n\
-         \x20 uint64 seq = 1;\n\
-         \x20 int64 sent_unix = 2;\n\
-         }}\n"
+        "syntax = \"proto3\";\n\npackage {};\n\nmessage {ty} {{\n  uint64 seq = 1;\n  int64 sent_unix = 2;\n}}\n",
+        ty.to_lowercase()
     )
 }
 
 fn main_rs(publish: Option<&str>) -> String {
     match publish {
-        Some(ty) => {
-            let lower = ty.to_lowercase();
-            format!(
-                "//! {lower} — a launch that publishes `{ty}` at a fixed interval.\n\
-                 //!\n\
-                 //! To subscribe to another project's type, add the dependency with `reiny add <path>`\n\
-                 //! and write `cloudy.subscribe::<T>()` into this main.\n\
-                 \n\
-                 use std::time::Duration;\n\
-                 \n\
-                 use reiny::prelude::*;\n\
-                 \n\
-                 use crate::publications::{ty};\n\
-                 \n\
-                 #[reiny::main]\n\
-                 async fn main(cloudy: Cloudy) -> reiny::Result<()> {{\n\
-                 \x20   let out = cloudy.publish::<{ty}>()?;\n\
-                 \x20   let mut tick = tokio::time::interval(Duration::from_secs(1));\n\
-                 \x20   let mut seq = 0;\n\
-                 \x20   loop {{\n\
-                 \x20       tokio::select! {{\n\
-                 \x20           _ = tick.tick() => {{\n\
-                 \x20               out.send({ty} {{ seq, sent_unix: cloudy.now_unix() }}).await?;\n\
-                 \x20               tracing::info!(seq, \"{lower} →\");\n\
-                 \x20               seq += 1;\n\
-                 \x20           }}\n\
-                 \x20           _ = cloudy.shutdown() => break,\n\
-                 \x20       }}\n\
-                 \x20   }}\n\
-                 \x20   Ok(())\n\
-                 }}\n"
-            )
-        }
-        None => {
-            "//! A pure subscriber (sink) scaffold. Add a dependency with `reiny add <path>`,\n\
-             //! then write `cloudy.subscribe::<T>()` and build the receive loop.\n\
-             \n\
-             use reiny::prelude::*;\n\
-             \n\
-             #[reiny::main]\n\
-             async fn main(cloudy: Cloudy) -> reiny::Result<()> {\n\
-             \x20   tracing::info!(\"up; waiting. add a dependency and subscribe::<T>()\");\n\
-             \x20   cloudy.shutdown().await;\n\
-             \x20   Ok(())\n\
-             }\n"
-            .to_string()
-        }
+        Some(ty) => format!(
+            "use std::time::Duration;\nuse reiny::prelude::*;\nuse crate::publications::{ty};\n\n\
+             #[reiny::main]\nasync fn main(cloudy: Cloudy) -> reiny::Result<()> {{\n\
+             \x20   let out = cloudy.output::<{ty}>(\"{}\")?;\n\
+             \x20   cloudy.ready()?;\n\
+             \x20   let mut tick = tokio::time::interval(Duration::from_secs(1));\n\
+             \x20   let mut seq = 0;\n\
+             \x20   loop {{\n\
+             \x20       tokio::select! {{\n\
+             \x20           _ = tick.tick() => {{\n\
+             \x20               out.send({ty} {{ seq, sent_unix: cloudy.now_unix() }}).await?;\n\
+             \x20               seq += 1;\n\
+             \x20           }}\n\
+             \x20           _ = cloudy.shutdown() => break,\n\
+             \x20       }}\n\
+             \x20   }}\n\
+             \x20   Ok(())\n}}\n",
+            ty.to_lowercase()
+        ),
+        None => "use reiny::prelude::*;\n\n#[reiny::main]\nasync fn main(cloudy: Cloudy) -> reiny::Result<()> {\n    cloudy.ready()?;\n    cloudy.shutdown().await;\n    Ok(())\n}\n".to_owned(),
     }
 }
 
-// ---------------------------------------------------------------------------
-// Odds and ends
-// ---------------------------------------------------------------------------
-
-/// The project name: `--name` if given, else the directory's name.
 fn project_name(dir: &Path, name: Option<&str>) -> Result<String> {
-    if let Some(n) = name {
-        return Ok(n.to_string());
+    match name {
+        Some(name) => Ok(name.to_owned()),
+        None => std::fs::canonicalize(dir)?
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .with_context(|| format!("cannot derive a name from {}", dir.display())),
     }
-    let abs = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    abs.file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .with_context(|| format!("cannot derive a name from {}", dir.display()))
 }
 
-/// Search upward from `dir` for the reiny repository (the one holding `crates/reiny` and
-/// `crates/reiny-build`). If found, return absolute paths to those two crates, for the generated project's path dependencies.
 fn locate_reiny_crates(dir: &Path) -> Option<(PathBuf, PathBuf)> {
-    let start = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    let mut cur = Some(start.as_path());
-    while let Some(d) = cur {
-        let reiny = d.join("crates").join("reiny");
-        let build = d.join("crates").join("reiny-build");
-        if reiny.join("Cargo.toml").is_file() && build.join("Cargo.toml").is_file() {
-            return Some((reiny, build));
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let executable = std::env::current_exe().ok();
+    for start in std::iter::once(dir.as_path()).chain(executable.as_deref()) {
+        for ancestor in start.ancestors() {
+            let sdk = ancestor.join("crates/reiny");
+            let build = ancestor.join("crates/reiny-build");
+            if sdk.join("Cargo.toml").is_file() && build.join("Cargo.toml").is_file() {
+                return Some((sdk, build));
+            }
         }
-        cur = d.parent();
     }
     None
 }
 
-/// `"0.1.0"` → `"0.1"`. Left alone if it cannot be read that way.
-fn major_minor(v: &str) -> String {
-    let parts: Vec<&str> = v.split('.').collect();
-    if parts.len() >= 2 {
-        format!("{}.{}", parts[0], parts[1])
-    } else {
-        v.to_string()
+fn major_minor(version: &str) -> String {
+    let mut parts = version.split('.');
+    match (parts.next(), parts.next()) {
+        (Some(major), Some(minor)) => format!("{major}.{minor}"),
+        _ => version.to_owned(),
     }
 }
 
-/// A file that is already there is never overwritten (the scaffold does not break anything).
 fn write_if_absent(path: &Path, contents: &str) -> Result<()> {
-    if path.exists() {
-        return Ok(());
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => file
+            .write_all(contents.as_bytes())
+            .with_context(|| format!("writing {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("creating {}", path.display())),
     }
-    std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))
 }
-
-// ---------------------------------------------------------------------------
-// The minimal schema of a dependency's Reiny.toml (only [project] is read)
-// ---------------------------------------------------------------------------
 
 #[derive(serde::Deserialize)]
 struct DepManifest {
+    schema: Option<DepSchema>,
+}
+
+#[derive(serde::Deserialize)]
+struct DepSchema {
     project: Option<DepProject>,
 }
 
@@ -453,44 +348,76 @@ struct DepProject {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)] // tests may fail by panicking
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     #[test]
-    fn inserts_into_existing_dependencies_section() {
-        let src = "[project]\nname = \"pong\"\n\n[publications]\n\n[dependencies]\n";
-        let entry = "ping = { version = \"0.1\", path = \"../ping\" }";
-        match insert_dependency(src, "ping", entry) {
-            InsertResult::Added(out) => {
-                assert!(out.contains(entry));
-                assert!(out.trim_end().ends_with(entry));
-            }
-            InsertResult::AlreadyPresent => panic!("should add"),
-        }
+    fn dependencies_preserve_runtime_when_schema_dependency_is_added() {
+        // Given
+        let mut doc: Value = serde_yaml::from_str(
+            "version: 1\ndeployment: demo\nrun: {provider: process, bin: demo}\nschema:\n  project: {name: demo}\n  publications: {Ping: {proto: ping.proto}}\n",
+        ).unwrap();
+        let before = doc.clone();
+        // When
+        assert!(insert_dependency(&mut doc, "ping", "0.1", "../ping").unwrap());
+        // Then
+        assert_eq!(doc["run"], before["run"]);
+        assert_eq!(
+            doc["schema"]["publications"],
+            before["schema"]["publications"]
+        );
+        assert_eq!(doc["schema"]["dependencies"]["ping"]["path"], "../ping");
+        assert_eq!(doc["schema"]["dependencies"]["ping"]["version"], "0.1");
     }
 
     #[test]
-    fn skips_when_already_present() {
-        let src = "[dependencies]\nping = { version = \"0.1\", path = \"../ping\" }\n";
-        let entry = "ping = { version = \"0.1\", path = \"../x\" }";
-        assert!(matches!(
-            insert_dependency(src, "ping", entry),
-            InsertResult::AlreadyPresent
-        ));
+    fn dependency_remains_unchanged_when_already_present() {
+        // Given
+        let mut doc: Value =
+            serde_yaml::from_str("schema: {dependencies: {ping: {version: '0.1', path: ../ping}}}")
+                .unwrap();
+        let before = doc.clone();
+        // When
+        let added = insert_dependency(&mut doc, "ping", "0.2", "../other").unwrap();
+        // Then
+        assert!(!added);
+        assert_eq!(doc, before);
     }
 
     #[test]
-    fn creates_section_when_absent() {
-        let src = "[project]\nname = \"ping\"\n";
-        let entry = "pong = { version = \"0.1\", path = \"../pong\" }";
-        match insert_dependency(src, "pong", entry) {
-            InsertResult::Added(out) => {
-                assert!(out.contains("[dependencies]"));
-                assert!(out.contains(entry));
-            }
-            InsertResult::AlreadyPresent => panic!("should add"),
-        }
+    fn dependencies_are_created_when_schema_is_absent() {
+        // Given
+        let mut doc: Value = serde_yaml::from_str("version: 1\ndeployment: demo").unwrap();
+        // When
+        insert_dependency(&mut doc, "ping", "0.1", "../ping").unwrap();
+        // Then
+        assert_eq!(doc["schema"]["dependencies"]["ping"]["path"], "../ping");
+        assert_eq!(doc["deployment"], "demo");
+    }
+
+    #[test]
+    fn executable_manifest_declares_named_output_when_publishing() {
+        // Given / When
+        let text = main_yaml("demo", "demo", Some("Ping"), false).unwrap();
+        // Then
+        let module: reiny_launch::ModuleManifest = serde_yaml::from_str(&text).unwrap();
+        assert_eq!(module.outputs["ping"].type_name, "ping.Ping");
+        assert!(!module.build.unwrap().locked);
+        assert_eq!(module.run.unwrap().bin, "demo");
+        let schema = module.schema.unwrap();
+        assert_eq!(schema["publications"]["Ping"]["message"], "ping.Ping");
+    }
+
+    #[test]
+    fn executable_manifest_has_no_ports_when_empty() {
+        // Given / When
+        let text = main_yaml("demo", "demo", None, true).unwrap();
+        // Then
+        let module: reiny_launch::ModuleManifest = serde_yaml::from_str(&text).unwrap();
+        assert!(module.inputs.is_empty());
+        assert!(module.outputs.is_empty());
+        assert!(module.build.unwrap().locked);
     }
 
     #[test]

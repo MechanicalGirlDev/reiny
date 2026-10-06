@@ -1,6 +1,7 @@
 //! reiny's build helper. Each launch's `build.rs` calls [`compile`].
 //!
-//! It reads `Reiny.toml`, compiles the protos it needs with prost, and writes `$OUT_DIR/reiny_generated.rs`:
+//! It reads the build-time `schema` block of `main.yaml`, compiles the protos it needs with prost,
+//! and writes `$OUT_DIR/reiny_generated.rs`. Runtime provider fields are never evaluated here.
 //!
 //! - the `publications` / `dependencies::<project>` / `internals` modules (re-exports of the generated types)
 //! - one `impl ::reiny::Topic` per message type (the type → topic mapping, embedded)
@@ -9,9 +10,9 @@
 //! `use crate::publications::Ping;`.
 //!
 //! Two layouts are handled:
-//! - **per-project** (a Reiny.toml with `[project]`): resolves its own `[publications]` plus the public
+//! - **per-project** (a main.yaml with `[project]`): resolves its own `[publications]` plus the public
 //!   types of every `[dependencies]` project. The type → topic owner is "the project that publishes it".
-//! - **workspace shared** (a Reiny.toml with `[internals]` / `[projects.*]`): compiles the whole shared
+//! - **workspace shared** (a main.yaml with `[internals]` / `[projects.*]`): compiles the whole shared
 //!   catalog `[internals]` and exposes it as `internals::*`.
 
 // This is a helper crate called from build scripts, so the right response to a misconfiguration is to
@@ -29,10 +30,10 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
-// The Reiny.toml schema
+// The main.yaml schema
 // ---------------------------------------------------------------------------
 
-/// The whole Reiny.toml (it accepts the per-project shape and the workspace shape alike).
+/// The whole main.yaml (it accepts the per-project shape and the workspace shape alike).
 #[derive(Debug, Deserialize)]
 struct Manifest {
     /// The per-project identity. Its presence is what selects per-project mode.
@@ -93,7 +94,7 @@ struct SchemaSingle {
 struct SchemaPartDef {
     #[serde(rename = "crate")]
     crate_name: String,
-    /// The protos this part owns (relative to the directory holding Reiny.toml).
+    /// The protos this part owns (relative to the directory holding main.yaml).
     protos: Vec<String>,
     /// The part names it depends on. Must be **transitively closed**, and each edge needs a Cargo dep too.
     #[serde(default)]
@@ -185,7 +186,7 @@ struct ServiceEntry {
 /// One resolved message type.
 #[derive(Debug, Clone)]
 struct Entry {
-    /// The public name in the generated module (the Reiny.toml key, e.g. `Ping`).
+    /// The public name in the generated module (the main.yaml key, e.g. `Ping`).
     alias: String,
     /// The proto package's segments (e.g. `["ping"]`).
     package: Vec<String>,
@@ -220,7 +221,7 @@ impl Entry {
 // Resolution modes and results (public API; also used for introspection from the CLI)
 // ---------------------------------------------------------------------------
 
-/// Which layout the Reiny.toml was resolved as.
+/// Which layout the main.yaml was resolved as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
     /// per-project (`[project]`). Generates its own publications plus the dependencies' public types.
@@ -261,7 +262,7 @@ impl Mode {
 /// An introspection view of one resolved message type ([`Entry`] made public for `reiny check`).
 #[derive(Debug, Clone)]
 pub struct TypeInfo {
-    /// The public name in the generated module (the Reiny.toml key).
+    /// The public name in the generated module (the main.yaml key).
     pub alias: String,
     /// The proto's fully qualified message name (e.g. `ping.Ping`).
     pub message: String,
@@ -275,7 +276,7 @@ pub struct TypeInfo {
     pub owner: Option<String>,
 }
 
-/// The result of resolving a Reiny.toml. Pure information from before any proto is compiled, so it is
+/// The result of resolving a main.yaml. Pure information from before any proto is compiled, so it is
 /// available without the `compile` feature. `reiny check` prints it; [`compile`] writes its output from it.
 pub struct Resolution {
     mode: Mode,
@@ -307,7 +308,7 @@ pub struct ProjectInfo {
 pub struct ServiceInfo {
     /// The `[services]` key (a display name; it does not appear in the generated code).
     pub name: String,
-    /// The request type's alias (exactly as written in Reiny.toml).
+    /// The request type's alias (exactly as written in main.yaml).
     pub request: String,
     /// The request type's fully qualified message name (e.g. `calc.Add`).
     pub request_message: String,
@@ -324,7 +325,7 @@ impl Resolution {
         &self.mode
     }
 
-    /// The absolute path of the Reiny.toml that was used.
+    /// The absolute path of the main.yaml that was used.
     #[must_use]
     pub fn manifest_path(&self) -> &Path {
         &self.manifest_path
@@ -408,7 +409,7 @@ impl Resolution {
 #[cfg(feature = "compile")]
 pub use prost_build;
 
-/// Called from `build.rs`. Reads Reiny.toml, compiles the protos and puts the output in `$OUT_DIR`.
+/// Called from `build.rs`. Reads main.yaml, compiles the protos and puts the output in `$OUT_DIR`.
 ///
 /// Needs the `compile` feature (on by default). For introspection that does not want prost pulled in —
 /// as in `reiny check` — use [`describe`] directly.
@@ -423,7 +424,7 @@ pub fn compile() -> Result<()> {
 /// types, `file_descriptor_set_path` for dynamic decoding through `prost-reflect`, `bytes()` /
 /// `btree_map` / `boxed` … none of which needs a dedicated API on reiny's side.
 ///
-/// ```ignore
+/// ```no_run
 /// // build.rs
 /// reiny_build::compile_with(|c| {
 ///     c.type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]");
@@ -469,16 +470,16 @@ pub fn compile_with(customize: impl FnOnce(&mut prost_build::Config)) -> Result<
     Ok(())
 }
 
-/// Introspection for `reiny check`. It resolves the **whole catalog** the Reiny.toml describes rather
+/// Introspection for `reiny check`. It resolves the **whole catalog** the main.yaml describes rather
 /// than one package's view of it (in a workspace, all of `[internals]`; per-project, own publications
 /// plus dependencies). No proto is compiled, so it works without the `compile` feature. Validation
 /// (identifiers, topic collisions) still runs, so a misconfigured layout surfaces here.
 pub fn describe(dir: &Path) -> Result<Resolution> {
-    let (manifest_path, manifest) = find_manifest(dir)
-        .with_context(|| format!("locating Reiny.toml from {}", dir.display()))?;
+    let (manifest_path, manifest) =
+        find_manifest(dir).with_context(|| format!("locating main.yaml from {}", dir.display()))?;
     let manifest_root = manifest_path
         .parent()
-        .expect("Reiny.toml has a parent")
+        .expect("main.yaml has a parent")
         .to_path_buf();
 
     let schema_parts = normalize_schema(&manifest, &manifest_root)?;
@@ -520,15 +521,15 @@ pub fn describe(dir: &Path) -> Result<Resolution> {
     })
 }
 
-/// Find the Reiny.toml → decide the mode → validate → build a [`Resolution`] (no proto touched yet).
+/// Find the main.yaml → decide the mode → validate → build a [`Resolution`] (no proto touched yet).
 /// Called from build.rs (`compile`), from one package's point of view.
 #[cfg(feature = "compile")]
 fn resolve_for(manifest_dir: &Path, pkg_name: &str) -> Result<Resolution> {
     let (manifest_path, manifest) = find_manifest(manifest_dir)
-        .with_context(|| format!("locating Reiny.toml from {}", manifest_dir.display()))?;
+        .with_context(|| format!("locating main.yaml from {}", manifest_dir.display()))?;
     let manifest_root = manifest_path
         .parent()
-        .expect("Reiny.toml has a parent")
+        .expect("main.yaml has a parent")
         .to_path_buf();
     rerun_if_changed(&manifest_path);
 
@@ -583,31 +584,11 @@ fn project_infos(manifest: &Manifest) -> Vec<ProjectInfo> {
 }
 
 // ---------------------------------------------------------------------------
-// Finding and resolving the Reiny.toml
+// Finding and resolving the main.yaml
 // ---------------------------------------------------------------------------
 
-/// Search upward from `start` for a `Reiny.toml` (the nearest one wins).
-fn find_manifest(start: &Path) -> Result<(PathBuf, Manifest)> {
-    let mut dir = Some(start.to_path_buf());
-    while let Some(d) = dir {
-        let candidate = d.join("Reiny.toml");
-        if candidate.is_file() {
-            let manifest = parse_manifest(&candidate)?;
-            return Ok((candidate, manifest));
-        }
-        dir = d.parent().map(Path::to_path_buf);
-    }
-    bail!(
-        "Reiny.toml not found in {} or any parent directory",
-        start.display()
-    )
-}
-
-fn parse_manifest(path: &Path) -> Result<Manifest> {
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
-}
+mod discovery;
+use discovery::{find_manifest, parse_manifest};
 
 /// per-project: own publications plus each dependency project's public types.
 fn resolve_per_project(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
@@ -625,10 +606,10 @@ fn resolve_per_project(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
         // A dep name becomes `pub mod <dep>` in the generated code, so it must be a Rust identifier.
         ensure_rust_ident(dep_name, "dependency key", "[dependencies]")?;
         let dep_dir = resolve_relative(root, &dep.path);
-        let dep_manifest_path = dep_dir.join("Reiny.toml");
+        let dep_manifest_path = dep_dir.join("main.yaml");
         let dep_manifest = parse_manifest(&dep_manifest_path).with_context(|| {
             format!(
-                "dependency '{}' Reiny.toml at {}",
+                "dependency '{}' main.yaml at {}",
                 dep_name,
                 dep_manifest_path.display()
             )
@@ -636,7 +617,7 @@ fn resolve_per_project(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
         rerun_if_changed(&dep_manifest_path);
         dep_manifest.project.as_ref().with_context(|| {
             format!(
-                "dependency '{}' ({}) is not a per-project Reiny.toml (no [project])",
+                "dependency '{}' ({}) is not a per-project main.yaml (no [project])",
                 dep_name,
                 dep_manifest_path.display()
             )
@@ -674,7 +655,7 @@ fn resolve_workspace(
         } else {
             bail!(
                 "package '{pkg_name}' has no [projects.{pkg_name}] entry in the workspace \
-                 Reiny.toml ({})",
+                 main.yaml ({})",
                 manifest_path.display()
             );
         }
@@ -1119,7 +1100,8 @@ fn compile_protos(
     out_dir: &Path,
     customize: impl FnOnce(&mut prost_build::Config),
 ) -> Result<prost_types::FileDescriptorSet> {
-    let (protos, includes) = (&plan.protos, &plan.includes);
+    let protos: Vec<_> = plan.protos.iter().map(|path| protoc_path(path)).collect();
+    let includes: Vec<_> = plan.includes.iter().map(|path| protoc_path(path)).collect();
 
     let descriptor_path = out_dir.join("reiny_descriptors.bin");
     let mut config = prost_build::Config::new();
@@ -1128,7 +1110,7 @@ fn compile_protos(
         // Bundle every package into one file so it can be included as nested pub mods.
         .include_file("reiny_protos.rs")
         // Both the type → fingerprint (Topic::SCHEMA) and the FQN list handed downstream come from here.
-        .file_descriptor_set_path(&descriptor_path);
+        .file_descriptor_set_path(protoc_path(&descriptor_path));
     // Types owned by another schema crate get "the reference rewritten, nothing generated".
     // That is the mechanism keeping a leaf type from being generated twice across the split.
     for (proto_path, rust_path) in &plan.externs {
@@ -1152,13 +1134,39 @@ fn compile_protos(
     customize(&mut config);
 
     config
-        .compile_protos(protos, includes)
+        .compile_protos(&protos, &includes)
         .context("prost: compiling protos")?;
 
     let bytes = std::fs::read(&descriptor_path)
         .with_context(|| format!("reading {}", descriptor_path.display()))?;
     <prost_types::FileDescriptorSet as prost::Message>::decode(bytes.as_slice())
         .context("decoding the descriptor set prost just wrote")
+}
+
+/// Native protoc does not resolve Windows verbatim paths, unlike Rust's filesystem API.
+#[cfg(feature = "compile")]
+fn protoc_path(path: &Path) -> PathBuf {
+    use std::path::{Component, Prefix};
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path.to_path_buf();
+    };
+    let mut native = match prefix.kind() {
+        Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:\\", char::from(drive))),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut root = PathBuf::from(r"\\");
+            root.push(server);
+            root.push(share);
+            root
+        }
+        _ => return path.to_path_buf(),
+    };
+    for component in components {
+        if component != Component::RootDir {
+            native.push(component.as_os_str());
+        }
+    }
+    native
 }
 
 /// Pull "the FQNs we define" and "type → schema fingerprint" out of a descriptor set.
@@ -2117,13 +2125,13 @@ mod tests {
                 owner: None,
             },
         ];
-        assign_owners(&mut entries, &parts, Path::new("/x/Reiny.toml")).unwrap();
+        assign_owners(&mut entries, &parts, Path::new("/x/main.yaml")).unwrap();
         assert_eq!(entries[0].owner.as_deref(), Some("geometry"));
         assert_eq!(entries[1].owner.as_deref(), Some("state"));
 
         // A proto belonging to no part is rejected (silently dropping it from codegen would be worse).
         entries[1].proto = PathBuf::from("/x/stray.proto");
-        let err = assign_owners(&mut entries, &parts, Path::new("/x/Reiny.toml"))
+        let err = assign_owners(&mut entries, &parts, Path::new("/x/main.yaml"))
             .unwrap_err()
             .to_string();
         assert!(err.contains("stray.proto"), "got: {err}");
@@ -2236,7 +2244,7 @@ mod tests {
                 owner: None,
             },
         ];
-        let err = validate_no_topic_collision(&entries, Path::new("/x/Reiny.toml")).unwrap_err();
+        let err = validate_no_topic_collision(&entries, Path::new("/x/main.yaml")).unwrap_err();
         assert!(err.to_string().contains("Ping"));
     }
 
@@ -2268,7 +2276,7 @@ mod tests {
         let m = svc_manifest(
             "Adder = { request = \"Add\", response = \"Sum\" }\nEcho = { request = \"dep::Echo\", response = \"dep::Echo\" }",
         );
-        let svcs = resolve_services(&m, &svc_entries(), &[], Path::new("/x/Reiny.toml")).unwrap();
+        let svcs = resolve_services(&m, &svc_entries(), &[], Path::new("/x/main.yaml")).unwrap();
         assert_eq!(svcs.len(), 2);
         assert_eq!(
             (svcs[0].name.as_str(), svcs[0].request, svcs[0].response),
@@ -2283,15 +2291,13 @@ mod tests {
     #[test]
     fn services_reject_unknown_alias_and_duplicate_request() {
         let m = svc_manifest("Adder = { request = \"Add\", response = \"Nope\" }");
-        let err =
-            resolve_services(&m, &svc_entries(), &[], Path::new("/x/Reiny.toml")).unwrap_err();
+        let err = resolve_services(&m, &svc_entries(), &[], Path::new("/x/main.yaml")).unwrap_err();
         assert!(err.to_string().contains("Nope"), "{err}");
 
         let m = svc_manifest(
             "A = { request = \"Add\", response = \"Sum\" }\nB = { request = \"Add\", response = \"Add\" }",
         );
-        let err =
-            resolve_services(&m, &svc_entries(), &[], Path::new("/x/Reiny.toml")).unwrap_err();
+        let err = resolve_services(&m, &svc_entries(), &[], Path::new("/x/main.yaml")).unwrap_err();
         assert!(err.to_string().contains("同じ request 型"), "{err}");
     }
 
@@ -2316,7 +2322,7 @@ mod tests {
                 owner: None,
             },
         ];
-        assert!(validate_no_topic_collision(&entries, Path::new("/x/Reiny.toml")).is_ok());
+        assert!(validate_no_topic_collision(&entries, Path::new("/x/main.yaml")).is_ok());
     }
 
     #[test]
@@ -2422,344 +2428,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Resolving a real Reiny.toml on disk (`describe`, the `reiny check` path)
-    // -----------------------------------------------------------------------
-
-    /// A throwaway directory tree for manifest fixtures. `describe` reads real files — it rejects a
-    /// `proto` that is not there — so these tests need a filesystem. The directory removes itself.
-    struct Fixture(PathBuf);
-
-    impl Fixture {
-        fn new(name: &str) -> Self {
-            use std::sync::atomic::{AtomicU32, Ordering};
-            static NEXT: AtomicU32 = AtomicU32::new(0);
-            let dir = std::env::temp_dir().join(format!(
-                "reiny-build-{name}-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
-        }
-
-        fn root(&self) -> &Path {
-            &self.0
-        }
-
-        fn path(&self, rel: &str) -> PathBuf {
-            self.0.join(rel)
-        }
-
-        /// Write `contents` at `rel`, creating the parent directories.
-        fn write(&self, rel: &str, contents: &str) {
-            let path = self.path(rel);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, contents).unwrap();
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// `Resolution` is not `Debug`, so `unwrap_err` is unavailable; this says the same thing, and
-    /// renders the whole anyhow chain so a context line can be asserted on.
-    fn describe_err(dir: &Path) -> String {
-        match describe(dir) {
-            Err(e) => format!("{e:#}"),
-            Ok(_) => panic!("expected {} to fail resolution", dir.display()),
-        }
-    }
-
-    /// A per-project layout end to end: the mode, and the type → topic table with the module each type
-    /// lands in. A dependency's public types come along under `dependencies::<dep>` — resolved by
-    /// reading *that project's* Reiny.toml, which is the only reason a dependency needs one.
-    #[test]
-    fn describe_resolves_a_per_project_layout() {
-        let f = Fixture::new("per-project");
-        f.write("pong/proto/pong.proto", "");
-        f.write(
-            "pong/Reiny.toml",
-            r#"
-            [project]
-            name = "pong"
-            version = "0.1.0"
-            [publications]
-            Pong = { proto = "proto/pong.proto", message = "pong.Pong" }
-            "#,
-        );
-        f.write("ping/proto/ping.proto", "");
-        f.write(
-            "ping/Reiny.toml",
-            r#"
-            [project]
-            name = "ping"
-            version = "0.1.0"
-            [publications]
-            Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
-            [dependencies]
-            pong = { version = "0.1", path = "../pong" }
-            "#,
-        );
-
-        let res = describe(&f.path("ping")).unwrap();
-        assert!(matches!(res.mode(), Mode::PerProject), "{:?}", res.mode());
-        assert!(res.manifest_path().parent().unwrap().ends_with("ping"));
-        assert!(!res.has_config());
-        assert!(res.services().is_empty());
-        assert!(res.projects().is_empty(), "per-project has no [projects.*]");
-
-        let mut types: Vec<(String, String, String)> = res
-            .types()
-            .into_iter()
-            .map(|t| (t.alias, t.topic_segment, t.module))
-            .collect();
-        types.sort();
-        assert_eq!(
-            types,
-            vec![
-                (
-                    "Ping".to_string(),
-                    "Ping".to_string(),
-                    "publications".to_string()
-                ),
-                (
-                    "Pong".to_string(),
-                    "Pong".to_string(),
-                    "dependencies::pong".to_string()
-                ),
-            ]
-        );
-        // The topic segment is the bare type name — the proto package is stripped.
-        let ping = res.types().into_iter().find(|t| t.alias == "Ping").unwrap();
-        assert_eq!(ping.message, "ping.Ping");
-        assert_eq!(ping.topic_segment, "Ping");
-        assert!(ping.proto.is_absolute());
-    }
-
-    /// A workspace layout end to end: everything in `[internals]` is resolved into `internals`,
-    /// regardless of which project publishes it, and `[projects.*]` survives as the introspection view
-    /// `reiny run` draws its flow diagram from.
-    #[test]
-    fn describe_resolves_a_workspace_layout() {
-        let f = Fixture::new("workspace");
-        f.write("proto/ping.proto", "");
-        f.write("proto/pong.proto", "");
-        f.write(
-            "Reiny.toml",
-            r#"
-            [internals]
-            Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
-            Pong = { proto = "proto/pong.proto", message = "pong.Pong" }
-            [projects.talker]
-            publications = ["Ping"]
-            dependencies = ["Pong"]
-            [projects.listener]
-            publications = ["Pong"]
-            dependencies = ["Ping"]
-            "#,
-        );
-
-        let res = describe(f.root()).unwrap();
-        assert!(matches!(res.mode(), Mode::Workspace), "{:?}", res.mode());
-        assert!(res.schema_crates().is_empty());
-        assert!(
-            res.types().iter().all(|t| t.module == "internals"),
-            "workspace types all go to internals"
-        );
-
-        let mut projects: Vec<&str> = res.projects().iter().map(|p| p.name.as_str()).collect();
-        projects.sort_unstable();
-        assert_eq!(projects, ["listener", "talker"]);
-        let talker = res
-            .projects()
-            .iter()
-            .find(|p| p.name == "talker")
-            .expect("talker is declared");
-        assert_eq!(talker.publications, ["Ping"]);
-        assert_eq!(talker.dependencies, ["Pong"]);
-    }
-
-    /// The manifest search runs *upward* and the nearest one wins. That is what lets a launch inside a
-    /// workspace carry its own Reiny.toml, and what lets a subdirectory (`src/`, where a build script
-    /// runs) inherit the one above it.
-    #[test]
-    fn manifest_search_takes_the_nearest_one_upward() {
-        let f = Fixture::new("upward");
-        f.write("proto/shared.proto", "");
-        f.write(
-            "Reiny.toml",
-            r#"
-            [internals]
-            Shared = { proto = "proto/shared.proto", message = "ws.Shared" }
-            [projects.ping]
-            publications = ["Shared"]
-            "#,
-        );
-        f.write("ping/proto/ping.proto", "");
-        f.write(
-            "ping/Reiny.toml",
-            r#"
-            [project]
-            name = "ping"
-            version = "0.1.0"
-            [publications]
-            Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
-            "#,
-        );
-        std::fs::create_dir_all(f.path("ping/src")).unwrap();
-
-        // From the launch directory: its own manifest, not the workspace's.
-        let inner = describe(&f.path("ping")).unwrap();
-        assert!(matches!(inner.mode(), Mode::PerProject));
-        // From a subdirectory with no manifest: the nearest ancestor's, which is still the launch's.
-        let nested = describe(&f.path("ping/src")).unwrap();
-        assert_eq!(nested.manifest_path(), inner.manifest_path());
-        // From the root: the workspace manifest.
-        let outer = describe(f.root()).unwrap();
-        assert!(matches!(outer.mode(), Mode::Workspace));
-        assert_ne!(outer.manifest_path(), inner.manifest_path());
-    }
-
-    /// `describe` also runs validation, which is the whole point of `reiny check`: a layout mistake has
-    /// to be named here rather than becoming a rustc error inside generated code much later.
-    #[test]
-    fn describe_reports_layout_mistakes() {
-        // Neither [project] nor [internals]/[projects]: the message names both ways out.
-        let f = Fixture::new("neither");
-        f.write("Reiny.toml", "[workspace]\nversion = \"0.1.0\"\n");
-        let err = describe_err(f.root());
-        assert!(err.contains("[project]"), "{err}");
-        assert!(err.contains("[internals]"), "{err}");
-
-        // A publication naming a proto that is not on disk.
-        let f = Fixture::new("missing-proto");
-        f.write(
-            "Reiny.toml",
-            r#"
-            [project]
-            name = "ping"
-            version = "0.1.0"
-            [publications]
-            Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
-            "#,
-        );
-        let err = describe_err(f.root());
-        assert!(err.contains("proto file not found"), "{err}");
-
-        // A [dependencies] key becomes `pub mod <key>` in the generated code, so a hyphen has to be
-        // caught here, not as a syntax error inside reiny_generated.rs.
-        let f = Fixture::new("bad-dep-key");
-        f.write("dep/proto/d.proto", "");
-        f.write(
-            "dep/Reiny.toml",
-            r#"
-            [project]
-            name = "dep"
-            version = "0.1.0"
-            [publications]
-            D = { proto = "proto/d.proto", message = "d.D" }
-            "#,
-        );
-        f.write("app/proto/a.proto", "");
-        f.write(
-            "app/Reiny.toml",
-            r#"
-            [project]
-            name = "app"
-            version = "0.1.0"
-            [publications]
-            A = { proto = "proto/a.proto", message = "a.A" }
-            [dependencies]
-            my-dep = { version = "0.1", path = "../dep" }
-            "#,
-        );
-        let err = describe_err(&f.path("app"));
-        assert!(err.contains("[dependencies]"), "{err}");
-        assert!(err.contains("my-dep"), "{err}");
-    }
-
-    /// No Reiny.toml in the directory or any parent: the error names where the search started, because
-    /// "which directory did you mean" is the only useful thing to say about it.
-    #[test]
-    fn missing_manifest_names_the_starting_directory() {
-        let f = Fixture::new("no-manifest"); // deliberately empty
-        let err = describe_err(f.root());
-        assert!(err.contains("Reiny.toml"), "{err}");
-        assert!(err.contains("no-manifest"), "{err}");
-    }
-
-    /// A `[config]` key becomes a struct field verbatim, so it is checked like the other identifiers
-    /// and the error names the section; a non-scalar value has no field type and is refused the same way.
-    #[test]
-    fn config_keys_are_idents_and_values_scalars() {
-        let manifest = |config: &str| {
-            format!(
-                r#"
-                [project]
-                name = "app"
-                version = "0.1.0"
-                [publications]
-                A = {{ proto = "proto/a.proto", message = "a.A" }}
-                [config]
-                {config}
-                "#
-            )
-        };
-        let f = Fixture::new("config-key");
-        f.write("proto/a.proto", "");
-        f.write("Reiny.toml", &manifest("delay-ms = 0"));
-        let err = describe_err(f.root());
-        assert!(err.contains("[config]"), "{err}");
-        assert!(err.contains("delay-ms"), "{err}");
-
-        let f = Fixture::new("config-value");
-        f.write("proto/a.proto", "");
-        f.write("Reiny.toml", &manifest("limits = { max = 1 }"));
-        let err = describe_err(f.root());
-        assert!(err.contains("[config].limits"), "{err}");
-        assert!(err.contains("table"), "{err}");
-    }
-
-    /// `[config]` and `[services]` reach the introspection view: `reiny check` prints both, and a
-    /// service is reported by the aliases *and* the fully qualified message names it resolved to.
-    #[test]
-    fn describe_reports_config_and_services() {
-        let f = Fixture::new("services");
-        f.write("proto/calc.proto", "");
-        f.write(
-            "Reiny.toml",
-            r#"
-            [project]
-            name = "calc"
-            version = "0.1.0"
-            [publications]
-            Add = { proto = "proto/calc.proto", message = "calc.Add" }
-            Sum = { proto = "proto/calc.proto", message = "calc.Sum" }
-            [services]
-            Adder = { request = "Add", response = "Sum" }
-            [config]
-            rate_hz = 10
-            name = "calc"
-            "#,
-        );
-
-        let res = describe(f.root()).unwrap();
-        assert!(res.has_config());
-        let services = res.services();
-        assert_eq!(services.len(), 1);
-        let s = &services[0];
-        assert_eq!(s.name, "Adder");
-        assert_eq!(
-            (s.request.as_str(), s.request_message.as_str()),
-            ("Add", "calc.Add")
-        );
-        assert_eq!(
-            (s.response.as_str(), s.response_message.as_str()),
-            ("Sum", "calc.Sum")
-        );
-    }
 }
+
+#[cfg(test)]
+mod manifest_tests;

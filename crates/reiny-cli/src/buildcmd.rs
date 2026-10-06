@@ -1,24 +1,30 @@
-//! `reiny build` — the wrapper that makes sure the Reiny.toml-driven codegen runs before the build.
-//!
-//! It is really `cargo build` in the cwd (a launch project). The codegen runs as part of that build,
-//! from the `reiny_build::compile()` each launch's `build.rs` calls, so a thin wrapper is all this needs.
+//! Prepare declared deployment artifacts without starting application processes.
 
 use anyhow::{Context, Result, bail};
 
-/// `reiny build [--release] [-- <extra cargo args>]`.
+/// Build cwd's `main.yaml`; `--release` overrides declared Cargo profiles.
+/// Raw Cargo arguments are rejected: features and build settings belong in `build`.
 pub(crate) fn build(release: bool, extra: &[String]) -> Result<()> {
-    let mut cmd = std::process::Command::new("cargo");
-    cmd.arg("build");
+    if !extra.is_empty() {
+        bail!(
+            "raw Cargo arguments are unsupported; declare features and build settings in main.yaml"
+        );
+    }
+    let root = std::env::current_dir().context("resolving current directory")?;
+    let mut plan = reiny_launch::DeploymentPlan::load(&root.join("main.yaml"), false)?;
     if release {
-        cmd.arg("--release");
+        for node in &mut plan.nodes {
+            if let Some(build) = &mut node.build {
+                "release".clone_into(&mut build.profile);
+            }
+        }
     }
-    cmd.args(extra);
-
-    let status = cmd
-        .status()
-        .context("running `cargo build` (is cargo on PATH?)")?;
-    if !status.success() {
-        bail!("cargo build failed with {status}");
-    }
+    let prepared = plan.prepare()?;
+    println!(
+        "prepared deployment '{}' ({} executable modules, {} resources)",
+        prepared.deployment,
+        prepared.nodes.len(),
+        prepared.resources.len(),
+    );
     Ok(())
 }

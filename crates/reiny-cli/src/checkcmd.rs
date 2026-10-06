@@ -1,4 +1,4 @@
-//! `reiny check` — resolve a Reiny.toml and print the type → topic mapping and the ownership / dependency mode.
+//! `reiny check` resolves module schema and validates executable composition roots without building.
 //!
 //! No proto is compiled (`reiny-build` is used with `default-features = false`). A layout mistake (a
 //! hyphenated dependency key, a topic collision, a missing proto) is caught here by `reiny-build`'s
@@ -6,16 +6,41 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 
-/// `reiny check [path]`. Without `path`, search upward from the current directory for a Reiny.toml.
+/// `reiny check [path]`. Search upward for the nearest `main.yaml`.
 pub(crate) fn check(path: Option<&Path>) -> Result<()> {
     let dir = match path {
         Some(p) => p.to_path_buf(),
         None => std::env::current_dir()?,
     };
 
-    let resolution = reiny_build::describe(&dir)?;
+    let manifest = nearest_manifest(&dir)?;
+    let text = std::fs::read_to_string(&manifest)
+        .with_context(|| format!("reading {}", manifest.display()))?;
+    let module: reiny_launch::ModuleManifest =
+        serde_yaml::from_str(&text).with_context(|| format!("parsing {}", manifest.display()))?;
+    if module.version != 1 {
+        bail!(
+            "{}: unsupported module version {}",
+            manifest.display(),
+            module.version
+        );
+    }
+    if module.deployment.is_some() {
+        let plan = reiny_launch::DeploymentPlan::load(&manifest, false)?;
+        println!(
+            "deployment: {} ({} executable modules, {} resources)",
+            plan.deployment,
+            plan.nodes.len(),
+            plan.resources.len(),
+        );
+    }
+    if module.schema.is_none() && module.deployment.is_some() {
+        return Ok(());
+    }
+    let schema_dir = manifest.parent().context("main.yaml has no directory")?;
+    let resolution = reiny_build::describe(schema_dir)?;
 
     println!("reiny check — {}", resolution.manifest_path().display());
     println!("mode: {}", resolution.mode().label());
@@ -36,7 +61,7 @@ pub(crate) fn check(path: Option<&Path>) -> Result<()> {
         }
     }
     if resolution.has_config() {
-        println!("config: [config] present (typed cloudy.config())");
+        println!("config: schema.config present (typed cloudy.config())");
     }
 
     let services = resolution.services();
@@ -90,7 +115,27 @@ pub(crate) fn check(path: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// Make a proto path relative to the directory holding Reiny.toml, for readability (absolute if it cannot be).
+fn nearest_manifest(path: &Path) -> Result<PathBuf> {
+    let path =
+        std::fs::canonicalize(path).with_context(|| format!("resolving {}", path.display()))?;
+    let start = if path.is_file() {
+        if path.file_name().is_some_and(|name| name == "main.yaml") {
+            return Ok(path);
+        }
+        bail!("expected main.yaml or a module directory");
+    } else {
+        path.as_path()
+    };
+    for dir in start.ancestors() {
+        let manifest = dir.join("main.yaml");
+        if manifest.is_file() {
+            return Ok(manifest);
+        }
+    }
+    bail!("no main.yaml found above {}", path.display())
+}
+
+/// Make a proto path relative to the module directory, for readability.
 fn rel_to(manifest_path: &Path, proto: &Path) -> PathBuf {
     let base = manifest_path.parent().unwrap_or(Path::new("."));
     proto
@@ -108,7 +153,7 @@ mod tests {
     /// come out as something that does not exist.
     #[test]
     fn proto_paths_print_relative_to_the_manifest() {
-        let manifest = Path::new("/proj/Reiny.toml");
+        let manifest = Path::new("/proj/main.yaml");
         assert_eq!(
             rel_to(manifest, Path::new("/proj/proto/ping.proto")),
             Path::new("proto/ping.proto")
@@ -124,7 +169,7 @@ mod tests {
         );
         // A manifest path with no parent falls back to ".", which strips nothing.
         assert_eq!(
-            rel_to(Path::new("Reiny.toml"), Path::new("proto/ping.proto")),
+            rel_to(Path::new("main.yaml"), Path::new("proto/ping.proto")),
             Path::new("proto/ping.proto")
         );
     }

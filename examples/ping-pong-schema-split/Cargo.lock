@@ -2012,6 +2012,7 @@ dependencies = [
  "prost-types",
  "protoc-bin-vendored",
  "serde",
+ "serde_yaml",
  "toml",
 ]
 
@@ -2020,6 +2021,7 @@ name = "reiny-core"
 version = "0.6.0"
 dependencies = [
  "prost",
+ "serde",
 ]
 
 [[package]]

@@ -1,8 +1,3 @@
-# ping-pong サンプルの cargo ワークスペース。
-# ping/ と pong/ の 2 プロジェクトを束ねる。reiny 本体のワークスペースとは分離した
-# 独立ワークスペースなので、ルートの `cargo build` には巻き込まれない。
-#
-# `reiny` / `reiny-build` でそのままビルドできる(`cargo build`)。
 [workspace]
 resolver = "2"
 members = ["ping", "pong"]
@@ -14,11 +9,8 @@ license = "MIT"
 authors = ["nop <noplab90@gmail.com>"]
 
 [workspace.dependencies]
-# umbrella crate: SDK 本体 + #[reiny::main] マクロ + ランタイム。
 reiny = { path = "../../crates/reiny" }
-# Reiny.toml と proto を読んで型・トピックマッピングを生成する build 補助。
 reiny-build = { path = "../../crates/reiny-build" }
-# 生成型は prost-derive 由来。利用側 crate に prost が要る(reiny と同一 0.14 で unify)。
 prost = "0.14"
 
 tokio = { version = "1", features = ["full"] }

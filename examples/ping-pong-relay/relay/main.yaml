@@ -1,0 +1,33 @@
+version: 1
+in:
+  ping:
+    type: "ping.Ping"
+out:
+  relayed:
+    type: "relay.Relayed"
+run:
+  provider: "process"
+  bin: "relay"
+build:
+  type: "cargo"
+  manifest: "../Cargo.toml"
+  package: "relay"
+  profile: "debug"
+  features: []
+  default_features: true
+  locked: true
+schema:
+  project:
+    name: "relay"
+    version: "0.1.0"
+    description: "relay module"
+    authors: ["nop <noplab90@gmail.com>"]
+    license: "MIT"
+  publications:
+    Relayed:
+      proto: "proto/relayed.proto"
+      message: "relay.Relayed"
+  dependencies:
+    ping:
+      version: "0.1"
+      path: "../ping"

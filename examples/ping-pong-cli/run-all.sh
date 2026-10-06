@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# run-all.sh — 00→04 を順に流して雛形生成〜ビルドまで一気に行う。
-# 起動(05-run.sh)はフォアグラウンドで止まり続けるので、ここには含めない。
-#
-#   ./run-all.sh        # clean → new → init → add → build
-#   ./05-run.sh         # 起動は別途
 set -euo pipefail
 cd "$(dirname "$0")"
 

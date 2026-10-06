@@ -96,7 +96,7 @@ fn record(args: &RecordArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| PathBuf::from(format!("{}.mcap", utc_stamp(now_unix_nanos()))));
 
-    let key = format!("{KEY_ROOT}/{domain}/*/*");
+    let key = reiny::engine::Key::all(&domain).to_string();
     let subscriber = session
         .declare_subscriber(&key)
         .wait()
@@ -428,7 +428,7 @@ fn guard_live_publishers(
     types.sort_unstable();
     types.dedup();
     for ty in types {
-        let key = format!("{KEY_ROOT}/{domain}/*/{ty}");
+        let key = format!("{KEY_ROOT}/{domain}/**/{ty}");
         let Ok(replies) = session.liveliness().get(&key).wait() else {
             continue;
         };

@@ -1,27 +1,15 @@
-//! pong — Ping を受け取るたびに、同じ seq の Pong を返す。
-//!
-//! ワークスペース共有版: 型は workspace の Reiny.toml [internals] が定義する共有カタログから
-//! `reiny::internals::*` として来る。このプロジェクトが何を公開/購読してよいかは
-//! [projects.pong] の publications/dependencies で決まる(reiny-build が検証する)。
-//!
-//! 注意: これは reiny の到達目標を示す設計サンプル。umbrella crate `reiny` と
-//! `reiny-build`(Reiny.toml パーサ + codegen)は未実装なので、まだビルドは通らない。
+//! pong demonstrates explicit typed ports in a namespaced deployment.
 
 use reiny::prelude::*;
 
-// 共有カタログの型(per-project 版と違い、依存先プロジェクト名で名前空間化されない)。
 use crate::internals::{Ping, Pong};
 
-/// `#[reiny::main]` は workspace の Reiny.toml を読み、このバイナリ名に対応する
-/// [projects.pong] のプロセス(cloudy)を起動して `Cloudy` を渡す(name はトピックではない)。
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {
-    // Pong は [projects.pong].publications にあるので reiny/pong-1/Pong へ送れる。
-    let pongs = cloudy.publish::<Pong>()?;
-    // Ping は [projects.pong].dependencies にあるので reiny/*/Ping を購読できる。
-    let mut pings = cloudy.subscribe::<Ping>()?;
+    let pongs = cloudy.output::<Pong>("pong")?;
+    let mut pings = cloudy.input::<Ping>("ping")?;
+    cloudy.ready()?;
 
-    // Ping を受けるたびに、同じ seq で打ち返す。shutdown(Ctrl+C)で抜ける。
     while let Some(ping) = pings.recv().await {
         tracing::info!(seq = ping.seq, "← ping");
         pongs

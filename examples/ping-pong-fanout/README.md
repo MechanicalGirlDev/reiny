@@ -1,57 +1,24 @@
 # ping-pong-fanout
 
-reiny の使い方を示すサンプル。1 つの `ping` が打った 1 球を、複数の `pong`
-インスタンスが受けてそれぞれ返す **broadcast / fan-out** です。
+One Ping output feeds three instances of the same Pong module. Their names
+`pong-1`, `pong-2`, and `pong-3` are explicit composition names, not automatically
+allocated process IDs. Each response carries its canonical module identity.
 
-```
-                   ┌──▶ pong-1 ──┐
-ping ──Ping──▶ (reiny/ping-1/Ping)  pong-2  ──Pong──▶ ping
-                   └──▶ pong-3 ──┘
-```
+Ping declares three named Pong inputs (`pong_1`, `pong_2`, `pong_3`). The root
+wires each to its exact sibling output and sends Ping to every Pong instance.
+The receive loop selects across all three inputs; there is no global wildcard
+subscription or accidental fan-in from another deployment.
 
-- **ping**: `Ping` を 1 秒ごとに broadcast し、返ってきた `Pong` を「誰が返したか」付きでログ。
-- **pong**: 同じバイナリを複数起動。各インスタンスが `Ping` を受けて、自分の id を載せた `Pong` を返す。
+## Run
 
-## 見どころ: 型で購読 → fan-out
-
-各 pong インスタンスは自分の `reiny/<id>/Pong`(例 `reiny/pong-1/Pong`, `reiny/pong-2/Pong`)
-へ publish します。ping 側はインスタンス数を意識せず、**型 `Pong` を subscribe するだけ**。
-reiny はこれを `reiny/*/Pong` に展開するので、全インスタンスの `Pong` がまとまって届きます。
-
-```rust
-let mut pongs = cloudy.subscribe::<Pong>()?; // reiny/*/Pong — 全 pong インスタンス分が届く
-```
-
-同じ `pong` バイナリを 3 つ起動すると reiny が **連番 id**(`pong-1` / `pong-2` / `pong-3`)を
-自動採番し、それが publish 先トピックの `<id>` になります。各 `Pong` の `from` にも載るので
-誰が答えたか分かり、インスタンスが増減しても **型で購読する** ping 側は無変更です。
-
-## レイアウト
-
-```
-ping-pong-fanout/
-├── Cargo.toml          # cargo ワークスペース(members = ping, pong)
-├── ping-pong.yaml      # launch config(pong を 3 起動 + ping)
-├── ping/               # Ping を broadcast、Pong を集約
-│   ├── Reiny.toml      # publications = Ping / dependencies = pong
-│   ├── proto/ping.proto
-│   └── src/main.rs
-└── pong/               # 複数起動される返球役(id を載せて返す)
-    ├── Reiny.toml      # publications = Pong / dependencies = ping
-    ├── proto/pong.proto
-    └── src/main.rs
-```
-
-## 動かす
+From this independent Cargo workspace:
 
 ```sh
-# 手で増やす: pong を好きなだけ起動してから ping
-cargo run -p pong &   # pong-1
-cargo run -p pong &   # pong-2
-cargo run -p pong &   # pong-3
-cargo run -p ping     # 3 つの返球がまとまって届く
-
-# または、ランチャでまとめて(pong×3 + ping)
-#   ※ あらかじめ cargo build してから、bin の置き場を --bin-dir で指す
-reiny --config ping-pong.yaml --bin-dir target/debug
+cargo build --locked
+reiny run main.yaml
 ```
+
+The root process provider resolves binaries in `target/debug`. Each runtime leaf has its own
+`main.yaml`, explicit `in`/`out` contracts, and a Cargo build declaration. Runtime module
+paths determine identities under the deployment namespace. Ports are created synchronously;
+`cloudy.ready()?` is called only after every named port has been created.

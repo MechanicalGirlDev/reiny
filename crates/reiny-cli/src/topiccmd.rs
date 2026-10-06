@@ -143,7 +143,7 @@ fn publish(args: &PubArgs) -> Result<()> {
     }
     let (session, domain) = args.bus.open()?;
 
-    let pattern = format!("{KEY_ROOT}/{domain}/*/{}", args.ty);
+    let pattern = format!("{KEY_ROOT}/{domain}/**/{}", args.ty);
     let (fqn, file_set) = collect_schemas(&session, &pattern)
         .into_values()
         .next()
@@ -220,7 +220,7 @@ fn echo(args: &EchoArgs) -> Result<()> {
     let (session, domain) = args.bus.open()?;
     let pattern = format!(
         "{KEY_ROOT}/{domain}/{}/{}",
-        args.from.as_deref().unwrap_or("*"),
+        args.from.as_deref().unwrap_or("**"),
         args.ty
     );
     let subscriber = session
@@ -351,19 +351,26 @@ fn list(args: &ListArgs) -> Result<()> {
             }
         };
     collect(
-        alive_keys(&session, &format!("{KEY_ROOT}/{domain}/*/*"))?,
+        alive_keys(&session, &reiny::engine::Key::all(&domain).to_string())?,
         None,
         |r| &mut r.pubs,
     );
     collect(
-        alive_keys(&session, &format!("{KEY_ROOT}/{domain}/*/*/{SUB_CHUNK}"))?,
+        alive_keys(
+            &session,
+            &reiny::engine::Key::all(&domain)
+                .with_chunk(SUB_CHUNK)
+                .to_string(),
+        )?,
         Some(SUB_CHUNK),
         |r| &mut r.subs,
     );
     collect(
         alive_keys(
             &session,
-            &format!("{KEY_ROOT}/{domain}/*/*/{SERVICE_CHUNK}"),
+            &reiny::engine::Key::all(&domain)
+                .with_chunk(SERVICE_CHUNK)
+                .to_string(),
         )?,
         Some(SERVICE_CHUNK),
         |r| &mut r.srvs,
@@ -422,7 +429,7 @@ fn rate(args: &RateArgs, mode: Mode) -> Result<()> {
     let (session, domain) = args.bus.open()?;
     let key = format!(
         "{KEY_ROOT}/{domain}/{}/{}",
-        args.from.as_deref().unwrap_or("*"),
+        args.from.as_deref().unwrap_or("**"),
         args.ty
     );
     let subscriber = session
@@ -653,9 +660,11 @@ fn node_list(args: &ListArgs) -> Result<()> {
     // A 0.5 launch announces `@launch`. Older ones (`@grain`, or no token at all) are picked up
     // from their publisher / server tokens instead.
     for pattern in [
-        format!("{KEY_ROOT}/{domain}/*/{LAUNCH_CHUNK}"),
-        format!("{KEY_ROOT}/{domain}/*/*"),
-        format!("{KEY_ROOT}/{domain}/*/*/{SERVICE_CHUNK}"),
+        format!("{KEY_ROOT}/{domain}/**/{LAUNCH_CHUNK}"),
+        reiny::engine::Key::all(&domain).to_string(),
+        reiny::engine::Key::all(&domain)
+            .with_chunk(SERVICE_CHUNK)
+            .to_string(),
     ] {
         for k in alive_keys(&session, &pattern)? {
             let id = key_source(&k);

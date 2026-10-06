@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
-description = "reiny CLI: scaffold launches (new/init/add), check, build, run, compress, bag, and topic/node/service introspection via the `reiny` command"
+description = "reiny CLI: typed module plan/apply/status/stop/update, scaffolding, builds, bundles and bus introspection"
 keywords = ["reiny", "cli", "scaffold", "launcher"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -24,8 +24,8 @@ reiny-launch = { path = "../reiny-launch", version = "0.6.0" }
 reiny-link = { path = "../reiny-link", version = "0.6.0" }
 reiny-iceoryx2 = { path = "../reiny-iceoryx2", version = "0.6.0", optional = true }
 tokio = { workspace = true }
-# Reiny.toml の解決・型/トピック導出(`reiny check`)と、`@schema` 応答の descriptor 読み取り
-# (`reiny bag record`)。prost-build / protoc は引かない。
+# main.yaml schema validation and topic derivation for check, plus descriptor
+# decoding for bus tools. This dependency does not pull in prost-build/protoc.
 reiny-build = { path = "../reiny-build", version = "0.6.0", default-features = false, features = ["descriptors"] }
 # `reiny bag` が launch と同じ fabric に乗るため(zenoh の再エクスポート + 起動オプション)。
 reiny = { path = "../reiny", version = "0.6.0" }
@@ -35,6 +35,8 @@ mcap = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { version = "0.16", features = ["serde"] }
 serde_json = "1"
+serde_yaml = "0.9"
+getrandom = "0.3"
 ctrlc = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
@@ -46,6 +48,7 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 # topic_e2e が descriptor set を手組みする(protoc 無し)。
 prost-types = { workspace = true }
+tempfile = "3"
 
 [lints]
 workspace = true

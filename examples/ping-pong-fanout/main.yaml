@@ -1,0 +1,63 @@
+version: 1
+deployment: "ping-pong-fanout"
+providers:
+  process:
+    type: "process"
+    bin_dir: "target/debug"
+in: {}
+out:
+  pong-1_pong:
+    type: "pong.Pong"
+    from: "pong-1.pong"
+  pong-2_pong:
+    type: "pong.Pong"
+    from: "pong-2.pong"
+  pong-3_pong:
+    type: "pong.Pong"
+    from: "pong-3.pong"
+  ping_ping:
+    type: "ping.Ping"
+    from: "ping.ping"
+modules:
+  pong-1:
+    source: "pong"
+    in:
+      ping:
+        type: "ping.Ping"
+        from: "ping.ping"
+    out:
+      pong:
+        type: "pong.Pong"
+  pong-2:
+    source: "pong"
+    in:
+      ping:
+        type: "ping.Ping"
+        from: "ping.ping"
+    out:
+      pong:
+        type: "pong.Pong"
+  pong-3:
+    source: "pong"
+    in:
+      ping:
+        type: "ping.Ping"
+        from: "ping.ping"
+    out:
+      pong:
+        type: "pong.Pong"
+  ping:
+    source: "ping"
+    in:
+      pong_1:
+        type: "pong.Pong"
+        from: "pong-1.pong"
+      pong_2:
+        type: "pong.Pong"
+        from: "pong-2.pong"
+      pong_3:
+        type: "pong.Pong"
+        from: "pong-3.pong"
+    out:
+      ping:
+        type: "ping.Ping"

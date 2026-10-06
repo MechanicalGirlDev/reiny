@@ -1,10 +1,4 @@
-//! relay — 中継ノード。上流 `Ping` を受けて `Relayed` に変換し、下流へ流す。
-//!
-//! 見どころ: 1 つのノードが「購読した型」と「公開する型」を持ち、その間で変換する。
-//! これを並べるとデータフローのパイプライン(ping → relay → pong)になる。
-//!
-//! 注意: これは reiny の到達目標を示す設計サンプル。umbrella crate `reiny` と
-//! `reiny-build`(Reiny.toml パーサ + codegen)は未実装なので、まだビルドは通らない。
+//! relay demonstrates explicit typed ports in a namespaced deployment.
 
 use reiny::prelude::*;
 
@@ -13,8 +7,9 @@ use crate::publications::Relayed;
 
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {
-    let out = cloudy.publish::<Relayed>()?;
-    let mut incoming = cloudy.subscribe::<Ping>()?;
+    let out = cloudy.output::<Relayed>("relayed")?;
+    let mut incoming = cloudy.input::<Ping>("ping")?;
+    cloudy.ready()?;
 
     while let Some(ping) = incoming.recv().await {
         tracing::info!(seq = ping.seq, "↳ relaying");

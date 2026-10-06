@@ -1,15 +1,4 @@
-# ping-pong-schema-split の cargo ワークスペース。
-# proto を **2 つのスキーマクレート**へ割った版(../ping-pong-schema は 1 つ)。
-#
-#   geometry/  … リーフ型(Point)だけを持つ。他に依存しない。
-#   msg/       … Ping/Pong を持ち、geometry の Point を参照する。
-#   ping/ pong/… launch。両方のスキーマクレートを Cargo 依存にして型を受け取る。
-#
-# 要点は「Point が 1 度しか生成されない」こと。msg は geometry の proto を import するので、
-# 素直にやると msg 側にも Point が生成されて別の型になってしまう。reiny-build は geometry が
-# cargo の `links` メタで公開した FQN 一覧を読み、prost の extern_path に変換してこれを防ぐ。
-#
-# `reiny ping-pong.yaml` で起動、`reiny check` で区画と型 → トピックを確認できる。
+# Split schema Cargo workspace; run with reiny run main.yaml.
 [workspace]
 resolver = "2"
 members = ["geometry", "msg", "ping", "pong"]
@@ -23,10 +12,8 @@ authors = ["nop <noplab90@gmail.com>"]
 [workspace.dependencies]
 reiny = { path = "../../crates/reiny" }
 reiny-build = { path = "../../crates/reiny-build" }
-# スキーマクレート 2 つ。launch は両方を依存にする(internals はこの和になる)。
 pingpong-geometry = { path = "geometry" }
 pingpong-msg = { path = "msg" }
-# prost は **スキーマクレートだけ**が要る(生成 prost 型を持つのはそちら)。
 prost = "0.14"
 
 tokio = { version = "1", features = ["full"] }

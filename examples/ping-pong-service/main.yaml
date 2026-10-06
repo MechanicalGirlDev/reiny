@@ -1,0 +1,38 @@
+version: 1
+deployment: "ping-pong-service"
+providers:
+  process:
+    type: "process"
+    bin_dir: "target/debug"
+in: {}
+out: {}
+modules:
+  calc:
+    source: "calc"
+    in: {}
+    out: {}
+  asker:
+    source: "asker"
+    in: {}
+    out: {}
+schema:
+  internals:
+    Add:
+      proto: "proto/calc.proto"
+      message: "calc.Add"
+    Sum:
+      proto: "proto/calc.proto"
+      message: "calc.Sum"
+  services:
+    Adder:
+      request: "Add"
+      response: "Sum"
+  projects:
+    calc:
+      version: "0.1.0"
+      description: "calc module"
+      publications: ["Add","Sum"]
+    asker:
+      version: "0.1.0"
+      description: "asker module"
+      dependencies: ["Add","Sum"]

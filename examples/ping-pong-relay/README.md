@@ -1,66 +1,23 @@
 # ping-pong-relay
 
-reiny の使い方を示すサンプル。往復ではなく、データが **段を経て流れる**
-パイプラインです。
+A source/transform/sink pipeline: `ping.ping` feeds relay, and `relay.relayed`
+feeds pong. Ping produces once per second. Relay records its canonical identity
+and a hop count. Pong consumes and logs elapsed time without declaring an output.
 
-```
-ping ──Ping──▶ relay ──Relayed──▶ pong
-(source)     (transform)        (sink)
-reiny/ping-1/Ping     reiny/relay-1/Relayed      (購読のみ)
-```
+Each leaf has its own build-time public catalog and schema dependencies; runtime
+connections are declared by the root composition. Empty `in` or `out` mappings
+are explicit contracts, so caller and child still agree for the source and sink.
 
-- **ping**(source): `Ping` を一定間隔で流すだけ(購読しない)。
-- **relay**(transform): `Ping` を受けて `Relayed` に変換し(経由 id・hop を付与)、下流へ流す。
-- **pong**(sink): `Relayed` を購読して表示するだけ(何も公開しない)。
+## Run
 
-## 見どころ: ノードは「購読する型」と「公開する型」を持つ
-
-各ノードの Reiny.toml の `[publications]` / `[dependencies]` が、そのままパイプラインの
-配線になります。
-
-| プロジェクト | dependencies(購読) | publications(公開) | 役割 |
-| --- | --- | --- | --- |
-| ping | —(なし) | `Ping` | source(生産のみ) |
-| relay | `Ping` | `Relayed` | transform(変換) |
-| pong | `Relayed` | —(なし) | sink(消費のみ) |
-
-- **source**(ping)は `[dependencies]` が空 → 何も購読しない純粋な生産者。
-- **sink**(pong)は `[publications]` が空 → トピックを持たない純粋な購読者。
-- relay は両方を持ち、`Ping` を受けて `Relayed` に変換する。これを並べれば多段になる。
-
-relay の中身はシンプルに「受けて・変換して・流す」だけ:
-
-```rust
-let out = cloudy.publish::<Relayed>()?;
-let mut incoming = cloudy.subscribe::<Ping>()?;
-while let Some(ping) = incoming.recv().await {
-    out.send(Relayed { seq: ping.seq, via: cloudy.id().to_string(), hops: 1, origin_unix: ping.sent_unix }).await?;
-}
-```
-
-## レイアウト
-
-```
-ping-pong-relay/
-├── Cargo.toml          # cargo ワークスペース(members = ping, relay, pong)
-├── ping-pong.yaml      # launch config(ping → relay → pong の起動順)
-├── ping/               # source: publications = Ping
-├── relay/              # transform: dependencies = Ping / publications = Relayed
-│   ├── proto/relayed.proto
-│   └── src/main.rs
-└── pong/               # sink: dependencies = Relayed / publications = 空(proto なし)
-    └── src/main.rs
-```
-
-## 動かす
+From this independent Cargo workspace:
 
 ```sh
-# 別々の端末で(下流から上げると取りこぼしが少ない)
-cargo run -p pong &
-cargo run -p relay &
-cargo run -p ping
-
-# または、ランチャで起動順込みでまとめて
-#   ※ あらかじめ cargo build してから、bin の置き場を --bin-dir で指す
-reiny --config ping-pong.yaml --bin-dir target/debug
+cargo build --locked
+reiny run main.yaml
 ```
+
+The root process provider resolves binaries in `target/debug`. Each runtime leaf has its own
+`main.yaml`, explicit `in`/`out` contracts, and a Cargo build declaration. Runtime module
+paths determine identities under the deployment namespace. Ports are created synchronously;
+`cloudy.ready()?` is called only after every named port has been created.

@@ -1,4 +1,4 @@
-//! ワークスペース共有 Reiny.toml 駆動のコード生成(calc と同じ)。
+//! Compile the nearest ancestor main.yaml build-time schema.
 fn main() {
-    reiny_build::compile().expect("reiny codegen from workspace Reiny.toml");
+    reiny_build::compile().expect("reiny codegen from main.yaml schema");
 }

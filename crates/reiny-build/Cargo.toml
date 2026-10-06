@@ -6,27 +6,28 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
-description = "reiny build helper: reads Reiny.toml, compiles protos, and generates types and topics"
+description = "reiny build helper: reads main.yaml schemas, compiles protos, and generates types and topics"
 keywords = ["reiny", "build", "protobuf", "codegen", "prost"]
 categories = ["development-tools::build-utils"]
 
 [features]
-# 既定では proto コンパイル機能込み(launch の build.rs はこれを使う)。
-# `default-features = false` にすると Reiny.toml の解決・型/トピック導出だけが残り、
-# prost-build / protoc を引かない(`reiny check` のような内省用途向け)。
+# Build scripts use proto compilation by default.
+# Without default features, main.yaml schema resolution and introspection remain
+# available without pulling in prost-build or protoc.
 default = ["compile"]
-# descriptor set の decode と指紋だけ(`reiny bag` が使う)。protoc は引かない。
+# Descriptor decoding and fingerprints do not require protoc.
 descriptors = ["dep:prost", "dep:prost-types"]
 compile = ["descriptors", "dep:prost-build", "dep:protoc-bin-vendored"]
 
 [dependencies]
 prost-build = { workspace = true, optional = true }
-# descriptor set の decode 用（型 → 指紋、区画が公開する FQN 一覧の両方をここから作る）。
+# Decode descriptors for fingerprints and schema-owned message names.
 prost = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
 protoc-bin-vendored = { workspace = true, optional = true }
 serde = { workspace = true }
 toml = { workspace = true }
+serde_yaml = "0.9"
 anyhow = { workspace = true }
 
 [lints]

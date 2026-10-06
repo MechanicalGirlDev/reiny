@@ -1,0 +1,63 @@
+version: 1
+deployment: "ping-pong-schema-split"
+providers:
+  process:
+    type: "process"
+    bin_dir: "target/debug"
+in: {}
+out:
+  pong_pong:
+    type: "pingpong.Pong"
+    from: "pong.pong"
+  ping_ping:
+    type: "pingpong.Ping"
+    from: "ping.ping"
+modules:
+  pong:
+    source: "pong"
+    in:
+      ping:
+        type: "pingpong.Ping"
+        from: "ping.ping"
+    out:
+      pong:
+        type: "pingpong.Pong"
+  ping:
+    source: "ping"
+    in:
+      pong:
+        type: "pingpong.Pong"
+        from: "pong.pong"
+    out:
+      ping:
+        type: "pingpong.Ping"
+schema:
+  internals:
+    Point:
+      proto: "proto/geometry/geometry.proto"
+      message: "pingpong.Point"
+    Ping:
+      proto: "proto/msg/pingpong.proto"
+      message: "pingpong.Ping"
+    Pong:
+      proto: "proto/msg/pingpong.proto"
+      message: "pingpong.Pong"
+  schema:
+    geometry:
+      crate: "pingpong-geometry"
+      protos: ["proto/geometry/geometry.proto"]
+    msg:
+      crate: "pingpong-msg"
+      protos: ["proto/msg/pingpong.proto"]
+      depends: ["geometry"]
+  projects:
+    ping:
+      version: "0.3.0"
+      description: "ping module"
+      publications: ["Ping"]
+      dependencies: ["Pong"]
+    pong:
+      version: "0.3.0"
+      description: "pong module"
+      publications: ["Pong"]
+      dependencies: ["Ping"]

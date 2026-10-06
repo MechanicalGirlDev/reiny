@@ -1,8 +1,4 @@
-//! pong — Ping を受け取るたびに、同じ seq の Pong を返す。
-//!
-//! 共有スキーマ版: 型は `[schema].crate`(pingpong-schema)が 1 度だけ生成したものを
-//! `crate::internals::*` として再エクスポートで受け取る(この launch では proto を再コンパイル
-//! しない)。
+//! pong demonstrates explicit typed ports in a namespaced deployment.
 
 use reiny::prelude::*;
 
@@ -10,10 +6,10 @@ use crate::internals::{Ping, Pong};
 
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {
-    let pongs = cloudy.publish::<Pong>()?;
-    let mut pings = cloudy.subscribe::<Ping>()?;
+    let pongs = cloudy.output::<Pong>("pong")?;
+    let mut pings = cloudy.input::<Ping>("ping")?;
+    cloudy.ready()?;
 
-    // Ping を受けるたびに、同じ seq で打ち返す。shutdown(Ctrl+C)で抜ける。
     while let Some(ping) = pings.recv().await {
         tracing::info!(seq = ping.seq, "← ping");
         pongs

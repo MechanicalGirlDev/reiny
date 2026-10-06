@@ -1,6 +1,4 @@
-//! Reiny.toml 駆動のコード生成。
-//! [publications]/[dependencies] の型に加え、[config] から型付き設定 `reiny::config::Config`
-//! を生成する(既定値はここ、上書きは起動時の設定ファイル)。
+//! Compile the nearest ancestor main.yaml build-time schema.
 fn main() {
-    reiny_build::compile().expect("reiny codegen from Reiny.toml");
+    reiny_build::compile().expect("reiny codegen from main.yaml schema");
 }

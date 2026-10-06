@@ -1,0 +1,37 @@
+version: 1
+in:
+  pong_1:
+    type: "pong.Pong"
+  pong_2:
+    type: "pong.Pong"
+  pong_3:
+    type: "pong.Pong"
+out:
+  ping:
+    type: "ping.Ping"
+run:
+  provider: "process"
+  bin: "ping"
+build:
+  type: "cargo"
+  manifest: "../Cargo.toml"
+  package: "ping"
+  profile: "debug"
+  features: []
+  default_features: true
+  locked: true
+schema:
+  project:
+    name: "ping"
+    version: "0.1.0"
+    description: "ping module"
+    authors: ["nop <noplab90@gmail.com>"]
+    license: "MIT"
+  publications:
+    Ping:
+      proto: "proto/ping.proto"
+      message: "ping.Ping"
+  dependencies:
+    pong:
+      version: "0.1"
+      path: "../pong"

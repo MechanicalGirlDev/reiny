@@ -74,13 +74,15 @@ fn list(bus: &BusArgs) -> Result<()> {
     let (session, domain) = bus.open()?;
     let srvs = alive_keys(
         &session,
-        &format!("{KEY_ROOT}/{domain}/*/*/{SERVICE_CHUNK}"),
+        &reiny::engine::Key::all(&domain)
+            .with_chunk(SERVICE_CHUNK)
+            .to_string(),
     )?;
     if srvs.is_empty() {
         println!("(no live servers in domain {domain})");
         return Ok(());
     }
-    let schemas = collect_schemas_all(&session, &format!("{KEY_ROOT}/{domain}/*/*"));
+    let schemas = collect_schemas_all(&session, &reiny::engine::Key::all(&domain).to_string());
 
     // type → (response fqn, servers)
     let mut rows: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
@@ -117,7 +119,7 @@ fn list(bus: &BusArgs) -> Result<()> {
 
 fn call(args: &CallArgs) -> Result<()> {
     let (session, domain) = args.bus.open()?;
-    let to = args.to.as_deref().unwrap_or("*");
+    let to = args.to.as_deref().unwrap_or("**");
     let key = format!("{KEY_ROOT}/{domain}/{to}/{}", args.ty);
 
     // The request / response descriptors come from the `@schema` the server announces.
