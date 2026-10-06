@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::file_lock::FileLock;
+
 /// Supported module build engines.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -82,8 +84,7 @@ pub(crate) fn prepare(
         .read(true)
         .write(true)
         .open(cache_dir.join("artifacts.lock"))?;
-    lock.try_lock()
-        .context("another artifact preparer holds the cache lock")?;
+    let _lock = FileLock::new(lock).context("another artifact preparer holds the cache lock")?;
     let mut command = Command::new("cargo");
     command
         .current_dir(&module_dir)
@@ -168,8 +169,7 @@ pub(crate) fn stage_prebuilt(executable: &Path, cache: &Path) -> Result<PathBuf>
         .read(true)
         .write(true)
         .open(cache.join("artifacts.lock"))?;
-    lock.try_lock()
-        .context("another artifact preparer holds the cache lock")?;
+    let _lock = FileLock::new(lock).context("another artifact preparer holds the cache lock")?;
     stage(executable, cache)
 }
 

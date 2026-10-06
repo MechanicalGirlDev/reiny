@@ -18,6 +18,7 @@ use process_wrap::tokio::{ChildWrapper, CommandWrap};
 use reiny_core::bindings::ModuleReport;
 use serde::{Deserialize, Serialize};
 
+use crate::file_lock::FileLock;
 use crate::modules::{FailurePolicy, RestartPolicy};
 use crate::prepared::{PreparedDeployment, PreparedModule, digest};
 
@@ -422,7 +423,7 @@ struct Owner<'a> {
     cache: PathBuf,
     listener: TcpListener,
     // Locks outlive both the process handles and endpoint cleanup.
-    locks: Vec<File>,
+    locks: Vec<FileLock>,
     children: BTreeMap<String, OwnedProcess>,
     retries: BTreeMap<String, Instant>,
     attempts: BTreeMap<String, u32>,
@@ -1173,16 +1174,15 @@ fn private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn lock_file(path: &Path) -> Result<File> {
+fn lock_file(path: &Path) -> Result<FileLock> {
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
         .open(path)?;
-    file.try_lock()
-        .with_context(|| format!("deployment already has an owner ({})", path.display()))?;
-    Ok(file)
+    FileLock::new(file)
+        .with_context(|| format!("deployment already has an owner ({})", path.display()))
 }
 
 fn nonce() -> Result<String> {

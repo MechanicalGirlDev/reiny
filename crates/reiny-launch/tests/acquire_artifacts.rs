@@ -5,6 +5,8 @@
 pub mod acquire;
 #[path = "../src/artifacts.rs"]
 pub mod artifacts;
+#[path = "../src/file_lock.rs"]
+mod file_lock;
 
 use std::fs;
 use std::io::{BufRead, BufReader};

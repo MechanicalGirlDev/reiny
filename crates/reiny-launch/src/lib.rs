@@ -6,6 +6,7 @@
 mod acquire;
 mod artifacts;
 mod deployment;
+mod file_lock;
 mod modules;
 mod prepared;
 

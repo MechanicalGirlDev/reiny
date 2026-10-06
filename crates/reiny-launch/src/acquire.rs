@@ -10,6 +10,8 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::file_lock::FileLock;
+
 /// A Git repository and an exact reference containing a module.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -50,7 +52,7 @@ pub(crate) struct SourceResolver {
     root: PathBuf,
     cache: PathBuf,
     update: bool,
-    lock: Option<File>,
+    lock: Option<FileLock>,
     records: BTreeMap<String, Record>,
     resolved: BTreeMap<(String, String), String>,
     failed: bool,
@@ -71,8 +73,7 @@ impl SourceResolver {
             .read(true)
             .write(true)
             .open(root.join(".reiny/source.lock"))?;
-        lock.try_lock()
-            .context("another source resolver holds the root lock")?;
+        let lock = FileLock::new(lock).context("another source resolver holds the root lock")?;
         let lock_path = root.join("lock.yaml");
         let records = if lock_path.exists() {
             let parsed: Lock = serde_yaml::from_slice(&fs::read(&lock_path)?)
