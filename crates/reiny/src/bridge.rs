@@ -56,6 +56,8 @@ impl Drop for Bridge {
 
 /// Join `a` and `b` in both directions. An error unless the ids and domains match. Call it inside a tokio runtime.
 pub fn forward(a: &Cloudy, b: &Cloudy) -> Result<Bridge> {
+    a.ensure_standalone()?;
+    b.ensure_standalone()?;
     if a.id() != b.id() || a.domain() != b.domain() {
         anyhow::bail!(
             "bridge: both sides must share id and domain (got {}/{} and {}/{})",
@@ -149,7 +151,7 @@ impl Flow {
             Key::topic(&domain, None, READY_CHUNK),
         ] {
             let tx = ops.clone();
-            watchers.push(from.engine().watch_alive(
+            watchers.push(from.engine()?.watch_alive(
                 &pattern,
                 Box::new(move |event| {
                     let _ = tx.send(Op::Presence(event));
@@ -159,8 +161,8 @@ impl Flow {
         let flow = Self {
             id: from.id().to_string(),
             domain,
-            from: Arc::clone(from.engine()),
-            into: Arc::clone(into.engine()),
+            from: Arc::clone(from.engine()?),
+            into: Arc::clone(into.engine()?),
             injected,
             echoes,
             subscriptions: HashMap::new(),
@@ -442,8 +444,8 @@ mod tests {
         );
         assert_eq!(b1.publishers::<Probe>().await.expect("publishers"), ["a1"]);
         // Our own launch is mirrored onto B as well.
-        let launches = bridge_b
-            .engine()
+        let engine = bridge_b.engine().expect("engine");
+        let launches = engine
             .alive(&Key::launch(DOMAIN, None), PATIENCE)
             .await
             .expect("alive");
@@ -508,7 +510,7 @@ mod tests {
                 .sum,
             5
         );
-        let caller = b1.caller::<Add>().to("a1").build();
+        let caller = b1.caller::<Add>().to("a1").build().expect("caller");
         assert_eq!(caller.call(Add { a: 1, b: 1 }).await.expect("to").sum, 2);
         assert!(matches!(
             caller.call(Add { a: 1, b: -1 }).await,

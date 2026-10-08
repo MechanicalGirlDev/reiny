@@ -138,6 +138,7 @@ async fn hierarchical_peer_namespace_keeps_type_identity_and_exact_routing() {
     ] {
         let mut replies = cloudy
             .engine()
+            .unwrap()
             .query(
                 &key,
                 QueryParams {
@@ -158,6 +159,7 @@ async fn hierarchical_peer_namespace_keeps_type_identity_and_exact_routing() {
             .caller::<Add>()
             .to(PEER)
             .build()
+            .unwrap()
             .call(Add { a: 2, b: 3 }),
     )
     .await
@@ -275,7 +277,8 @@ async fn cloudy_over_a_link() {
         .caller::<Add>()
         .to("ghost")
         .timeout(Duration::from_millis(500))
-        .build();
+        .build()
+        .unwrap();
     assert!(matches!(
         nobody.call(Add { a: 1, b: 1 }).await,
         Err(CallError::NoReply)

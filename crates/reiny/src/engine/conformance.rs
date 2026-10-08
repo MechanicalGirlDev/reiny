@@ -119,6 +119,7 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
     // --- launch presence: Cloudy::new raised @launch ---
     let launches = a
         .engine()
+        .expect("standalone engine")
         .alive(&Key::launch(DOMAIN, None), PATIENCE)
         .await
         .expect("alive");
@@ -361,7 +362,8 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
         .caller::<Add>()
         .to("a")
         .timeout(Duration::from_millis(500))
-        .build();
+        .build()
+        .expect("standalone caller");
     assert!(matches!(
         caller.call(Add { a: 1, b: -1 }).await,
         Err(CallError::Remote(m)) if m == "negative b"
@@ -378,7 +380,8 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
         .caller::<Add>()
         .to("ghost")
         .timeout(Duration::from_millis(500))
-        .build();
+        .build()
+        .expect("standalone caller");
     assert!(matches!(
         nobody.call(Add { a: 1, b: 1 }).await,
         Err(CallError::NoReply)

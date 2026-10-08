@@ -1,0 +1,6 @@
+syntax = "proto3";
+package owned;
+
+message State { uint32 value = 1; }
+message Add { uint32 a = 1; uint32 b = 2; }
+message Sum { uint32 sum = 1; }

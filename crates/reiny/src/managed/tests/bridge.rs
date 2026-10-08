@@ -5,9 +5,11 @@ async fn bridged_namespace_preserves_ready_stop_and_owner_departure() {
     // Given two engines with a bridge and an exact nested-module readiness watch on the far side.
     let left = Arc::new(Local::new());
     let right = Arc::new(Local::new());
-    let bridge_left = Cloudy::open(options(left.clone(), bindings("bridge")))
-        .await
-        .expect("left bridge");
+    let mut bridge_options = RuntimeOptions::new("bridge");
+    bridge_options.domain = DOMAIN.to_string();
+    bridge_options.module_report_path = None;
+    bridge_options.engine = Some(left.clone());
+    let bridge_left = Cloudy::open(bridge_options).await.expect("left bridge");
     let bridge_right = bridge_left
         .with_engine(right.clone())
         .await

@@ -133,6 +133,14 @@ impl<'a, T> PublisherBuilder<'a, T> {
     where
         T: Message + Topic,
     {
+        self.cloudy.ensure_standalone()?;
+        self.build_named()
+    }
+
+    pub(crate) fn build_named(self) -> Result<Publisher<T>>
+    where
+        T: Message + Topic,
+    {
         if let History::KeepLast(n) = self.qos.history
             && n != 1
         {
@@ -143,7 +151,7 @@ impl<'a, T> PublisherBuilder<'a, T> {
             );
         }
         let latched = self.qos.durability == Durability::TransientLocal;
-        let engine = self.cloudy.engine();
+        let engine = &self.cloudy.engine;
         let caps = engine.caps();
         if !caps.liveliness {
             anyhow::bail!(
@@ -157,7 +165,9 @@ impl<'a, T> PublisherBuilder<'a, T> {
                 T::TYPE
             );
         }
-        let key = self.cloudy.key_for(Some(self.cloudy.id()), T::TYPE);
+        let key = self
+            .cloudy
+            .key_for(Some(self.cloudy.endpoint_namespace()), T::TYPE);
         let publisher = engine.publisher(&key, &self.qos)?;
 
         let last: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
@@ -205,7 +215,7 @@ impl<'a, T> PublisherBuilder<'a, T> {
 pub(crate) fn declare_schema(cloudy: &Cloudy, key: &Key, descriptor: Descriptor) -> Result<Guard> {
     let reply_key = key.with_chunk(format!("{SCHEMA_CHUNK}/{}", descriptor.message));
     let callback_key = reply_key.clone();
-    cloudy.engine().respond(
+    cloudy.engine.respond(
         &reply_key,
         Box::new(move |query: Box<dyn RawQuery>| {
             if let Err(e) = query.reply(&callback_key, descriptor.file_set.to_vec(), None) {
@@ -236,7 +246,7 @@ fn declare_latch(
     schema: Option<u64>,
 ) -> Result<Guard> {
     let reply_key = key.clone();
-    cloudy.engine().respond(
+    cloudy.engine.respond(
         key,
         Box::new(move |query: Box<dyn RawQuery>| {
             // A query carrying a payload is a service call (`service.rs`). Ignore it, so that a launch
@@ -269,7 +279,7 @@ pub struct Publisher<T> {
     _schema: Option<Guard>,
     last: Arc<Mutex<Option<Vec<u8>>>>,
     _marker: PhantomData<T>,
-    pub(crate) managed: Option<Arc<()>>,
+    pub(crate) managed: Option<crate::managed::ManagedPort>,
 }
 
 impl<T: Message + Topic> Publisher<T> {
@@ -294,7 +304,7 @@ impl<T: Message + Topic> Publisher<T> {
 #[must_use = "a builder does nothing until .build()"]
 pub struct SubscriberBuilder<'a, T> {
     cloudy: &'a Cloudy,
-    from: Option<String>,
+    from: Vec<Option<String>>,
     latched: bool,
     latest: Option<usize>,
     _marker: PhantomData<T>,
@@ -304,7 +314,7 @@ impl<'a, T> SubscriberBuilder<'a, T> {
     pub(crate) fn new(cloudy: &'a Cloudy) -> Self {
         Self {
             cloudy,
-            from: None,
+            from: vec![None],
             latched: false,
             latest: None,
             _marker: PhantomData,
@@ -314,7 +324,12 @@ impl<'a, T> SubscriberBuilder<'a, T> {
     /// Subscribe to one launch id only. For setups where several launches publish the same type and the
     /// subscriber wants to pick which one it listens to.
     pub fn from(mut self, id: impl Into<String>) -> Self {
-        self.from = Some(id.into());
+        self.from = vec![Some(id.into())];
+        self
+    }
+
+    pub(crate) fn sources(mut self, sources: &[String]) -> Self {
+        self.from = sources.iter().cloned().map(Some).collect();
         self
     }
 
@@ -347,14 +362,16 @@ impl<'a, T> SubscriberBuilder<'a, T> {
     where
         T: Message + Default + Topic,
     {
-        let core = Core::declare(
-            self.cloudy,
-            T::TYPE,
-            self.from.as_deref(),
-            self.latched,
-            self.latest,
-        )?;
-        let engine = self.cloudy.engine();
+        self.cloudy.ensure_standalone()?;
+        self.build_named()
+    }
+
+    pub(crate) fn build_named(self) -> Result<Subscriber<T>>
+    where
+        T: Message + Default + Topic,
+    {
+        let core = Core::declare(self.cloudy, T::TYPE, &self.from, self.latched, self.latest)?;
+        let engine = &self.cloudy.engine;
         let caps = engine.caps();
 
         // Our own presence: `reiny/<domain>/<our id>/<T>/@sub`, whatever source the subscription
@@ -419,8 +436,9 @@ impl<'a> RawSubscriberBuilder<'a> {
 
     /// Declare the subscriber. The name must be one key segment — one type, no `*`.
     pub fn build(self) -> Result<RawSubscriber> {
+        self.cloudy.ensure_standalone()?;
         validate_segment("type", &self.ty)?;
-        let core = Core::declare(self.cloudy, &self.ty, None, self.latched, self.latest)?;
+        let core = Core::declare(self.cloudy, &self.ty, &[None], self.latched, self.latest)?;
         Ok(RawSubscriber { core })
     }
 }
@@ -577,7 +595,7 @@ pub struct Subscriber<T> {
     /// The sources already warned about a schema fingerprint mismatch (one warning per source).
     warned: HashSet<String>,
     _marker: PhantomData<T>,
-    pub(crate) managed: Option<Arc<()>>,
+    pub(crate) managed: Option<crate::managed::ManagedPort>,
 }
 
 impl<T> Subscriber<T> {
@@ -650,14 +668,13 @@ impl RawSubscriber {
 struct Core {
     chan: Chan,
     /// The subscription handle (merely held; dropping it undeclares).
-    _guard: Guard,
+    _guard: Vec<Guard>,
     /// The receive buffer's counters, shared with the engine's callback.
     counters: Arc<Counters>,
     /// What is needed to fire the latched query again (the engine and the subscription key).
     engine: Arc<dyn Engine>,
-    key: Key,
     /// The reply stream of the latched query in flight (fired on seeing presence).
-    latched: Option<Box<dyn RawReplies>>,
+    latched: VecDeque<Box<dyn RawReplies>>,
     /// Whether that reply stream is drained. True when none was ever fired.
     latched_done: bool,
     /// When latched, the stream watching publishers join and leave.
@@ -676,16 +693,16 @@ impl Core {
     fn declare(
         cloudy: &Cloudy,
         ty: &str,
-        from: Option<&str>,
+        from: &[Option<String>],
         latched: bool,
         latest: Option<usize>,
     ) -> Result<Self> {
-        if let Some(source) = from {
+        for source in from.iter().flatten() {
             crate::managed::config::validate_namespace(source)?;
         }
-        let engine = cloudy.engine();
+        let engine = &cloudy.engine;
         let caps = engine.caps();
-        if from.is_none() && !caps.wildcard_source {
+        if from.iter().any(Option::is_none) && !caps.wildcard_source {
             anyhow::bail!(
                 "subscriber of {ty}: this engine is point-to-point; name the source with `.from(id)`"
             );
@@ -695,7 +712,10 @@ impl Core {
                 "subscriber of {ty}: this engine has no query / liveliness, which latched needs"
             );
         }
-        let key = cloudy.key_for(from, ty);
+        let keys: Vec<_> = from
+            .iter()
+            .map(|source| cloudy.key_for(source.as_deref(), ty))
+            .collect();
 
         // reiny owns the receive buffer. The engine's callback only pushes onto it (and counts).
         let counters = Arc::new(Counters::default());
@@ -729,24 +749,28 @@ impl Core {
                 }),
             )
         };
-        let guard = engine.subscribe(&key, on_sample)?;
+        let on_sample: Arc<dyn Fn(Sample) + Send + Sync> = Arc::from(on_sample);
+        let mut guards = Vec::new();
+        for key in &keys {
+            let callback = Arc::clone(&on_sample);
+            guards.push(engine.subscribe(key, Box::new(move |sample| callback(sample)))?);
+        }
 
         // The latched query waits for presence before firing (see the comment on `latched()`).
         // Watching starts **after** subscribing, so live samples arriving while we wait are not lost.
         let presence = if latched {
-            Some(RawPresence::new(cloudy, &key)?)
+            Some(RawPresence::many(cloudy, &keys)?)
         } else {
             None
         };
 
-        tracing::debug!(key = %key, latched, latest = ?latest, "subscriber declared");
+        tracing::debug!(?keys, latched, latest = ?latest, "subscriber declared");
         Ok(Self {
             chan,
-            _guard: guard,
+            _guard: guards,
             counters,
             engine: Arc::clone(engine),
-            key,
-            latched: None,
+            latched: VecDeque::new(),
             latched_done: true,
             presence,
             presence_done: !latched,
@@ -762,7 +786,6 @@ impl Core {
         let Self {
             chan,
             engine,
-            key,
             latched,
             latched_done,
             presence,
@@ -780,14 +803,14 @@ impl Core {
                 event = recv_presence(presence.as_mut()), if !*presence_done => {
                     match event {
                         Some(engine::Presence::Joined(k)) => {
-                            if queried.insert(k.source.unwrap_or_default()) {
+                            if queried.insert(k.source.clone().unwrap_or_default()) {
                                 let params = QueryParams { payload: None, attachment: None, timeout: LATCHED_TIMEOUT };
-                                match engine.query(key, params) {
+                                match engine.query(&k, params) {
                                     Ok(replies) => {
-                                        *latched = Some(replies);
+                                        latched.push_back(replies);
                                         *latched_done = false;
                                     }
-                                    Err(e) => tracing::warn!(key = %key, error = %e, "latched get failed"),
+                                    Err(e) => tracing::warn!(key = %k, error = %e, "latched get failed"),
                                 }
                             }
                         }
@@ -796,9 +819,10 @@ impl Core {
                     }
                 }
                 // Drain the latched replies first (the stream is short-lived, so nothing starves).
-                reply = recv_reply(latched.as_mut()), if !*latched_done => {
+                reply = recv_reply(latched.front_mut()), if !*latched_done => {
                     let Some(reply) = reply else {
-                        *latched_done = true;
+                        latched.pop_front();
+                        *latched_done = latched.is_empty();
                         continue;
                     };
                     let Ok(sample) = reply else { continue };
@@ -946,16 +970,24 @@ pub struct RawPresence {
 
 impl RawPresence {
     pub(crate) fn new(cloudy: &Cloudy, key: &Key) -> Result<Self> {
+        Self::many(cloudy, std::slice::from_ref(key))
+    }
+
+    fn many(cloudy: &Cloudy, keys: &[Key]) -> Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let guard = cloudy.engine().watch_alive(
-            key,
-            Box::new(move |event| {
-                let _ = tx.send(event);
-            }),
-        )?;
+        let mut guards = Vec::new();
+        for key in keys {
+            let tx = tx.clone();
+            guards.push(cloudy.engine.watch_alive(
+                key,
+                Box::new(move |event| {
+                    let _ = tx.send(event);
+                }),
+            )?);
+        }
         Ok(Self {
             rx,
-            _guard: guard,
+            _guard: Box::new(guards),
             shutdown: cloudy.shutdown_handle(),
         })
     }

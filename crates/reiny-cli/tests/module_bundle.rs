@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, ensure};
-use reiny_launch::{DeploymentPlan, ModuleManifest, ModuleSource, ProviderKind};
+use reiny_launch::{DeploymentPlan, ModuleManifest, ModuleSource, PortSources, ProviderKind};
 
 fn write(path: &Path, text: &str) -> Result<()> {
     std::fs::create_dir_all(path.parent().context("fixture path has no parent")?)?;
@@ -25,7 +25,7 @@ fn fixture(root: &Path) -> Result<()> {
     write(
         &root.join("main.yaml"),
         r"
-version: 1
+version: 2
 deployment: robot
 domain: lab
 providers:
@@ -51,7 +51,7 @@ schema: {types: {unused: test.proto}}
     write(
         &root.join("definitions/publisher/main.yaml"),
         r"
-version: 1
+version: 2
 run: {provider: process, bin: worker}
 out: {tick: {type: demo.Tick}}
 ",
@@ -59,7 +59,7 @@ out: {tick: {type: demo.Tick}}
     write(
         &root.join("definitions/composite/main.yaml"),
         r"
-version: 1
+version: 2
 in: {tick: {type: demo.Tick}}
 modules:
   receiver:
@@ -72,8 +72,8 @@ out: {echo: {type: demo.Echo, from: receiver.echo}}
     write(
         &root.join("definitions/subscriber/main.yaml"),
         r"
-version: 1
-run: {provider: process, bin: worker, config: ../../configs/receiver.json}
+version: 2
+run: {provider: process, bin: worker, config: ../../configs/receiver.json, config_assets: [../assets/calibration.bin, main.yaml]}
 in: {tick: {type: demo.Tick}}
 out: {echo: {type: demo.Echo}}
 ",
@@ -142,8 +142,8 @@ fn bundle_preserves_invocations_and_bindings_when_sources_are_relocated() -> Res
     );
     let root_manifest = manifest(&output)?;
     assert_eq!(
-        root_manifest.outputs["echo"].from.as_deref(),
-        Some("arm.echo")
+        root_manifest.outputs["echo"].from.as_ref(),
+        Some(&PortSources::One("arm.echo".into()))
     );
     let ModuleSource::Local(arm_source) = &root_manifest.modules["arm"].source else {
         anyhow::bail!("bundle retained Git source")
@@ -152,8 +152,8 @@ fn bundle_preserves_invocations_and_bindings_when_sources_are_relocated() -> Res
     assert_eq!(
         manifest(&output.join(arm_source))?.modules["receiver"].inputs["tick"]
             .from
-            .as_deref(),
-        Some("in.tick")
+            .as_ref(),
+        Some(&PortSources::One("in.tick".into()))
     );
     assert!(root_manifest.build.is_none() && root_manifest.schema.is_none());
     assert!(
@@ -234,25 +234,36 @@ fn bundle_runs_and_retains_config_relative_assets_when_original_tree_is_removed(
 }
 
 #[test]
-fn bundle_rejects_unowned_external_config_when_relocation_cannot_preserve_it() -> Result<()> {
-    // Given an absolute config outside every owned module source tree.
+fn bundle_freezes_explicit_external_config_without_a_dangling_path() -> Result<()> {
+    // Given an explicitly selected config outside the app source tree.
     let workspace = tempfile::tempdir()?;
     let root = workspace.path().join("original");
     fixture(&root)?;
     let external = workspace.path().join("outside.json");
     write(&external, "{}")?;
     let mut leaf = manifest(&root.join("definitions/subscriber"))?;
-    leaf.run.as_mut().context("run missing")?.config = Some(external);
+    let run = leaf.run.as_mut().context("run missing")?;
+    run.config = Some(external.clone());
+    run.config_assets.clear();
     write(
         &root.join("definitions/subscriber/main.yaml"),
         &serde_yaml::to_string(&leaf)?,
     )?;
 
-    // When bundling attempts to relocate it.
-    let result = compress::compress(&root, &workspace.path().join("bundle"), None, false);
+    // When the snapshot is bundled and both original sources disappear.
+    let output = workspace.path().join("bundle");
+    compress::compress(&root, &output, None, false)?;
+    std::fs::remove_dir_all(root)?;
+    std::fs::remove_file(external)?;
 
-    // Then it fails explicitly instead of shipping a dangling path.
-    assert!(result.is_err());
+    // Then the selected config can be prepared entirely from distribution files.
+    let prepared = DeploymentPlan::load(&output, false)?.prepare()?;
+    let config = prepared.nodes[0]
+        .run
+        .config
+        .as_ref()
+        .context("config missing")?;
+    assert_eq!(std::fs::read_to_string(config)?, "{}");
     Ok(())
 }
 
@@ -327,7 +338,7 @@ fn bundle_keeps_distinct_builds_when_leaves_use_the_same_binary_name() -> Result
     write(
         &root.join("main.yaml"),
         r"
-version: 1
+version: 2
 deployment: twins
 providers: {process: {type: process}}
 modules:
@@ -340,7 +351,7 @@ modules:
         write(
             &dir.join("main.yaml"),
             r"
-version: 1
+version: 2
 run: {provider: process, bin: worker}
 build: {type: cargo, profile: dev, locked: false}
 schema: {types: {unused: test.proto}}
@@ -397,8 +408,8 @@ fn bundle_relocates_acquired_checkout_assets_when_cache_tree_is_removed() -> Res
     write(
         &checkout.join("module/main.yaml"),
         r"
-version: 1
-run: {provider: process, bin: worker, config: ../configs/app.json}
+version: 2
+run: {provider: process, bin: worker, config: ../configs/app.json, config_assets: [../assets/data]}
 out: {tick: {type: demo.Tick}}
 ",
     )?;
@@ -496,7 +507,7 @@ fn bundle_loads_native_runtime_libraries_when_original_binary_directory_is_remov
     );
     write(
         &root.join("main.yaml"),
-        "version: 1\ndeployment: native\nproviders: {process: {type: process, bin_dir: installed}}\nrun: {provider: process, bin: worker}\n",
+        "version: 2\ndeployment: native\nproviders: {process: {type: process, bin_dir: installed}}\nrun: {provider: process, bin: worker}\n",
     )?;
     let output = workspace.path().join("bundle");
 

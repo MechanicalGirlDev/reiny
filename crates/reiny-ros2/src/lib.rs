@@ -308,7 +308,7 @@ impl<'c> Ros<'c> {
                 QosProfile::from(&service_qos()),
             )
             .map_err(err)?;
-        let caller = self.cloudy.caller::<S>().build();
+        let caller = self.cloudy.caller::<S>().build()?;
         let name = name.to_string();
         self.spawn(async move {
             loop {

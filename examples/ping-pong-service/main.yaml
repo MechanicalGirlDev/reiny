@@ -1,4 +1,4 @@
-version: 1
+version: 2
 deployment: "ping-pong-service"
 providers:
   process:
@@ -13,7 +13,8 @@ modules:
     out: {}
   asker:
     source: "asker"
-    in: {}
+    in:
+      adder: { from: "calc.adder" }
     out: {}
 schema:
   internals:

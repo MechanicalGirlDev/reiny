@@ -21,6 +21,10 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
 That's the standalone API. A module started by a `main.yaml` deployment opens
 its declared ports by name with `cloudy.input::<T>(name)` and
 `cloudy.output::<T>(name)`, then calls `cloudy.ready()`.
+RPC inputs use `cloudy.uses::<S>(name)` and RPC outputs use
+`cloudy.provides::<S>(name)`. App manifests own transport and queue policy;
+project manifests select explicit sources and per-instance settings.
+Managed contexts cannot use raw data APIs or expose unrestricted engines.
 
 `#[reiny::main]` is re-exported from
 [`reiny-macros`](https://crates.io/crates/reiny-macros). Build-time code

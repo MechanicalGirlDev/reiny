@@ -15,11 +15,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use process_wrap::tokio::{ChildWrapper, CommandWrap};
-use reiny_core::bindings::ModuleReport;
+use reiny_core::bindings::{
+    CONTRACT_VERSION, EndpointContract, ModuleReport, PortKind, PortReport, Replay, Retention,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::file_lock::FileLock;
-use crate::modules::{FailurePolicy, RestartPolicy};
+use crate::modules::{FailurePolicy, RestartPolicy, RunKind};
 use crate::prepared::{PreparedDeployment, PreparedModule, digest};
 
 const TICK: Duration = Duration::from_millis(20);
@@ -56,12 +58,16 @@ pub enum DeploymentPhase {
     Starting,
     /// Every desired process and connected schema is ready.
     Ready,
+    /// Stop was requested; owned process trees have not yet been reaped.
+    Stopping,
     /// At least one desired process is unavailable or restarting.
     Degraded,
     /// Failure policy stopped the deployment until explicit apply.
     Suspended,
     /// All owned processes have been stopped and reaped.
     Stopped,
+    /// Every desired task finished successfully and its process tree was reaped.
+    Completed,
     /// A contract or owner operation failed.
     Failed,
 }
@@ -140,6 +146,7 @@ enum Action {
     Apply { prepared: Box<PreparedDeployment> },
     Stop,
     WaitStopped,
+    WaitTerminal,
     WaitReady { timeout_ms: u64 },
     WaitRevision { revision: u64, timeout_ms: u64 },
 }
@@ -229,6 +236,27 @@ impl DeploymentClient {
         })
     }
 
+    /// Wait until shutdown or successful completion has reaped all owned trees.
+    ///
+    /// Successful task completion leaves the owner available for later apply.
+    pub fn wait_terminal(&self) -> Result<DeploymentStatus> {
+        self.watch_terminal()?.wait()
+    }
+
+    /// Register a shutdown/completion subscription before triggering an action.
+    ///
+    /// Registration is acknowledged. Already-completed deployments notify the
+    /// subscription immediately; owner failure or disappearance returns an error.
+    pub fn watch_terminal(&self) -> Result<TerminalSubscription> {
+        let mut stream = self.open(Action::WaitTerminal, Some(IO_TIMEOUT))?;
+        decode_response(&mut stream, &self.control.owner_generation)?;
+        stream.set_read_timeout(None)?;
+        Ok(TerminalSubscription {
+            stream,
+            owner_generation: self.control.owner_generation.clone(),
+        })
+    }
+
     /// Wait on the owner's state events, rather than polling status files.
     pub fn wait_ready(&self, timeout: Duration) -> Result<DeploymentStatus> {
         self.request(
@@ -290,6 +318,27 @@ impl StopSubscription {
     }
 }
 
+/// An acknowledged subscription to successful task completion or shutdown.
+pub struct TerminalSubscription {
+    stream: TcpStream,
+    owner_generation: String,
+}
+
+impl TerminalSubscription {
+    /// Wait until all owned trees have been reaped, or the owner fails/disappears.
+    pub fn wait(mut self) -> Result<DeploymentStatus> {
+        let status = decode_response(&mut self.stream, &self.owner_generation)?;
+        ensure!(
+            matches!(
+                status.phase,
+                DeploymentPhase::Stopped | DeploymentPhase::Completed
+            ),
+            "deployment did not reach a clean terminal state"
+        );
+        Ok(status)
+    }
+}
+
 fn decode_response(stream: &mut TcpStream, owner_generation: &str) -> Result<DeploymentStatus> {
     let response: Response =
         read_frame(stream).context("deployment owner disappeared or stopped responding")?;
@@ -328,43 +377,55 @@ pub fn serve(
     on_listening: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     let mut owner = Owner::new(prepared, observer)?;
-    let result = (|| {
+    let mut result = (|| {
         on_listening()?;
         observer.configure(&owner.desired)?;
         owner.reconcile()?;
         owner.publish()?;
         owner.run(stop)
     })();
+    if let Err(error) = owner.stop_all() {
+        result = Err(match result {
+            Ok(()) => error,
+            Err(original) => original.context(format!("cleanup also failed: {error:#}")),
+        });
+    }
+    if let Err(error) = owner.remove_endpoint() {
+        result = Err(match result {
+            Ok(()) => error,
+            Err(original) => original.context(format!("endpoint cleanup also failed: {error:#}")),
+        });
+    }
+    owner.status.owner_alive = false;
     if let Err(error) = &result {
         owner.status.phase = DeploymentPhase::Failed;
         owner.status.error = Some(format!("{error:#}"));
-    }
-    let cleanup = owner.stop_all();
-    owner.status.owner_alive = false;
-    if result.is_ok() && cleanup.is_ok() {
+    } else {
         owner.status.phase = DeploymentPhase::Stopped;
     }
-    let persist = owner.publish();
+    if let Err(error) = owner.publish() {
+        result = Err(match result {
+            Ok(()) => error.context("persisting final deployment status"),
+            Err(original) => original.context(format!("final persistence also failed: {error:#}")),
+        });
+    }
     for waiter in owner.waiters.drain(..) {
-        let response = if matches!(waiter.action, Action::WaitStopped)
+        let response = if matches!(waiter.action, Action::WaitStopped | Action::WaitTerminal)
             && result.is_ok()
-            && cleanup.is_ok()
-            && persist.is_ok()
         {
             Ok(owner.status.clone())
         } else {
             Err(anyhow::anyhow!(
                 "deployment owner failed: {}",
-                owner
-                    .status
-                    .error
-                    .as_deref()
-                    .unwrap_or("cleanup or persistence failed")
+                result.as_ref().err().map_or_else(
+                    || "owner stopped before the requested state".to_owned(),
+                    |error| format!("{error:#}")
+                )
             ))
         };
         reply(waiter.stream, response);
     }
-    result.and(cleanup).and(persist)
+    result
 }
 
 struct OwnedProcess {
@@ -509,6 +570,11 @@ impl<'a> Owner<'a> {
                 .modules
                 .entry(node.namespace.clone())
                 .and_modify(|status| {
+                    if status.desired_fingerprint != node.fingerprint
+                        && status.phase == DeploymentPhase::Completed
+                    {
+                        status.phase = DeploymentPhase::Starting;
+                    }
                     status.desired_fingerprint.clone_from(&node.fingerprint);
                 })
                 .or_insert_with(|| ModuleStatus {
@@ -536,6 +602,7 @@ impl<'a> Owner<'a> {
             .context("state revision exhausted")?;
         atomic_json(&self.cache.join("state.json"), &self.status)?;
         self.published = Some(self.status.clone());
+        self.notify_waiters();
         Ok(())
     }
 
@@ -579,42 +646,35 @@ impl<'a> Owner<'a> {
                                 reply(connection.stream, result);
                             }
                             Action::Stop => {
-                                self.stop_all()?;
-                                self.status.phase = DeploymentPhase::Stopped;
-                                self.status.owner_alive = false;
-                                self.publish()?;
+                                let result = (|| {
+                                    self.stop_all()?;
+                                    self.remove_endpoint()?;
+                                    self.status.phase = DeploymentPhase::Stopped;
+                                    self.status.owner_alive = false;
+                                    self.publish()
+                                })();
+                                if let Err(error) = result {
+                                    reply(connection.stream, Err(anyhow::anyhow!("{error:#}")));
+                                    return Err(error);
+                                }
                                 reply(connection.stream, Ok(self.status.clone()));
                                 return Ok(());
                             }
-                            Action::WaitStopped => {
+                            action @ (Action::WaitStopped | Action::WaitTerminal) => {
                                 reply(connection.stream.try_clone()?, Ok(self.status.clone()));
                                 self.waiters.push(Waiter {
                                     stream: connection.stream,
-                                    action: Action::WaitStopped,
+                                    action,
                                     deadline: None,
                                 });
                             }
-                            Action::WaitReady { timeout_ms } => {
+                            action @ (Action::WaitReady { timeout_ms }
+                            | Action::WaitRevision { timeout_ms, .. }) => {
                                 let timeout = Duration::from_millis(timeout_ms)
                                     .min(Duration::from_secs(3600));
                                 self.waiters.push(Waiter {
                                     stream: connection.stream,
-                                    action: Action::WaitReady { timeout_ms },
-                                    deadline: Some(Instant::now() + timeout),
-                                });
-                            }
-                            Action::WaitRevision {
-                                revision,
-                                timeout_ms,
-                            } => {
-                                let timeout = Duration::from_millis(timeout_ms)
-                                    .min(Duration::from_secs(3600));
-                                self.waiters.push(Waiter {
-                                    stream: connection.stream,
-                                    action: Action::WaitRevision {
-                                        revision,
-                                        timeout_ms,
-                                    },
+                                    action,
                                     deadline: Some(Instant::now() + timeout),
                                 });
                             }
@@ -627,26 +687,35 @@ impl<'a> Owner<'a> {
                     }
                 }
             }
-            let mut index = 0;
-            while index < self.waiters.len() {
-                let outcome = self.wait_outcome(&self.waiters[index]);
-                if let Some(outcome) = outcome {
-                    let waiter = self.waiters.swap_remove(index);
-                    reply(waiter.stream, outcome);
-                } else {
-                    index += 1;
-                }
-            }
+            self.notify_waiters();
             std::thread::park_timeout(TICK);
         }
         Ok(())
     }
 
+    fn notify_waiters(&mut self) {
+        let mut index = 0;
+        while index < self.waiters.len() {
+            let outcome = self.wait_outcome(&self.waiters[index]);
+            if let Some(outcome) = outcome {
+                let waiter = self.waiters.swap_remove(index);
+                reply(waiter.stream, outcome);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
     fn wait_outcome(&self, waiter: &Waiter) -> Option<Result<DeploymentStatus>> {
         match waiter.action {
             Action::WaitReady { .. } => match self.status.phase {
-                DeploymentPhase::Ready => return Some(Ok(self.status.clone())),
-                DeploymentPhase::Failed | DeploymentPhase::Suspended | DeploymentPhase::Stopped => {
+                DeploymentPhase::Ready | DeploymentPhase::Completed => {
+                    return Some(Ok(self.status.clone()));
+                }
+                DeploymentPhase::Failed
+                | DeploymentPhase::Suspended
+                | DeploymentPhase::Stopped
+                | DeploymentPhase::Stopping => {
                     return Some(Err(anyhow::anyhow!(
                         "deployment {:?}: {}",
                         self.status.phase,
@@ -658,7 +727,15 @@ impl<'a> Owner<'a> {
             Action::WaitRevision { revision, .. } if self.status.revision > revision => {
                 return Some(Ok(self.status.clone()));
             }
-            Action::WaitRevision { .. } | Action::WaitStopped => {}
+            Action::WaitTerminal
+                if matches!(
+                    self.status.phase,
+                    DeploymentPhase::Stopped | DeploymentPhase::Completed
+                ) =>
+            {
+                return Some(Ok(self.status.clone()));
+            }
+            Action::WaitRevision { .. } | Action::WaitStopped | Action::WaitTerminal => {}
             Action::Status | Action::Apply { .. } | Action::Stop => {
                 return Some(Err(anyhow::anyhow!("invalid wait request")));
             }
@@ -683,6 +760,19 @@ impl Drop for Owner<'_> {
 }
 
 impl Owner<'_> {
+    fn remove_endpoint(&self) -> Result<()> {
+        match std::fs::remove_file(self.cache.join("control.json")) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "removing owner endpoint {}",
+                    self.cache.join("control.json").display()
+                )
+            }),
+        }
+    }
+
     fn apply(&mut self, mut prepared: PreparedDeployment) -> Result<()> {
         prepared.root = std::fs::canonicalize(&prepared.root)?;
         validate_prepared(&prepared)?;
@@ -730,7 +820,14 @@ impl Owner<'_> {
             .desired
             .nodes
             .iter()
-            .filter(|node| !self.children.contains_key(&node.namespace))
+            .filter(|node| {
+                !self.children.contains_key(&node.namespace)
+                    && !self
+                        .status
+                        .modules
+                        .get(&node.namespace)
+                        .is_some_and(|status| status.phase == DeploymentPhase::Completed)
+            })
             .cloned()
             .collect();
         for node in missing {
@@ -772,9 +869,14 @@ impl Owner<'_> {
             .arg("--module-bindings")
             .arg(&bindings_path)
             .env("REINY_MODULE_REPORT", &report_path)
+            .env("REINY_BUNDLE_DIR", &node.bundle_dir)
+            .env_remove("REINY_CONFIG_DIR")
             .stdin(Stdio::null())
             .stdout(stdout)
             .stderr(stderr);
+        if let Some(directory) = &node.config_dir {
+            command.env("REINY_CONFIG_DIR", directory);
+        }
         if let Some(config) = &node.run.config {
             command.arg("--config").arg(config);
         }
@@ -821,7 +923,11 @@ impl Owner<'_> {
 
     fn observe(&mut self) -> Result<()> {
         match self.status.phase {
-            DeploymentPhase::Suspended | DeploymentPhase::Stopped | DeploymentPhase::Failed => {
+            DeploymentPhase::Suspended
+            | DeploymentPhase::Stopping
+            | DeploymentPhase::Stopped
+            | DeploymentPhase::Completed
+            | DeploymentPhase::Failed => {
                 return Ok(());
             }
             DeploymentPhase::Starting | DeploymentPhase::Ready | DeploymentPhase::Degraded => {}
@@ -852,11 +958,12 @@ impl Owner<'_> {
                 self.failed(&name, &format!("{error:#}"), true)?;
             }
         }
-        let all_ready = self
-            .status
-            .modules
-            .values()
-            .all(|status| status.phase == DeploymentPhase::Ready);
+        let all_ready = self.status.modules.values().all(|status| {
+            matches!(
+                status.phase,
+                DeploymentPhase::Ready | DeploymentPhase::Completed
+            )
+        });
         if all_ready {
             if let Err(error) = self.validate_connections() {
                 self.status.error = Some(format!("{error:#}"));
@@ -872,7 +979,17 @@ impl Owner<'_> {
                     DeploymentPhase::Failed
                 };
             } else {
-                self.status.phase = DeploymentPhase::Ready;
+                self.status.phase = if !self.status.modules.is_empty()
+                    && self
+                        .status
+                        .modules
+                        .values()
+                        .all(|status| status.phase == DeploymentPhase::Completed)
+                {
+                    DeploymentPhase::Completed
+                } else {
+                    DeploymentPhase::Ready
+                };
             }
         } else if self
             .status
@@ -881,11 +998,12 @@ impl Owner<'_> {
             .any(|status| status.phase == DeploymentPhase::Failed)
         {
             if self.retries.is_empty()
-                && self
-                    .status
-                    .modules
-                    .values()
-                    .all(|status| status.phase == DeploymentPhase::Failed)
+                && self.status.modules.values().all(|status| {
+                    matches!(
+                        status.phase,
+                        DeploymentPhase::Failed | DeploymentPhase::Completed
+                    )
+                })
             {
                 self.status.phase = DeploymentPhase::Failed;
                 self.status.error = self
@@ -917,10 +1035,21 @@ impl Owner<'_> {
                 .iter()
                 .find(|node| node.namespace == name)
                 .context("missing desired module")?;
+            if node.run.kind == RunKind::Task && success {
+                let status = self
+                    .status
+                    .modules
+                    .get_mut(name)
+                    .context("missing task status")?;
+                status.phase = DeploymentPhase::Completed;
+                status.pid = None;
+                status.actual_fingerprint = None;
+                status.error = None;
+                return Ok(());
+            }
             let restart = match node.run.restart {
                 RestartPolicy::Manual => false,
-                RestartPolicy::OnFailure => !success,
-                RestartPolicy::Always => true,
+                RestartPolicy::OnFailure | RestartPolicy::Always => true,
             };
             return self.failed(name, &format!("process exited: {exit}"), restart);
         }
@@ -986,6 +1115,9 @@ impl Owner<'_> {
 
     fn validate_connections(&self) -> Result<()> {
         for node in &self.desired.nodes {
+            if node.bindings.inputs.is_empty() {
+                continue;
+            }
             let report = self
                 .status
                 .modules
@@ -994,39 +1126,49 @@ impl Owner<'_> {
                 .context("missing ready module report")?;
             for (port, input) in &node.bindings.inputs {
                 let actual = report.inputs.get(port).context("missing actual input")?;
-                let source = self
-                    .status
-                    .modules
-                    .get(&input.source)
-                    .and_then(|status| status.report.as_ref())
-                    .with_context(|| {
-                        format!(
-                            "input {}/{port} has no ready source {}",
-                            node.namespace, input.source
-                        )
-                    })?;
-                let outputs: Vec<_> = source
-                    .outputs
-                    .values()
-                    .filter(|output| type_matches(&input.type_name, &output.type_name))
-                    .collect();
                 ensure!(
-                    !outputs.is_empty(),
-                    "source {} does not implement {}",
-                    input.source,
-                    input.type_name
+                    !input.sources.is_empty(),
+                    "input {}/{port} has no sources",
+                    node.namespace
                 );
-                for output in outputs {
+                for namespace in &input.sources {
+                    let source = self
+                        .status
+                        .modules
+                        .get(namespace)
+                        .and_then(|status| status.report.as_ref())
+                        .with_context(|| {
+                            format!(
+                                "input {}/{port} has no ready source {namespace}",
+                                node.namespace
+                            )
+                        })?;
+                    let outputs: Vec<_> = source
+                        .outputs
+                        .values()
+                        .filter(|output| type_matches(&input.contract.type_name, &output.type_name))
+                        .collect();
                     ensure!(
-                        actual.type_name == output.type_name && actual.schema == output.schema,
-                        "schema mismatch for {}/{port}: input {}#{:016x}, source {} {}#{:016x}",
-                        node.namespace,
-                        actual.type_name,
-                        actual.schema,
-                        input.source,
-                        output.type_name,
-                        output.schema
+                        !outputs.is_empty(),
+                        "source {namespace} does not implement {}",
+                        input.contract.type_name
                     );
+                    for output in outputs {
+                        ensure!(
+                            actual.type_name == output.type_name
+                                && actual.schema == output.schema
+                                && actual.response == output.response,
+                            "schema mismatch for {}/{port} from {namespace}",
+                            node.namespace
+                        );
+                        ensure!(
+                            actual.contract.kind == output.contract.kind
+                                && (actual.contract.replay != Replay::Last
+                                    || output.contract.retention == Retention::Last),
+                            "effective policy mismatch for {}/{port} from {namespace}",
+                            node.namespace
+                        );
+                    }
                 }
             }
         }
@@ -1073,6 +1215,25 @@ impl Owner<'_> {
     }
 
     fn stop_names(&mut self, names: &[String]) -> Result<()> {
+        let mut errors = Vec::new();
+        let stopping: Vec<_> = names
+            .iter()
+            .filter(|name| self.children.contains_key(*name))
+            .collect();
+        if !stopping.is_empty() {
+            self.status.phase = DeploymentPhase::Stopping;
+            for name in stopping {
+                let status = self
+                    .status
+                    .modules
+                    .get_mut(name)
+                    .context("missing stopping module status")?;
+                status.phase = DeploymentPhase::Stopping;
+            }
+            if let Err(error) = self.publish() {
+                errors.push(format!("persisting stopping state: {error:#}"));
+            }
+        }
         for name in names {
             if self.children.contains_key(name)
                 && let Err(error) = self.observer.request_stop(name)
@@ -1095,17 +1256,34 @@ impl Owner<'_> {
                     .context("missing stopping process")?;
                 // Poll the leader only: JobObject::try_wait consumes the group's
                 // completion-port notification that terminate().wait() needs.
-                if process.child.inner_mut().try_wait()?.is_some() || Instant::now() >= deadline {
-                    done.push(name.clone());
+                match process.child.inner_mut().try_wait() {
+                    Ok(exit) if exit.is_some() || Instant::now() >= deadline => {
+                        done.push(name.clone());
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        errors.push(format!("{name}: observing stopping process: {error}"));
+                        done.push(name.clone());
+                    }
                 }
             }
             for name in done {
-                self.children
+                let result = self
+                    .children
                     .get_mut(&name)
                     .context("missing stopping process")?
-                    .terminate()?;
-                self.children.remove(&name);
+                    .terminate();
                 pending.remove(&name);
+                if let Err(error) = result {
+                    let error = format!("{name}: {error:#}");
+                    if let Some(status) = self.status.modules.get_mut(&name) {
+                        status.phase = DeploymentPhase::Failed;
+                        status.error = Some(error.clone());
+                    }
+                    errors.push(error);
+                    continue;
+                }
+                self.children.remove(&name);
                 if let Some(status) = self.status.modules.get_mut(&name) {
                     status.pid = None;
                     status.actual_fingerprint = None;
@@ -1117,6 +1295,11 @@ impl Owner<'_> {
                 std::thread::park_timeout(TICK);
             }
         }
+        ensure!(
+            errors.is_empty(),
+            "owned process cleanup failed: {}",
+            errors.join("; ")
+        );
         Ok(())
     }
 
@@ -1133,7 +1316,7 @@ fn type_matches(expected: &str, actual: &str) -> bool {
 
 fn validate_report(node: &PreparedModule, report: &ModuleReport) -> Result<()> {
     ensure!(
-        report.version == 1 && report.namespace == node.namespace,
+        report.version == CONTRACT_VERSION && report.namespace == node.namespace,
         "readiness report identity mismatch"
     );
     ensure!(
@@ -1142,26 +1325,48 @@ fn validate_report(node: &PreparedModule, report: &ModuleReport) -> Result<()> {
         "readiness report port count mismatch"
     );
     for (port, binding) in &node.bindings.inputs {
+        crate::modules::validate_contract(&node.namespace, &binding.contract, true)?;
         let actual = report
             .inputs
             .get(port)
             .with_context(|| format!("missing input report {port}"))?;
-        ensure!(
-            type_matches(&binding.type_name, &actual.type_name) && actual.schema != 0,
-            "input {port} has an invalid type or schema"
-        );
+        validate_port_report(&binding.contract, actual)
+            .with_context(|| format!("invalid input report {port}"))?;
     }
     for (port, binding) in &node.bindings.outputs {
+        crate::modules::validate_contract(&node.namespace, &binding.contract, false)?;
         let actual = report
             .outputs
             .get(port)
             .with_context(|| format!("missing output report {port}"))?;
-        ensure!(
-            type_matches(&binding.type_name, &actual.type_name) && actual.schema != 0,
-            "output {port} has an invalid type or schema"
-        );
+        validate_port_report(&binding.contract, actual)
+            .with_context(|| format!("invalid output report {port}"))?;
     }
     Ok(())
+}
+
+fn validate_port_report(expected: &EndpointContract, actual: &PortReport) -> Result<()> {
+    ensure!(
+        type_matches(&expected.type_name, &actual.type_name),
+        "invalid type"
+    );
+    ensure!(
+        &actual.contract == expected,
+        "effective endpoint contract mismatch"
+    );
+    match (expected.kind, &expected.response, &actual.response) {
+        (PortKind::Stream, None, None) => Ok(()),
+        (PortKind::Rpc, Some(expected), Some(response)) => {
+            ensure!(
+                type_matches(expected, &response.type_name),
+                "invalid RPC response type"
+            );
+            Ok(())
+        }
+        (PortKind::Stream | PortKind::Rpc, _, _) => {
+            bail!("endpoint operation and response report mismatch")
+        }
+    }
 }
 
 fn private_directory(path: &Path) -> Result<()> {
@@ -1197,7 +1402,10 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     serde_json::to_writer(temporary.as_file_mut(), value)?;
     temporary.as_file().sync_all()?;
-    temporary.persist(path).map_err(|error| error.error)?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("persisting {}", path.display()))?;
     Ok(())
 }
 
@@ -1291,6 +1499,7 @@ fn validate_prepared(prepared: &PreparedDeployment) -> Result<()> {
     );
     let mut names = BTreeSet::new();
     for node in &prepared.nodes {
+        node.run.validate(&node.namespace)?;
         ensure!(
             names.insert(&node.namespace),
             "duplicate module namespace {}",
@@ -1303,7 +1512,9 @@ fn validate_prepared(prepared: &PreparedDeployment) -> Result<()> {
             "module namespace is outside deployment"
         );
         ensure!(
-            node.bindings.version == 1 && node.bindings.namespace == node.namespace,
+            node.bindings.version == CONTRACT_VERSION
+                && node.bindings.namespace == node.namespace
+                && node.bindings.endpoint_namespace == node.namespace,
             "invalid module bindings identity"
         );
         ensure!(!node.fingerprint.is_empty(), "missing prepared fingerprint");
@@ -1313,9 +1524,92 @@ fn validate_prepared(prepared: &PreparedDeployment) -> Result<()> {
             node.executable.display()
         );
         ensure!(
+            node.bundle_dir.is_absolute()
+                && node.bundle_dir.is_dir()
+                && node.executable.parent() == Some(node.bundle_dir.as_path())
+                && std::fs::canonicalize(&node.executable)?.parent()
+                    == Some(std::fs::canonicalize(&node.bundle_dir)?.as_path()),
+            "prepared executable is outside its exact bundle directory"
+        );
+        match (&node.run.config, &node.config_dir) {
+            (Some(config), Some(directory)) => {
+                ensure!(
+                    directory.is_absolute()
+                        && directory.is_dir()
+                        && config.is_absolute()
+                        && config.is_file()
+                        && config.parent() == Some(directory.as_path()),
+                    "prepared config is outside its exact config directory"
+                );
+            }
+            (None, None) => {}
+            (Some(_), None) | (None, Some(_)) => {
+                bail!("prepared config directory does not match application config")
+            }
+        }
+        ensure!(
             node.module_dir.is_absolute() && node.module_dir.is_dir(),
             "invalid module directory"
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoProcesses;
+
+    impl ModuleObserver for NoProcesses {
+        fn ready(&self, _namespace: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn request_stop(&self, _namespace: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn completed_revision_notifies_before_the_next_desired_state() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let prepared = PreparedDeployment {
+            root: root.path().to_owned(),
+            deployment: format!(
+                "terminal-{}",
+                root.path()
+                    .file_name()
+                    .context("temp directory")?
+                    .to_string_lossy()
+            ),
+            domain: "terminal-tests".into(),
+            nodes: Vec::new(),
+            resources: BTreeMap::new(),
+        };
+        let mut owner = Owner::new(prepared, &NoProcesses)?;
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let stream = TcpStream::connect(listener.local_addr()?)?;
+        stream.set_read_timeout(Some(IO_TIMEOUT))?;
+        let subscription = TerminalSubscription {
+            stream,
+            owner_generation: owner.status.owner_generation.clone(),
+        };
+        owner.waiters.push(Waiter {
+            stream: listener.accept()?.0,
+            action: Action::WaitTerminal,
+            deadline: None,
+        });
+        owner.status.phase = DeploymentPhase::Completed;
+        owner.publish()?;
+        let completed_revision = owner.status.revision;
+        owner.status.phase = DeploymentPhase::Starting;
+        owner.publish()?;
+        let completed = subscription.wait()?;
+        assert_eq!(completed.phase, DeploymentPhase::Completed);
+        assert_eq!(completed.revision, completed_revision);
+        assert!(completed.owner_alive);
+        assert!(owner.waiters.is_empty());
+        Ok(())
+    }
 }

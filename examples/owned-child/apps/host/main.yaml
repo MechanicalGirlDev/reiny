@@ -1,0 +1,17 @@
+version: 2
+run:
+  provider: process
+  bin: host
+  companions: [driver]
+build:
+  type: cargo
+  manifest: ../../Cargo.toml
+  package: owned_child_example
+  profile: dev
+  locked: true
+out:
+  state: {type: owned.State, retention: last}
+  adder: {kind: rpc, type: owned.Add, response: owned.Sum}
+owned_children:
+  driver:
+    outputs: [state, adder]

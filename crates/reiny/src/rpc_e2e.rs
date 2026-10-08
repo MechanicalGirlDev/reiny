@@ -157,7 +157,8 @@ async fn services_round_trip_presence_and_latched_coexistence() {
         .caller::<Add>()
         .to("srv")
         .timeout(Duration::from_secs(2))
-        .build();
+        .build()
+        .expect("standalone caller");
     assert_eq!(
         caller.call(Add { a: 10, b: 1 }).await.expect("call").sum,
         11
@@ -168,7 +169,8 @@ async fn services_round_trip_presence_and_latched_coexistence() {
         .caller::<Add>()
         .to("ghost")
         .timeout(Duration::from_secs(2))
-        .build();
+        .build()
+        .expect("standalone caller");
     assert!(matches!(
         nobody.call(Add { a: 1, b: 1 }).await,
         Err(CallError::NoReply)
@@ -185,7 +187,8 @@ async fn services_round_trip_presence_and_latched_coexistence() {
         .caller::<Add>()
         .to("srv")
         .timeout(Duration::from_millis(500))
-        .build();
+        .build()
+        .expect("standalone caller");
     let held = impatient.call(Add { a: 1, b: 7 }).await;
     assert!(matches!(held, Err(CallError::Timeout)), "{held:?}");
 
@@ -194,7 +197,8 @@ async fn services_round_trip_presence_and_latched_coexistence() {
         .caller::<AddV2>()
         .to("srv")
         .timeout(Duration::from_secs(2))
-        .build();
+        .build()
+        .expect("standalone caller");
     assert!(matches!(
         mismatched.call(AddV2 { a: 1, b: 1 }).await,
         Err(CallError::Remote(m)) if m.contains("fingerprint")
@@ -255,6 +259,7 @@ async fn services_round_trip_presence_and_latched_coexistence() {
         .to("cli2")
         .timeout(Duration::from_secs(2))
         .build()
+        .expect("standalone caller")
         .call(Cfg { rev: 5 })
         .await
         .expect("call cfg");

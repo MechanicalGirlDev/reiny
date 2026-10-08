@@ -40,6 +40,10 @@ impl Cloudy {
         if let Some(bindings) = &bindings {
             managed_config::validate_bindings(bindings, &opts.id)?;
         }
+        anyhow::ensure!(
+            bindings.is_some() || std::env::var_os(MODULE_REPORT_ENV).is_none(),
+            "a deployment-owned process cannot open a standalone context"
+        );
         if let Some(path) = &opts.module_report_path {
             anyhow::ensure!(
                 path.is_absolute(),
@@ -63,7 +67,14 @@ impl Cloudy {
         } else {
             load_config(opts.config_path.as_deref())
         };
+        #[cfg(feature = "zenoh")]
+        let child_zenoh_config = if bindings.is_some() && opts.engine.is_none() {
+            Some(crate::managed::child_zenoh_config(opts.zenoh_config()?)?)
+        } else {
+            None
+        };
         let engine = opts.take_engine().await?;
+        crate::managed::check_engine(&engine, bindings.is_some())?;
         tracing::info!(id = %opts.id, domain = %opts.domain, "reiny launch up");
         let mut cloudy = Self::new(
             engine,
@@ -75,6 +86,10 @@ impl Cloudy {
         )
         .await?;
         cloudy.configure_module(bindings, opts.module_report_path)?;
+        #[cfg(feature = "zenoh")]
+        {
+            cloudy.module.child_zenoh_config = child_zenoh_config;
+        }
         Ok(cloudy)
     }
 }

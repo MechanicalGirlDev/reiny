@@ -1,0 +1,12 @@
+version: 2
+deployment: "ping-pong-relay-local"
+providers:
+  process:
+    type: "process"
+    bin_dir: "../../target/debug"
+modules:
+  pipeline:
+    source: "../../apps/pipeline"
+out:
+  relay_relayed: { from: "pipeline.relay_relayed" }
+  ping_ping: { from: "pipeline.ping_ping" }

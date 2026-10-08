@@ -129,8 +129,8 @@ async fn undefined_and_wrong_type_ports_fail_before_registration() {
     contract.inputs.insert(
         "incoming".to_string(),
         InputBinding {
-            type_name: "other.Probe".to_string(),
-            source: SENDER.to_string(),
+            contract: super::contract("other.Probe"),
+            sources: vec![SENDER.to_string()],
         },
     );
     let cloudy = Cloudy::open(options(Arc::new(Local::new()), contract))
@@ -150,14 +150,14 @@ async fn managed_ports_reject_compiled_types_without_fingerprints() {
     contract.inputs.insert(
         "incoming".to_string(),
         InputBinding {
-            type_name: "Probe".to_string(),
-            source: SENDER.to_string(),
+            contract: super::contract("Probe"),
+            sources: vec![SENDER.to_string()],
         },
     );
     contract.outputs.insert(
         "outgoing".to_string(),
         OutputBinding {
-            type_name: "Probe".to_string(),
+            contract: super::contract("Probe"),
         },
     );
     let cloudy = Cloudy::open(options(Arc::new(Local::new()), contract))
@@ -177,7 +177,7 @@ async fn duplicate_transport_outputs_fail_even_when_declared_names_differ() {
         contract.outputs.insert(
             name.to_string(),
             OutputBinding {
-                type_name: ty.to_string(),
+                contract: super::contract(ty),
             },
         );
     }

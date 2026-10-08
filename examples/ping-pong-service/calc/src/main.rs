@@ -6,7 +6,7 @@ use crate::internals::{Add, Sum};
 
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {
-    let mut adds = cloudy.serve::<Add>()?;
+    let mut adds = cloudy.provides::<Add>("adder")?;
     cloudy.ready()?;
 
     while let Some(req) = adds.recv().await {

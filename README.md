@@ -35,6 +35,9 @@ deployment opens its declared ports by name instead
 (`cloudy.input::<Pong>("pong")`, `cloudy.output::<Ping>("ping")`, then
 `cloudy.ready()`), so the deployment decides who talks to whom. See
 [`docs/modules.md`](docs/modules.md).
+Version 2 app manifests own endpoint policies and executable definitions;
+project manifests reuse them through `source` and supply instance wiring and
+configuration. The [0.8 migration guide](docs/design/0.8.0.md) covers upgrades.
 
 Request/response rides the same model — the **request type is the address**:
 
@@ -160,6 +163,8 @@ catalog across several independently publishable schema crates without
 generating shared leaf types twice.
 [`examples/ping-pong-service`](examples/ping-pong-service) is the request/response
 sample (`services` in the `main.yaml` schema block).
+[`examples/owned-child`](examples/owned-child) demonstrates an app-owned helper
+with delegated retained state and RPC endpoints, plus a standalone probe.
 
 ## License
 

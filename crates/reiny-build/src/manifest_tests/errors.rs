@@ -7,7 +7,7 @@ fn main_manifest_requires_supported_version_and_valid_schema() {
         ("missing-version", "schema: { project: { name: app } }\n"),
         (
             "wrong-version",
-            "version: 2\nschema: { project: { name: app } }\n",
+            "version: 3\nschema: { project: { name: app } }\n",
         ),
         (
             "bad-schema",

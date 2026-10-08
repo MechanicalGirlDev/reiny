@@ -1,0 +1,18 @@
+version: 2
+in:
+  ping:
+    type: "ping.Ping"
+out:
+  relayed:
+    type: "relay.Relayed"
+run:
+  provider: "process"
+  bin: "relay"
+build:
+  type: "cargo"
+  manifest: "../../Cargo.toml"
+  package: "relay"
+  profile: "debug"
+  features: []
+  default_features: true
+  locked: true

@@ -5,6 +5,35 @@ All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
 `reiny-launch`, `reiny-cli`, `reiny-ffi`).
 Versions are kept in lockstep via `[workspace.package].version`.
 
+## 0.8.0 - 2026-10-08
+
+**Breaking.** Runtime manifests, managed bindings, and compiled reports use
+version 2. Rebuild managed binaries; v1 is rejected rather than silently
+weakened. Topic keys and Link type hashes remain unchanged.
+
+### Added
+- App-owned endpoint policies: output QoS and retained history, input replay
+  and receive queues, explicit exact-source stream fan-in, and named RPC
+  request/response contracts with both compiled schema fingerprints.
+- Executable-call `config` and replacing `args` overrides. Projects can reuse
+  `apps/<name>/main.yaml` without copying leaf contracts or repeating types.
+- Declared owned-child endpoint delegation with separate runtime readiness
+  identities, host endpoint addresses, dedicated reports, and process reaping.
+- Immutable host/companion/runtime-library bundles and configuration snapshots,
+  including explicitly declared origin-relative assets.
+- Finite `run.kind: task` completion, distinct from unexpected service exit.
+
+### Changed
+- Managed code must use named `input`, `output`, `uses`, and `provides`.
+  Raw data APIs and engine/session escape hatches are standalone-only.
+  `Cloudy::engine()` and `CallerBuilder::build()` now return `Result`.
+- Child outputs are public through the app contract without caller `out`
+  redeclarations. Composite aliases can infer the referenced endpoint type.
+- `compress` ships frozen effective instance settings and declared runtime
+  dependencies rather than launching from mutable development paths.
+- Cooperative stop acknowledgement is separate from successful owned-tree
+  cleanup; concrete cleanup and persistence failures are retained.
+
 ## 0.7.0 — 2026-10-06
 
 **Breaking.** `Reiny.toml` and YAML/TOML launch configs are replaced by one

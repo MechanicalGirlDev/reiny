@@ -1,0 +1,20 @@
+version: 2
+in: {}
+out:
+  relay_relayed:
+    from: "relay.relayed"
+  ping_ping:
+    from: "ping.ping"
+modules:
+  relay:
+    source: "../relay"
+    in:
+      ping:
+        from: "ping.ping"
+  pong:
+    source: "../pong"
+    in:
+      relayed:
+        from: "relay.relayed"
+  ping:
+    source: "../ping"

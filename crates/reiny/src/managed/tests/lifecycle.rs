@@ -41,7 +41,7 @@ async fn readiness_requires_declared_outputs_as_well_as_inputs() {
     contract.outputs.insert(
         "outgoing".to_string(),
         OutputBinding {
-            type_name: "test.Probe".to_string(),
+            contract: super::contract("test.Probe"),
         },
     );
     let cloudy = Cloudy::open(options(bus, contract)).await.expect("module");
@@ -64,7 +64,7 @@ async fn ready_publishes_report_and_stop_only_acknowledges_request() {
     contract.outputs.insert(
         "outgoing".to_string(),
         OutputBinding {
-            type_name: "Probe".to_string(),
+            contract: super::contract("Probe"),
         },
     );
     let mut opts = options(bus.clone(), contract);
@@ -94,7 +94,7 @@ async fn ready_publishes_report_and_stop_only_acknowledges_request() {
     let report: ModuleReport =
         serde_json::from_slice(&std::fs::read(&report_path).expect("atomic report"))
             .expect("report JSON");
-    assert_eq!(report.version, 1);
+    assert_eq!(report.version, CONTRACT_VERSION);
     assert_eq!(report.namespace, RECEIVER);
     assert_eq!(report.inputs["incoming"].type_name, "test.Probe");
     assert_eq!(report.inputs["incoming"].schema, 0x1234);
@@ -158,4 +158,35 @@ async fn report_failure_prevents_readiness() {
             .expect("alive"),
         Vec::<Key>::new()
     );
+}
+
+#[tokio::test]
+async fn dropping_a_named_handle_after_ready_withdraws_readiness() {
+    let bus = Arc::new(Local::new());
+    let cloudy = producer(bus.clone(), SENDER).await;
+    let output = cloudy.output::<Probe>("outgoing").expect("output");
+    let key = Key::topic(DOMAIN, Some(SENDER), "@ready");
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let _watch = bus
+        .watch_alive(
+            &key,
+            Box::new(move |event| {
+                let _ = tx.send(event);
+            }),
+        )
+        .expect("watch");
+    cloudy.ready().expect("ready");
+    assert_eq!(
+        timeout(PATIENCE, events.recv()).await.expect("join"),
+        Some(Presence::Joined(key.clone()))
+    );
+    drop(output);
+    assert_eq!(
+        timeout(PATIENCE, events.recv()).await.expect("leave"),
+        Some(Presence::Left(key))
+    );
+    timeout(PATIENCE, cloudy.shutdown())
+        .await
+        .expect("shutdown");
+    assert!(cloudy.ready().is_err());
 }

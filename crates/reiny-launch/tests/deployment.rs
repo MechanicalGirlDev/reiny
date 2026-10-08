@@ -11,11 +11,14 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use reiny_core::bindings::{InputBinding, ModuleBindings, ModuleReport, OutputBinding, PortReport};
+use reiny_core::bindings::{
+    CONTRACT_VERSION, EndpointContract, InputBinding, ModuleBindings, ModuleReport, OutputBinding,
+    PortKind, PortReport, QosProfile, ResponseReport,
+};
 use reiny_launch::{
     DeploymentClient, DeploymentPhase, DeploymentStatus, FailurePolicy, ModuleObserver,
-    PreparedDeployment, PreparedModule, ProviderKind, ProviderSpec, RestartPolicy, RunSpec,
-    last_status, serve,
+    PreparedDeployment, PreparedModule, ProviderKind, ProviderSpec, RestartPolicy, RunKind,
+    RunSpec, last_status, serve,
 };
 
 const DEADLINE: Duration = Duration::from_secs(15);
@@ -34,12 +37,19 @@ fn main() {
         return;
     }
     let value = |key: &str| args.windows(2).find(|pair| pair[0] == key).map(|pair| pair[1].clone()).unwrap();
+    assert_eq!(env::var("REINY_BUNDLE_DIR").unwrap(), value("--fixture-bundle"));
+    let config = value("--fixture-config");
+    if config.is_empty() {
+        assert!(env::var_os("REINY_CONFIG_DIR").is_none());
+    } else {
+        assert_eq!(env::var("REINY_CONFIG_DIR").unwrap(), config);
+    }
     let namespace = value("--name");
     let bindings = fs::read_to_string(value("--module-bindings")).unwrap();
     assert!(bindings.contains(&namespace));
     let mode = value("--fixture-mode");
     let report = value("--fixture-report");
-    if mode != "no-report" {
+    if mode != "no-report" && mode != "no-report-task" {
         let path = env::var("REINY_MODULE_REPORT").unwrap();
         let temporary = format!("{path}.tmp");
         fs::write(&temporary, report).unwrap();
@@ -52,6 +62,7 @@ fn main() {
     }
     let mut socket = TcpStream::connect(value("--fixture-address")).unwrap();
     writeln!(socket,"{} {}", namespace, std::process::id()).unwrap();
+    if mode == "no-report-task" { return; }
     loop {
         let mut byte = [0];
         if socket.read_exact(&mut byte).is_err() { return; }
@@ -102,6 +113,8 @@ struct Observation {
     fail: bool,
     configured: BTreeSet<String>,
     stop_requests: BTreeSet<String>,
+    root: Option<PathBuf>,
+    stop_snapshots: BTreeMap<String, DeploymentStatus>,
 }
 
 struct Observer {
@@ -160,10 +173,12 @@ impl Observer {
 
 impl ModuleObserver for Observer {
     fn configure(&self, prepared: &PreparedDeployment) -> Result<()> {
-        self.state
+        let mut state = self
+            .state
             .lock()
-            .map_err(|error| anyhow::anyhow!("{error}"))?
-            .configured = prepared
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        state.root = Some(prepared.root.clone());
+        state.configured = prepared
             .nodes
             .iter()
             .map(|node| node.namespace.clone())
@@ -195,6 +210,9 @@ impl ModuleObserver for Observer {
                 "stop namespace was not configured"
             );
             state.stop_requests.insert(namespace.to_owned());
+            let root = state.root.as_ref().context("observer root missing")?;
+            let status = last_status(root)?.context("stopping snapshot missing")?;
+            state.stop_snapshots.insert(namespace.to_owned(), status);
         }
         self.send(namespace, b's')
     }
@@ -280,13 +298,16 @@ impl Harness {
         for index in 0..count {
             let namespace = format!("{deployment}/node{index}");
             let bindings = ModuleBindings {
-                version: 1,
+                version: CONTRACT_VERSION,
                 namespace: namespace.clone(),
+                endpoint_namespace: namespace.clone(),
                 inputs: BTreeMap::new(),
                 outputs: BTreeMap::new(),
+                children: BTreeMap::new(),
+                executables: vec!["fixture".into()],
             };
             let report = ModuleReport {
-                version: 1,
+                version: CONTRACT_VERSION,
                 namespace: namespace.clone(),
                 inputs: BTreeMap::new(),
                 outputs: BTreeMap::new(),
@@ -295,7 +316,11 @@ impl Harness {
                 namespace,
                 module_dir: root.clone(),
                 executable: self.binary.executable.clone(),
+                bundle_dir: self.binary.directory.path().to_path_buf(),
+                config_dir: None,
+                config_bundle_dir: None,
                 run: RunSpec {
+                    kind: RunKind::Service,
                     provider: "process".into(),
                     bin: "fixture".into(),
                     config: None,
@@ -306,7 +331,13 @@ impl Harness {
                         "normal".into(),
                         "--fixture-report".into(),
                         serde_json::to_string(&report)?,
+                        "--fixture-bundle".into(),
+                        self.binary.directory.path().display().to_string(),
+                        "--fixture-config".into(),
+                        String::new(),
                     ],
+                    companions: Vec::new(),
+                    config_assets: Vec::new(),
                     restart: RestartPolicy::Manual,
                     on_failure: FailurePolicy::Report,
                 },
@@ -551,6 +582,483 @@ fn always_restarts_after_a_successful_unrequested_exit() -> Result<()> {
 }
 
 #[test]
+fn successful_service_exit_is_a_failure_and_on_failure_restarts() -> Result<()> {
+    for restart in [RestartPolicy::Manual, RestartPolicy::OnFailure] {
+        let mut harness = Harness::new()?;
+        let mut prepared = harness.prepared(1)?;
+        prepared.nodes[0].run.restart = restart;
+        let namespace = prepared.nodes[0].namespace.clone();
+        let client = harness.start(prepared)?;
+        let before = client.wait_ready(DEADLINE)?;
+        harness.observer.send(&namespace, b'q')?;
+        match restart {
+            RestartPolicy::Manual => {
+                let failed = wait_phase(&client, DeploymentPhase::Failed)?;
+                assert_eq!(failed.modules[&namespace].phase, DeploymentPhase::Failed);
+                assert!(failed.modules[&namespace].pid.is_none());
+                assert!(failed.modules[&namespace].error.is_some());
+            }
+            RestartPolicy::OnFailure => {
+                harness
+                    .observer
+                    .wait_pid(&namespace, before.modules[&namespace].pid)?;
+                let restarted = client.wait_ready(DEADLINE)?;
+                assert!(
+                    restarted.modules[&namespace].generation
+                        > before.modules[&namespace].generation
+                );
+            }
+            RestartPolicy::Always => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn successful_task_completes_without_restart_or_suspension() -> Result<()> {
+    let mut harness = Harness::new()?;
+    let mut prepared = harness.prepared(1)?;
+    prepared.nodes[0].run.kind = RunKind::Task;
+    prepared.nodes[0].run.restart = RestartPolicy::Always;
+    prepared.nodes[0].run.on_failure = FailurePolicy::SuspendDeployment;
+    prepared.nodes[0].run.args[3] = "tree".into();
+    let namespace = prepared.nodes[0].namespace.clone();
+    let descendant = format!("{namespace}/descendant");
+    let client = harness.start(prepared.clone())?;
+    let before = client.wait_ready(DEADLINE)?;
+    harness.observer.wait_pid(&descendant, None)?;
+    let mut connection = harness.observer.socket(&descendant)?;
+    harness.observer.send(&namespace, b'q')?;
+    let completed = wait_phase(&client, DeploymentPhase::Completed)?;
+    assert_eq!(
+        completed.modules[&namespace].phase,
+        DeploymentPhase::Completed
+    );
+    assert_eq!(completed.modules[&namespace].pid, None);
+    assert_eq!(completed.modules[&namespace].actual_fingerprint, None);
+    assert_eq!(completed.modules[&namespace].error, None);
+    assert_disconnected(&mut connection)?;
+    assert_eq!(
+        client.wait_ready(DEADLINE)?.phase,
+        DeploymentPhase::Completed
+    );
+    assert_eq!(client.apply(&prepared)?.modules, completed.modules);
+    assert_eq!(
+        completed.modules[&namespace].generation,
+        before.modules[&namespace].generation
+    );
+    assert_eq!(serde_json::to_value(&completed)?["phase"], "completed");
+    prepared.nodes[0].fingerprint = "changed-task".into();
+    client.apply(&prepared)?;
+    assert!(
+        client.wait_ready(DEADLINE)?.modules[&namespace].generation
+            > completed.modules[&namespace].generation
+    );
+    Ok(())
+}
+
+#[test]
+fn unsuccessful_task_fails_and_completed_task_keeps_services_ready() -> Result<()> {
+    for command in *b"xq" {
+        let mut harness = Harness::new()?;
+        let mut prepared = harness.prepared(2)?;
+        prepared.nodes[0].run.kind = RunKind::Task;
+        let namespace = prepared.nodes[0].namespace.clone();
+        let client = harness.start(prepared)?;
+        let before = client.wait_ready(DEADLINE)?;
+        harness.observer.send(&namespace, command)?;
+        let deadline = Instant::now() + DEADLINE;
+        let mut status = before;
+        while status.modules[&namespace].pid.is_some() {
+            status = client.wait_for_revision(
+                status.revision,
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .context("task exit event")?,
+            )?;
+        }
+        if command == b'q' {
+            assert_eq!(status.phase, DeploymentPhase::Ready);
+            assert_eq!(status.modules[&namespace].phase, DeploymentPhase::Completed);
+        } else {
+            assert_eq!(status.phase, DeploymentPhase::Degraded);
+            assert_eq!(status.modules[&namespace].phase, DeploymentPhase::Failed);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn finite_task_can_complete_before_readiness() -> Result<()> {
+    let mut harness = Harness::new()?;
+    let mut prepared = harness.prepared(1)?;
+    prepared.nodes[0].run.kind = RunKind::Task;
+    prepared.nodes[0].run.args[3] = "no-report-task".into();
+    let namespace = prepared.nodes[0].namespace.clone();
+    let client = harness.start(prepared)?;
+    let completed = client.wait_ready(DEADLINE)?;
+    assert_eq!(completed.phase, DeploymentPhase::Completed);
+    assert_eq!(completed.modules[&namespace].report, None);
+    assert_eq!(completed.modules[&namespace].pid, None);
+    Ok(())
+}
+
+fn terminal_notification(
+    client: &DeploymentClient,
+    trigger: impl FnOnce() -> Result<()>,
+) -> Result<DeploymentStatus> {
+    let subscription = client.watch_terminal()?;
+    let (send, receive) = mpsc::sync_channel(1);
+    let waiting = std::thread::spawn(move || {
+        send.send(subscription.wait())
+            .map_err(|_| anyhow::anyhow!("terminal subscription receiver disappeared"))
+    });
+    trigger()?;
+    let status = receive
+        .recv_timeout(DEADLINE)
+        .context("terminal state event")??;
+    waiting
+        .join()
+        .map_err(|_| anyhow::anyhow!("terminal subscription panic"))??;
+    Ok(status)
+}
+
+#[test]
+fn terminal_subscription_notifies_task_completion_without_stopping_owner() -> Result<()> {
+    let mut harness = Harness::new()?;
+    let mut prepared = harness.prepared(1)?;
+    prepared.nodes[0].run.kind = RunKind::Task;
+    prepared.nodes[0].run.args[3] = "tree".into();
+    let namespace = prepared.nodes[0].namespace.clone();
+    let descendant = format!("{namespace}/descendant");
+    let client = harness.start(prepared.clone())?;
+    assert_eq!(client.wait_ready(DEADLINE)?.phase, DeploymentPhase::Ready);
+    harness.observer.wait_pid(&descendant, None)?;
+    let mut descendant_connection = harness.observer.socket(&descendant)?;
+    let stop_subscription = client.watch_stopped()?;
+    let completed = terminal_notification(&client, || harness.observer.send(&namespace, b'q'))?;
+    assert_eq!(completed.phase, DeploymentPhase::Completed);
+    assert!(completed.owner_alive);
+    assert!(
+        completed
+            .modules
+            .values()
+            .all(|module| module.pid.is_none())
+    );
+    assert_disconnected(&mut descendant_connection)?;
+    assert_eq!(client.status()?.phase, DeploymentPhase::Completed);
+    assert_eq!(terminal_notification(&client, || Ok(()))?, completed);
+    prepared.nodes[0].fingerprint = "next-task-generation".into();
+    client.apply(&prepared)?;
+    let restarted = client.wait_ready(DEADLINE)?;
+    assert!(restarted.modules[&namespace].generation > completed.modules[&namespace].generation);
+    assert_eq!(client.stop()?.phase, DeploymentPhase::Stopped);
+    assert_eq!(stop_subscription.wait()?.phase, DeploymentPhase::Stopped);
+    Ok(())
+}
+
+#[test]
+fn terminal_subscription_registered_after_completion_returns_immediately() -> Result<()> {
+    let mut harness = Harness::new()?;
+    let mut prepared = harness.prepared(1)?;
+    prepared.nodes[0].run.kind = RunKind::Task;
+    prepared.nodes[0].run.args[3] = "no-report-task".into();
+    let client = harness.start(prepared)?;
+    assert_eq!(
+        client.wait_ready(DEADLINE)?.phase,
+        DeploymentPhase::Completed
+    );
+    let completed = terminal_notification(&client, || Ok(()))?;
+    assert_eq!(completed.phase, DeploymentPhase::Completed);
+    assert!(completed.owner_alive);
+    Ok(())
+}
+
+fn connected_fixture(
+    harness: &Harness,
+    publishers: usize,
+    rpc: bool,
+) -> Result<PreparedDeployment> {
+    let mut prepared = harness.prepared(publishers + 1)?;
+    let contract = EndpointContract {
+        type_name: "Ping".into(),
+        kind: if rpc { PortKind::Rpc } else { PortKind::Stream },
+        response: rpc.then(|| "Pong".into()),
+        ..EndpointContract::default()
+    };
+    let sources = prepared.nodes[..publishers]
+        .iter()
+        .map(|node| node.namespace.clone())
+        .collect();
+    for (index, node) in prepared.nodes.iter_mut().enumerate() {
+        let port = PortReport {
+            type_name: "test.Ping".into(),
+            schema: 42,
+            contract: contract.clone(),
+            response: rpc.then(|| ResponseReport {
+                type_name: "test.Pong".into(),
+                schema: 84,
+            }),
+        };
+        let mut report = ModuleReport {
+            version: CONTRACT_VERSION,
+            namespace: node.namespace.clone(),
+            inputs: BTreeMap::new(),
+            outputs: BTreeMap::new(),
+        };
+        if index == publishers {
+            node.bindings.inputs.insert(
+                "in".into(),
+                InputBinding {
+                    contract: contract.clone(),
+                    sources,
+                },
+            );
+            report.inputs.insert("in".into(), port);
+            node.run.args[5] = serde_json::to_string(&report)?;
+            break;
+        }
+        node.bindings.outputs.insert(
+            "out".into(),
+            OutputBinding {
+                contract: contract.clone(),
+            },
+        );
+        report.outputs.insert("out".into(), port);
+        node.run.args[5] = serde_json::to_string(&report)?;
+    }
+    Ok(prepared)
+}
+
+#[test]
+fn every_fan_in_source_must_report_the_same_schema() -> Result<()> {
+    for mismatch in [false, true] {
+        let mut harness = Harness::new()?;
+        let mut prepared = connected_fixture(&harness, 2, false)?;
+        if mismatch {
+            let mut report: ModuleReport = serde_json::from_str(&prepared.nodes[1].run.args[5])?;
+            report.outputs.get_mut("out").context("output")?.schema += 1;
+            prepared.nodes[1].run.args[5] = serde_json::to_string(&report)?;
+        }
+        let client = harness.start(prepared)?;
+        if mismatch {
+            assert!(client.wait_ready(DEADLINE).is_err());
+            assert_eq!(client.status()?.phase, DeploymentPhase::Failed);
+        } else {
+            assert_eq!(client.wait_ready(DEADLINE)?.phase, DeploymentPhase::Ready);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn zero_request_and_response_fingerprints_are_valid() -> Result<()> {
+    for rpc in [false, true] {
+        let mut harness = Harness::new()?;
+        let mut prepared = connected_fixture(&harness, 1, rpc)?;
+        for node in &mut prepared.nodes {
+            let mut report: ModuleReport = serde_json::from_str(&node.run.args[5])?;
+            for port in report
+                .inputs
+                .values_mut()
+                .chain(report.outputs.values_mut())
+            {
+                port.schema = 0;
+                if let Some(response) = &mut port.response {
+                    response.schema = 0;
+                }
+            }
+            node.run.args[5] = serde_json::to_string(&report)?;
+        }
+        let client = harness.start(prepared)?;
+        assert_eq!(client.wait_ready(DEADLINE)?.phase, DeploymentPhase::Ready);
+    }
+    Ok(())
+}
+
+#[test]
+fn rpc_response_fingerprints_and_effective_contracts_are_verified() -> Result<()> {
+    for mismatch in 0..5 {
+        let mut harness = Harness::new()?;
+        let mut prepared = connected_fixture(&harness, 1, true)?;
+        let mut report: ModuleReport = serde_json::from_str(&prepared.nodes[0].run.args[5])?;
+        let output = report.outputs.get_mut("out").context("output")?;
+        match mismatch {
+            0 => {}
+            1 => output.response.as_mut().context("response")?.schema += 1,
+            2 => output.response = None,
+            3 => output.contract.qos = QosProfile::Sensor,
+            4 => {
+                output.contract.qos = QosProfile::Sensor;
+                prepared.nodes[0]
+                    .bindings
+                    .outputs
+                    .get_mut("out")
+                    .context("binding")?
+                    .contract
+                    .qos = QosProfile::Sensor;
+            }
+            _ => unreachable!(),
+        }
+        prepared.nodes[0].run.args[5] = serde_json::to_string(&report)?;
+        let namespace = prepared.nodes[0].namespace.clone();
+        let client = harness.start(prepared)?;
+        if mismatch == 0 {
+            assert_eq!(client.wait_ready(DEADLINE)?.phase, DeploymentPhase::Ready);
+        } else {
+            let phase = if mismatch == 2 || mismatch == 3 || mismatch == 4 {
+                DeploymentPhase::Degraded
+            } else {
+                DeploymentPhase::Failed
+            };
+            let status = wait_phase(&client, phase)?;
+            assert!(client.wait_ready(Duration::ZERO).is_err());
+            assert_eq!(
+                status.modules[&namespace].phase,
+                if phase == DeploymentPhase::Degraded {
+                    DeploymentPhase::Failed
+                } else {
+                    DeploymentPhase::Stopped
+                }
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn sensor_output_connects_to_an_independent_receive_policy() -> Result<()> {
+    // Given sensor delivery is owned by the producer, not by the consumer queue.
+    let mut harness = Harness::new()?;
+    let mut prepared = connected_fixture(&harness, 1, false)?;
+    prepared.nodes[0]
+        .bindings
+        .outputs
+        .get_mut("out")
+        .context("output binding")?
+        .contract
+        .qos = QosProfile::Sensor;
+    let mut report: ModuleReport = serde_json::from_str(&prepared.nodes[0].run.args[5])?;
+    report
+        .outputs
+        .get_mut("out")
+        .context("output report")?
+        .contract
+        .qos = QosProfile::Sensor;
+    prepared.nodes[0].run.args[5] = serde_json::to_string(&report)?;
+    // When the owner validates the two compiled reports.
+    let client = harness.start(prepared)?;
+    let status = client.wait_ready(DEADLINE)?;
+    // Then the consumer's default FIFO does not invalidate a sensor publisher.
+    assert_eq!(status.phase, DeploymentPhase::Ready);
+    Ok(())
+}
+
+#[test]
+fn stop_notification_observes_stopping_before_owned_tree_is_reaped() -> Result<()> {
+    // Given a running service with a cooperative stop observer.
+    let mut harness = Harness::new()?;
+    let prepared = harness.prepared(1)?;
+    let namespace = prepared.nodes[0].namespace.clone();
+    let client = harness.start(prepared)?;
+    client.wait_ready(DEADLINE)?;
+    // When stop is requested.
+    let stopped = client.stop()?;
+    // Then request-time state still owns the PID, while the final state has reaped it.
+    let state = harness
+        .observer
+        .state
+        .lock()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let snapshot = state
+        .stop_snapshots
+        .get(&namespace)
+        .context("stop snapshot missing")?;
+    assert_eq!(snapshot.phase, DeploymentPhase::Stopping);
+    assert_eq!(
+        snapshot.modules[&namespace].phase,
+        DeploymentPhase::Stopping
+    );
+    assert!(snapshot.modules[&namespace].pid.is_some());
+    assert_eq!(stopped.phase, DeploymentPhase::Stopped);
+    assert!(stopped.modules[&namespace].pid.is_none());
+    Ok(())
+}
+
+#[test]
+fn v1_readiness_report_is_rejected() -> Result<()> {
+    let mut harness = Harness::new()?;
+    let mut prepared = harness.prepared(1)?;
+    let mut report: ModuleReport = serde_json::from_str(&prepared.nodes[0].run.args[5])?;
+    report.version = 1;
+    prepared.nodes[0].run.args[5] = serde_json::to_string(&report)?;
+    let client = harness.start(prepared)?;
+    assert!(client.wait_ready(DEADLINE).is_err());
+    assert_eq!(client.status()?.phase, DeploymentPhase::Failed);
+    Ok(())
+}
+
+#[test]
+fn prepared_root_cannot_claim_another_endpoint_namespace() -> Result<()> {
+    let harness = Harness::new()?;
+    let mut prepared = harness.prepared(1)?;
+    prepared.nodes[0].bindings.endpoint_namespace = "different/host".into();
+    assert!(
+        serve(
+            prepared,
+            harness.observer.as_ref(),
+            &AtomicBool::new(false),
+            &|| Ok(()),
+        )
+        .is_err()
+    );
+    assert!(
+        harness
+            .observer
+            .state
+            .lock()
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .pids
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn spawn_passes_the_exact_prepared_config_directory() -> Result<()> {
+    let mut harness = Harness::new()?;
+    let mut prepared = harness.prepared(1)?;
+    let directory = prepared.root.join("frozen-config");
+    std::fs::create_dir(&directory)?;
+    let config = directory.join("config.yaml");
+    std::fs::write(&config, "value: frozen\n")?;
+    prepared.nodes[0].run.config = Some(config);
+    prepared.nodes[0].config_dir = Some(directory.clone());
+    prepared.nodes[0].config_bundle_dir = Some(directory.clone());
+    prepared.nodes[0].run.args[9] = directory.display().to_string();
+    let client = harness.start(prepared)?;
+    assert_eq!(client.wait_ready(DEADLINE)?.phase, DeploymentPhase::Ready);
+    Ok(())
+}
+
+#[test]
+fn prepared_executable_cannot_fall_back_outside_the_declared_bundle() -> Result<()> {
+    let harness = Harness::new()?;
+    let mut prepared = harness.prepared(1)?;
+    prepared.nodes[0].bundle_dir = prepared.root.clone();
+    assert!(
+        serve(
+            prepared,
+            harness.observer.as_ref(),
+            &AtomicBool::new(false),
+            &|| Ok(()),
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn incompatible_compiled_schemas_never_become_ready() -> Result<()> {
     // Given equal message names with different actual compiled schemas.
     let mut harness = Harness::new()?;
@@ -559,23 +1067,34 @@ fn incompatible_compiled_schemas_never_become_ready() -> Result<()> {
     prepared.nodes[0].bindings.outputs.insert(
         "out".into(),
         OutputBinding {
-            type_name: "Ping".into(),
+            contract: EndpointContract {
+                type_name: "Ping".into(),
+                ..EndpointContract::default()
+            },
         },
     );
     prepared.nodes[1].bindings.inputs.insert(
         "in".into(),
         InputBinding {
-            type_name: "Ping".into(),
-            source,
+            contract: EndpointContract {
+                type_name: "Ping".into(),
+                ..EndpointContract::default()
+            },
+            sources: vec![source],
         },
     );
     for (index, node) in prepared.nodes.iter_mut().enumerate() {
         let port = PortReport {
             type_name: "test.Ping".into(),
             schema: u64::try_from(index)? + 1,
+            contract: EndpointContract {
+                type_name: "Ping".into(),
+                ..EndpointContract::default()
+            },
+            response: None,
         };
         let report = ModuleReport {
-            version: 1,
+            version: CONTRACT_VERSION,
             namespace: node.namespace.clone(),
             inputs: if index == 1 {
                 BTreeMap::from([("in".into(), port.clone())])
@@ -623,7 +1142,7 @@ fn mismatched_report_identity_is_terminal() -> Result<()> {
     let mut harness = Harness::new()?;
     let mut prepared = harness.prepared(1)?;
     let report = ModuleReport {
-        version: 1,
+        version: CONTRACT_VERSION,
         namespace: "another/deployment".into(),
         inputs: BTreeMap::new(),
         outputs: BTreeMap::new(),
@@ -648,22 +1167,33 @@ fn cyclic_connections_start_without_a_readiness_dependency_order() -> Result<()>
         node.bindings.inputs.insert(
             "in".into(),
             InputBinding {
-                type_name: "Ping".into(),
-                source,
+                contract: EndpointContract {
+                    type_name: "Ping".into(),
+                    ..EndpointContract::default()
+                },
+                sources: vec![source],
             },
         );
         node.bindings.outputs.insert(
             "out".into(),
             OutputBinding {
-                type_name: "Ping".into(),
+                contract: EndpointContract {
+                    type_name: "Ping".into(),
+                    ..EndpointContract::default()
+                },
             },
         );
         let port = PortReport {
             type_name: "test.Ping".into(),
             schema: 42,
+            contract: EndpointContract {
+                type_name: "Ping".into(),
+                ..EndpointContract::default()
+            },
+            response: None,
         };
         let report = ModuleReport {
-            version: 1,
+            version: CONTRACT_VERSION,
             namespace: node.namespace.clone(),
             inputs: BTreeMap::from([("in".into(), port.clone())]),
             outputs: BTreeMap::from([("out".into(), port)]),
@@ -730,6 +1260,7 @@ fn stop_acknowledgement_does_not_replace_owned_process_reaping() -> Result<()> {
     let mut child_connection = harness.observer.socket(&namespace)?;
     // When stop is requested, including an independently attached subscriber.
     let following = client.watch_stopped()?;
+    let terminal = client.watch_terminal()?;
     let follow = std::thread::spawn(move || following.wait());
     let stopped = client.stop()?;
     harness.join_owner()?;
@@ -741,6 +1272,7 @@ fn stop_acknowledgement_does_not_replace_owned_process_reaping() -> Result<()> {
         .join()
         .map_err(|_| anyhow::anyhow!("follow panic"))??;
     assert_eq!(subscription.phase, DeploymentPhase::Stopped);
+    assert_eq!(terminal.wait()?.phase, DeploymentPhase::Stopped);
     assert!(DeploymentClient::find(&root)?.is_none());
     assert!(!last_status(&root)?.context("last status")?.owner_alive);
     Ok(())
@@ -858,6 +1390,77 @@ fn owner_error_cleans_children_and_invalidates_old_client() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn stop_persistence_failure_reaches_caller_and_registered_subscriber() -> Result<()> {
+    let mut harness = Harness::new()?;
+    let prepared = harness.prepared(1)?;
+    let namespace = prepared.nodes[0].namespace.clone();
+    let state_path = prepared.root.join(".reiny/state.json");
+    let client = harness.start(prepared)?;
+    client.wait_ready(DEADLINE)?;
+    let mut connection = harness.observer.socket(&namespace)?;
+    let subscription = client.watch_stopped()?;
+    let terminal = client.watch_terminal()?;
+    std::fs::remove_file(&state_path)?;
+    std::fs::create_dir(&state_path)?;
+    let stop_error = client
+        .stop()
+        .err()
+        .context("state directory cannot be replaced by a file")?;
+    let subscribed_error = subscription
+        .wait()
+        .err()
+        .context("failed stop cannot be acknowledged")?;
+    let terminal_error = terminal
+        .wait()
+        .err()
+        .context("failed stop is not a clean terminal state")?;
+    let owner_error = harness
+        .join_owner()
+        .err()
+        .context("failed persistence must escape serve")?;
+    let path = state_path.display().to_string();
+    assert!(format!("{stop_error:#}").contains(&path));
+    assert!(format!("{subscribed_error:#}").contains(&path));
+    assert!(format!("{terminal_error:#}").contains(&path));
+    assert!(format!("{owner_error:#}").contains(&path));
+    assert_disconnected(&mut connection)?;
+    Ok(())
+}
+
+#[test]
+fn endpoint_cleanup_error_is_not_hidden_by_owner_failure() -> Result<()> {
+    let mut harness = Harness::new()?;
+    let prepared = harness.prepared(1)?;
+    let control_path = prepared.root.join(".reiny/control.json");
+    let root = prepared.root.clone();
+    let client = harness.start(prepared)?;
+    client.wait_ready(DEADLINE)?;
+    std::fs::remove_file(&control_path)?;
+    std::fs::create_dir(&control_path)?;
+    harness
+        .observer
+        .state
+        .lock()
+        .map_err(|error| anyhow::anyhow!("{error}"))?
+        .fail = true;
+    let error = harness
+        .join_owner()
+        .err()
+        .context("both owner and endpoint cleanup failed")?;
+    assert!(format!("{error:#}").contains(&control_path.display().to_string()));
+    let state = last_status(&root)?.context("failed status")?;
+    assert_eq!(state.phase, DeploymentPhase::Failed);
+    assert!(state.modules.values().all(|module| module.pid.is_none()));
+    assert!(
+        state
+            .error
+            .context("cleanup error")?
+            .contains(&control_path.display().to_string())
+    );
+    Ok(())
+}
+
 #[cfg(windows)]
 struct OwnerProcess(std::process::Child);
 
@@ -917,6 +1520,8 @@ fn abrupt_owner_disappearance_closes_the_owned_windows_job() -> Result<()> {
         Command::new(std::env::current_exe()?)
             .args(["--exact", "subprocess_owner_fixture", "--nocapture"])
             .env("REINY_TEST_PREPARED", serde_json::to_string(&prepared)?)
+            .env("REINY_BUNDLE_DIR", "stale-inherited-bundle")
+            .env("REINY_CONFIG_DIR", "stale-inherited-config")
             .stdout(std::process::Stdio::piped())
             .spawn()?,
     );

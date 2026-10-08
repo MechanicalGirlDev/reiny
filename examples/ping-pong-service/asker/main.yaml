@@ -1,5 +1,6 @@
-version: 1
-in: {}
+version: 2
+in:
+  adder: { kind: rpc, type: calc.Add, response: calc.Sum }
 out: {}
 run:
   provider: "process"

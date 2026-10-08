@@ -32,10 +32,12 @@ jobs:
     name: ${{ matrix.example }}
     runs-on: ubuntu-latest
     strategy:
+      max-parallel: 8
       # 1 つ落ちても他の example の結果は見たいので fail-fast は無効。
       fail-fast: false
       matrix:
         example:
+          - owned-child
           - ping-pong-config
           - ping-pong-fanout
           - ping-pong-relay

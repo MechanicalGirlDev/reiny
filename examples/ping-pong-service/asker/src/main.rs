@@ -8,19 +8,7 @@ use crate::internals::Add;
 
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {
-    // Select the sibling service within this composition, including when nested.
-    let (parent, _) = cloudy.id().rsplit_once('/').ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "asker must run inside a namespaced composition",
-        )
-    })?;
-    let adder = cloudy
-        .caller::<Add>()
-        .to(format!("{parent}/calc"))
-        .timeout(Duration::from_secs(2))
-        .build();
-    cloudy.ready()?;
+    let adder = cloudy.uses::<Add>("adder")?;
     cloudy.ready()?;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut n = 0;

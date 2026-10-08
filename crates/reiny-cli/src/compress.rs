@@ -168,16 +168,20 @@ fn bundle_nodes(
         provider.bin_dir = bin_dir;
         provider.kind = ProviderKind::Process;
         if let Some(config) = &provider.zenoh_config {
-            provider.zenoh_config = Some(relocate(config, origins)?);
+            provider.zenoh_config = Some(bundle_config(config, &plan.root, out)?);
         }
         providers.insert(slot.clone(), provider);
         let manifest = manifests
             .get_mut(&node.namespace)
             .context("leaf instance missing")?;
         let run = manifest.run.as_mut().context("leaf run missing")?;
+        *run = node.run.clone();
         run.provider = slot;
         if let Some(config) = &node.run.config {
-            run.config = Some(relative_path(&instance, &relocate(config, origins)?));
+            run.config = Some(relative_path(
+                &instance,
+                &bundle_config(config, &plan.root, out)?,
+            ));
         }
     }
     Ok(providers)
@@ -197,6 +201,9 @@ fn write_manifests(
         for (name, call) in &mut manifest.modules {
             let child = instance_path(&format!("{namespace}/{name}"), &plan.deployment)?;
             call.source = ModuleSource::Local(relative_path(&instance, &child));
+            // Each bundled leaf already contains its resolved instance settings.
+            call.config = None;
+            call.args = None;
         }
         let source = plan
             .module_sources
@@ -223,6 +230,35 @@ fn write_manifests(
         map.remove(serde_yaml::Value::String("build".into()));
         map.remove(serde_yaml::Value::String("schema".into()));
         std::fs::write(path, serde_yaml::to_string(&value)?)?;
+    }
+    Ok(())
+}
+
+fn bundle_config(config: &Path, root: &Path, out: &Path) -> Result<PathBuf> {
+    let cache = root.join(".reiny/config");
+    let relative = config
+        .strip_prefix(&cache)
+        .context("prepared config is outside the immutable config cache")?;
+    let bundle = relative
+        .components()
+        .next()
+        .context("config bundle has no address")?;
+    let source = cache.join(bundle.as_os_str());
+    let destination = out.join("configs").join(bundle.as_os_str());
+    copy_config_tree(&source, &destination)?;
+    Ok(PathBuf::from("configs").join(relative))
+}
+
+fn copy_config_tree(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_config_tree(&entry.path(), &target)?;
+        } else {
+            copy_file(&entry.path(), &target)?;
+        }
     }
     Ok(())
 }

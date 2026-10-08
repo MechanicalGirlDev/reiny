@@ -71,10 +71,17 @@ pub(crate) fn plan(path: &Path, update: bool, json: bool) -> Result<()> {
             };
             println!("  {}: {} — {preparation}", node.namespace, node.run.bin);
             for (port, input) in &node.bindings.inputs {
-                println!("    in.{port}: {} ← {}", input.type_name, input.source);
+                println!(
+                    "    in.{port}: {} <- {}",
+                    input.contract.type_name,
+                    input.sources.join(", ")
+                );
             }
             for (port, output) in &node.bindings.outputs {
-                println!("    out.{port}: {}", output.type_name);
+                println!(
+                    "    out.{port}: {} {:?}",
+                    output.contract.type_name, output.contract.kind
+                );
             }
         }
         for resource in &plan.resources {
@@ -99,24 +106,38 @@ fn print_flow(plan: &DeploymentPlan) {
         .enumerate()
         .map(|(index, node)| (node.namespace.clone(), index))
         .collect();
-    let mut connections: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+    let mut connections: BTreeMap<(String, String, Option<String>), Vec<usize>> = BTreeMap::new();
     for (index, node) in plan.nodes.iter().enumerate() {
         for input in node.bindings.inputs.values() {
-            let subscribers = connections
-                .entry((input.source.clone(), input.type_name.clone()))
-                .or_default();
-            if !subscribers.contains(&index) {
-                subscribers.push(index);
+            for source in &input.sources {
+                let subscribers = connections
+                    .entry((
+                        source.clone(),
+                        input.contract.type_name.clone(),
+                        input.contract.response.clone(),
+                    ))
+                    .or_default();
+                if !subscribers.contains(&index) {
+                    subscribers.push(index);
+                }
             }
         }
     }
     let edges: Vec<_> = connections
         .into_iter()
-        .map(|((source, ty), subs)| crate::flowart::Edge {
-            ty,
-            pubs: vec![indices[&source]],
-            subs,
-            reply: None,
+        .map(|((source, ty, reply), clients)| {
+            let server = vec![indices[&source]];
+            let (pubs, subs) = if reply.is_some() {
+                (clients, server)
+            } else {
+                (server, clients)
+            };
+            crate::flowart::Edge {
+                ty,
+                pubs,
+                subs,
+                reply,
+            }
         })
         .collect();
     let prefix = format!("{}/", plan.deployment);
@@ -188,7 +209,7 @@ pub(crate) fn apply(
     if detach {
         return Ok(());
     }
-    let termination = client.watch_stopped()?;
+    let termination = client.watch_terminal()?;
     let client = Arc::new(client);
     let stop_client = Arc::clone(&client);
     ctrlc::set_handler(move || {
@@ -374,7 +395,9 @@ fn root_dir(path: &Path) -> Result<PathBuf> {
             path.file_name().is_some_and(|name| name == "main.yaml"),
             "expected main.yaml"
         );
-        path.parent().context("main.yaml has no directory")?
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
     } else {
         path
     };

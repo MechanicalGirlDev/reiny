@@ -1,37 +1,12 @@
-version: 1
+version: 2
 deployment: "ping-pong-relay"
 providers:
   process:
     type: "process"
     bin_dir: "target/debug"
-in: {}
-out:
-  relay_relayed:
-    type: "relay.Relayed"
-    from: "relay.relayed"
-  ping_ping:
-    type: "ping.Ping"
-    from: "ping.ping"
 modules:
-  relay:
-    source: "relay"
-    in:
-      ping:
-        type: "ping.Ping"
-        from: "ping.ping"
-    out:
-      relayed:
-        type: "relay.Relayed"
-  pong:
-    source: "pong"
-    in:
-      relayed:
-        type: "relay.Relayed"
-        from: "relay.relayed"
-    out: {}
-  ping:
-    source: "ping"
-    in: {}
-    out:
-      ping:
-        type: "ping.Ping"
+  pipeline:
+    source: "apps/pipeline"
+out:
+  relay_relayed: { from: "pipeline.relay_relayed" }
+  ping_ping: { from: "pipeline.ping_ping" }

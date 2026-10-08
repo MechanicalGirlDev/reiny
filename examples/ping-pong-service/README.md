@@ -3,13 +3,14 @@
 Typed SDK request/response services remain supported inside namespaced modules.
 The root `schema.internals` defines Add and Sum; `schema.services.Adder` maps
 the request alias to the response alias and generates `impl reiny::Service for Add`.
-Runtime input and output contracts are empty because these applications use SDK
-service calls rather than pub/sub ports.
+The calc app declares an `adder` RPC output with request `calc.Add` and response
+`calc.Sum`; asker declares the matching RPC input. The project wires that input
+explicitly to `calc.adder`.
 
-Calc declares `cloudy.serve::<Add>()` before readiness and returns Sum or an
+Calc opens its named RPC server before readiness and returns Sum or an
 overflow error. Asker uses a two-second caller timeout and retries once per second.
-The caller selects calc within its own composition namespace rather than guessing
-a global process ID. Service errors distinguish `NoReply`, `Timeout`, and
+The named caller resolves the wired calc source rather than guessing
+a process ID. Service errors distinguish `NoReply`, `Timeout`, and
 `Remote`; `servers::<Add>()` and `watch_servers::<Add>()` expose presence.
 
 ## Run

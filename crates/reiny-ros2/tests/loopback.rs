@@ -315,7 +315,8 @@ async fn bridge_round_trips_with_a_ros_node() {
     let caller = launch
         .caller::<Echo>()
         .timeout(Duration::from_secs(2))
-        .build();
+        .build()
+        .expect("standalone caller");
     let mut echoed = None;
     for _ in 0..5 {
         if let Ok(r) = caller

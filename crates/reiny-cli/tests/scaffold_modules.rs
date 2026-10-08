@@ -62,7 +62,7 @@ fn publisher_declares_matching_schema_and_port_when_created() {
     // Then
     let dir = sandbox.0.join("demo");
     let manifest = yaml(&dir.join("main.yaml"));
-    assert_eq!(manifest["version"], 1);
+    assert_eq!(manifest["version"], 2);
     assert_eq!(manifest["deployment"], "demo");
     assert_eq!(manifest["out"]["ping"]["type"], "ping.Ping");
     assert_eq!(
@@ -76,6 +76,58 @@ fn publisher_declares_matching_schema_and_port_when_created() {
         toml::from_str(&std::fs::read_to_string(dir.join("Cargo.toml")).unwrap()).unwrap();
     assert!(cargo["workspace"].is_table());
     assert!(cargo["dependencies"]["reiny"]["path"].is_str());
+    sandbox.success(&["check", "demo"]);
+}
+
+#[test]
+fn runtime_plan_accepts_a_bare_manifest_filename_in_its_own_directory() {
+    // Given a deployment root in an isolated command working directory.
+    let sandbox = Sandbox::new();
+    std::fs::write(sandbox.0.join("main.yaml"),
+        "version: 2\ndeployment: bare-manifest\nproviders:\n  process: {type: process}\nrun: {provider: process, bin: missing-on-purpose}\n"
+    ).unwrap();
+    // When the CLI receives the filename without a directory component.
+    let output = sandbox.run(&["plan", "main.yaml", "--json"]);
+    // Then it resolves the current directory without changing the test runner or building.
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        PathBuf::from(plan["root"].as_str().unwrap()),
+        sandbox.0.canonicalize().unwrap()
+    );
+    assert_eq!(plan["nodes"][0]["namespace"], "bare-manifest");
+    let recorded = reiny_launch::DeploymentStatus {
+        version: 1,
+        root: sandbox.0.canonicalize().unwrap(),
+        deployment: "bare-manifest".into(),
+        domain: "bare-manifest".into(),
+        owner_generation: "recorded-owner".into(),
+        owner_pid: 0,
+        owner_alive: false,
+        revision: 1,
+        phase: reiny_launch::DeploymentPhase::Stopped,
+        modules: std::collections::BTreeMap::new(),
+        resources: std::collections::BTreeMap::new(),
+        error: None,
+    };
+    std::fs::create_dir_all(sandbox.0.join(".reiny")).unwrap();
+    std::fs::write(
+        sandbox.0.join(".reiny/state.json"),
+        serde_json::to_vec(&recorded).unwrap(),
+    )
+    .unwrap();
+    let status = sandbox.run(&["status", "main.yaml", "--json"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let observed: reiny_launch::DeploymentStatus = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(observed, recorded);
 }
 
 #[test]
@@ -85,7 +137,7 @@ fn user_values_and_sources_survive_when_initialized() {
     std::fs::create_dir(sandbox.0.join("src")).unwrap();
     let source = "fn main() { println!(\"existing\"); }\n";
     let build = "fn main() {}\n";
-    let manifest = "version: 1\nschema: {project: {name: custom}}\n";
+    let manifest = "version: 2\nschema: {project: {name: custom}}\n";
     std::fs::write(sandbox.0.join("src/main.rs"), source).unwrap();
     std::fs::write(sandbox.0.join("build.rs"), build).unwrap();
     std::fs::write(sandbox.0.join("main.yaml"), manifest).unwrap();
@@ -123,13 +175,13 @@ fn runtime_is_preserved_when_local_schema_dependency_is_added() {
     std::fs::create_dir(sandbox.0.join("dep")).unwrap();
     std::fs::write(
         sandbox.0.join("dep/main.yaml"),
-        "version: 1\nschema: {project: {name: ping, version: 1.2.3}}\n",
+        "version: 2\nschema: {project: {name: ping, version: 1.2.3}}\n",
     )
     .unwrap();
     let manifest = sandbox.0.join("main.yaml");
     std::fs::write(
         &manifest,
-        "version: 1\ndeployment: demo\nproviders: {process: {type: process}}\nrun: {provider: process, bin: demo}\nbuild: {type: cargo, features: [fast], locked: false}\nschema:\n  project: {name: demo}\n  config: {count: {type: u32}}\n",
+        "version: 2\ndeployment: demo\nproviders: {process: {type: process}}\nrun: {provider: process, bin: demo}\nbuild: {type: cargo, features: [fast], locked: false}\nschema:\n  project: {name: demo}\n  config: {count: {type: u32}}\n",
     ).unwrap();
     let before = yaml(&manifest);
     // When
@@ -151,11 +203,11 @@ fn manifest_bytes_are_unchanged_when_dependency_already_exists() {
     std::fs::create_dir(sandbox.0.join("dep")).unwrap();
     std::fs::write(
         sandbox.0.join("dep/main.yaml"),
-        "version: 1\nschema: {project: {name: ping}}\n",
+        "version: 2\nschema: {project: {name: ping}}\n",
     )
     .unwrap();
     let manifest = sandbox.0.join("main.yaml");
-    let text = "# retain formatting\nversion: 1\nschema: {dependencies: {ping: {path: elsewhere, version: '7.0'}}}\n";
+    let text = "# retain formatting\nversion: 2\nschema: {dependencies: {ping: {path: elsewhere, version: '7.0'}}}\n";
     std::fs::write(&manifest, text).unwrap();
     // When
     sandbox.success(&["add", "dep"]);
@@ -169,7 +221,7 @@ fn runtime_check_does_not_build_when_root_declares_missing_cargo_manifest() {
     let sandbox = Sandbox::new();
     std::fs::write(
         sandbox.0.join("main.yaml"),
-        "version: 1\ndeployment: demo\nproviders: {process: {type: process}}\nrun: {provider: process, bin: demo}\nbuild: {type: cargo, manifest: absent.toml}\n",
+        "version: 2\ndeployment: demo\nproviders: {process: {type: process}}\nrun: {provider: process, bin: demo}\nbuild: {type: cargo, manifest: absent.toml}\n",
     ).unwrap();
     // When
     sandbox.success(&["check", "."]);
@@ -185,10 +237,12 @@ fn empty_scaffold_declares_no_ports_when_created() {
     sandbox.success(&["new", "demo"]);
     // Then
     let manifest = yaml(&sandbox.0.join("demo/main.yaml"));
+    assert_eq!(manifest["version"], 2);
     assert!(manifest["in"].as_mapping().unwrap().is_empty());
     assert!(manifest["out"].as_mapping().unwrap().is_empty());
     assert_eq!(manifest["build"]["locked"], false);
     assert_eq!(manifest["run"]["provider"], "process");
+    sandbox.success(&["check", "demo"]);
 }
 
 #[test]
@@ -197,7 +251,7 @@ fn raw_cargo_arguments_are_rejected_when_deployment_needs_no_build() {
     let sandbox = Sandbox::new();
     std::fs::write(
         sandbox.0.join("main.yaml"),
-        "version: 1\ndeployment: demo\n",
+        "version: 2\ndeployment: demo\n",
     )
     .unwrap();
     // When
@@ -214,12 +268,12 @@ fn schema_check_discovers_catalog_when_nearest_module_is_runtime_only() {
     std::fs::create_dir_all(sandbox.0.join("leaf/src")).unwrap();
     std::fs::write(
         sandbox.0.join("main.yaml"),
-        "version: 1\nschema: {project: {name: demo}, publications: {}}\n",
+        "version: 2\nschema: {project: {name: demo}, publications: {}}\n",
     )
     .unwrap();
     std::fs::write(
         sandbox.0.join("leaf/main.yaml"),
-        "version: 1\nrun: {provider: process, bin: demo}\n",
+        "version: 2\nrun: {provider: process, bin: demo}\n",
     )
     .unwrap();
     // When

@@ -40,9 +40,10 @@ fn read_main(path: &Path) -> Result<Option<Manifest>> {
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let manifest: MainManifest =
         serde_yaml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    if manifest.version != 1 {
+    // Catalog shape is unchanged; runtime v2 enforcement belongs to reiny-launch.
+    if !matches!(manifest.version, 1 | 2) {
         bail!(
-            "{}: unsupported main.yaml version {} (expected 1)",
+            "{}: unsupported main.yaml version {} (expected 1 or 2)",
             path.display(),
             manifest.version
         );

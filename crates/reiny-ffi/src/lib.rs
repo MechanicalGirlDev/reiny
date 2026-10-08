@@ -192,7 +192,7 @@ impl Session {
         schema: Option<u64>,
     ) -> Result<Arc<Publisher>, FfiError> {
         segment("type", &topic)?;
-        let engine = self.cloudy.engine();
+        let engine = self.cloudy.engine().map_err(failure)?;
         let key = self.key(topic, Some(self.cloudy.id().to_owned()));
         let publisher = engine.publisher(&key, &Qos::DEFAULT).map_err(failure)?;
         let presence = engine.declare_alive(&key).map_err(failure)?;
@@ -212,7 +212,7 @@ impl Session {
         source: Option<String>,
     ) -> Result<Arc<Subscription>, FfiError> {
         segment("type", &topic)?;
-        let engine = self.cloudy.engine();
+        let engine = self.cloudy.engine().map_err(failure)?;
         let key = self.key(topic, source);
         let (sender, receiver) = flume::bounded(256);
         let subscription = engine
@@ -251,6 +251,7 @@ impl Session {
             .wait(
                 self.cloudy
                     .engine()
+                    .map_err(failure)?
                     .alive(&key, Duration::from_millis(timeout_ms)),
             )?
             .map_err(failure)?

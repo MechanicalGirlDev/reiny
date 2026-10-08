@@ -51,11 +51,12 @@ pub struct Server<S> {
     key: Key,
     shutdown: Shutdown,
     _marker: PhantomData<S>,
+    pub(crate) managed: Option<crate::managed::ManagedPort>,
 }
 
 impl<S: Service> Server<S> {
     pub(crate) fn declare(cloudy: &Cloudy) -> Result<Self> {
-        let engine = cloudy.engine();
+        let engine = &cloudy.engine;
         let caps = engine.caps();
         if !(caps.query && caps.liveliness) {
             anyhow::bail!(
@@ -63,7 +64,7 @@ impl<S: Service> Server<S> {
                 S::TYPE
             );
         }
-        let key = cloudy.key_for(Some(cloudy.id()), S::TYPE);
+        let key = cloudy.key_for(Some(cloudy.endpoint_namespace()), S::TYPE);
         let (tx, rx) = flume::bounded(QUERY_CAPACITY);
         let guard = engine.respond(
             &key,
@@ -90,6 +91,7 @@ impl<S: Service> Server<S> {
             key,
             shutdown: cloudy.shutdown_handle(),
             _marker: PhantomData,
+            managed: None,
         })
     }
 
@@ -108,6 +110,13 @@ impl<S: Service> Server<S> {
             let Some(payload) = query.payload() else {
                 continue; // drop = finalize
             };
+            if self.managed.is_some() && attachment_fingerprint(query.attachment()) != S::SCHEMA {
+                reply_err(
+                    query,
+                    "missing or mismatching request schema fingerprint".to_string(),
+                );
+                continue;
+            }
             if let (Some(mine), Some(theirs)) =
                 (S::SCHEMA, attachment_fingerprint(query.attachment()))
                 && theirs != mine
@@ -215,17 +224,28 @@ impl<'a, S> CallerBuilder<'a, S> {
         self
     }
 
-    /// Build the caller. It declares nothing (a query is fired per call), so it cannot fail.
-    #[must_use]
-    pub fn build(self) -> Caller<S>
+    /// Build a standalone caller. Managed code must use [`Cloudy::uses`].
+    pub fn build(self) -> Result<Caller<S>>
+    where
+        S: Service,
+    {
+        self.cloudy.ensure_standalone()?;
+        if let Some(target) = &self.to {
+            crate::managed::config::validate_namespace(target)?;
+        }
+        Ok(self.build_named())
+    }
+
+    pub(crate) fn build_named(self) -> Caller<S>
     where
         S: Service,
     {
         Caller {
-            engine: Arc::clone(self.cloudy.engine()),
+            engine: Arc::clone(&self.cloudy.engine),
             key: self.cloudy.key_for(self.to.as_deref(), S::TYPE),
             timeout: self.timeout,
             _marker: PhantomData,
+            managed: None,
         }
     }
 }
@@ -236,6 +256,7 @@ pub struct Caller<S> {
     key: Key,
     timeout: Duration,
     _marker: PhantomData<S>,
+    pub(crate) managed: Option<crate::managed::ManagedPort>,
 }
 
 impl<S: Service> Caller<S> {
@@ -261,6 +282,16 @@ impl<S: Service> Caller<S> {
         };
         match reply {
             Ok(sample) => {
+                if self.managed.is_some() {
+                    if !self.key.matches(&sample.key) {
+                        return Err(CallError::Engine(anyhow::anyhow!(
+                            "response came from an undeclared target"
+                        )));
+                    }
+                    if attachment_fingerprint(sample.attachment.as_deref()).is_none() {
+                        return Err(CallError::MissingSchema);
+                    }
+                }
                 if let (Some(expected), Some(received)) = (
                     S::Response::SCHEMA,
                     attachment_fingerprint(sample.attachment.as_deref()),
@@ -294,6 +325,8 @@ pub enum CallError {
         /// The fingerprint that rode on the reply.
         received: u64,
     },
+    /// A managed response omitted its required schema fingerprint.
+    MissingSchema,
     /// The reply does not decode as `Response`.
     Decode(prost::DecodeError),
     /// An engine-layer error.
@@ -310,6 +343,7 @@ impl fmt::Display for CallError {
                 f,
                 "response schema fingerprint mismatch: expected {expected:016x}, received {received:016x}"
             ),
+            Self::MissingSchema => write!(f, "response has no schema fingerprint"),
             Self::Decode(e) => write!(f, "undecodable response: {e}"),
             Self::Engine(e) => write!(f, "engine: {e}"),
         }

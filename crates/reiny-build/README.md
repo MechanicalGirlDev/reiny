@@ -14,6 +14,8 @@ fn main() {
 `compile()` searches upward for the nearest `main.yaml` containing a `schema`
 block, skipping runtime-only module manifests. It reads only that build-time
 catalog; runtime providers and module wiring are never evaluated by codegen.
+Catalogs accept versions 1 and 2 because their schema shape is unchanged.
+Managed runtime manifests and bindings still require version 2.
 It compiles the declared
 protos with prost, and writes `$OUT_DIR/reiny_generated.rs`. The output contains
 re-exports of the publication/dependency types, a `reiny::Topic` impl for each
@@ -27,7 +29,7 @@ containing that catalog. Dependency projects provide their public catalog in
 their own `main.yaml`.
 
 ```yaml
-version: 1
+version: 2
 schema:
   project: { name: ping }
   publications:

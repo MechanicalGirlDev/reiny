@@ -1,0 +1,16 @@
+version: 2
+deployment: owned-child-example
+providers:
+  process: {type: process, bin_dir: target/debug}
+modules:
+  host: {source: apps/host}
+schema:
+  internals:
+    State: {proto: proto/driver.proto, message: owned.State}
+    Add: {proto: proto/driver.proto, message: owned.Add}
+    Sum: {proto: proto/driver.proto, message: owned.Sum}
+  services:
+    Adder: {request: Add, response: Sum}
+  projects:
+    owned_child_example:
+      publications: [State, Add, Sum]

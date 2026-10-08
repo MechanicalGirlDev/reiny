@@ -14,11 +14,11 @@ pub use acquire::GitSource;
 pub use artifacts::{BuildKind, BuildSpec};
 pub use deployment::{
     DeploymentClient, DeploymentPhase, DeploymentStatus, ModuleObserver, ModuleStatus,
-    StopSubscription, last_status, serve,
+    StopSubscription, TerminalSubscription, last_status, serve,
 };
 pub use modules::{
     ArtifactResource, DeploymentPlan, ExecutableModule, FailurePolicy, ModuleCall, ModuleError,
-    ModuleManifest, ModuleSource, PortSpec, ProviderKind, ProviderSpec, ResourceSpec,
-    RestartPolicy, RunSpec,
+    ModuleManifest, ModuleSource, PortSources, PortSpec, ProviderKind, ProviderSpec, ResourceSpec,
+    RestartPolicy, RunKind, RunSpec,
 };
 pub use prepared::{PreparedDeployment, PreparedModule};

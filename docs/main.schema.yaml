@@ -8,7 +8,7 @@ type: object
 additionalProperties: false
 required: [version]
 properties:
-  version: { const: 1 }
+  version: { const: 2 }
   deployment: { type: string, description: "Root only. Deployment identity." }
   domain: { type: string, description: "Root only. Defaults to the deployment name." }
   providers:
@@ -21,6 +21,14 @@ properties:
   build: { $ref: "#/$defs/build" }
   in: { $ref: "#/$defs/ports" }
   out: { $ref: "#/$defs/ports" }
+  owned_children:
+    type: object
+    additionalProperties:
+      type: object
+      additionalProperties: false
+      properties:
+        inputs: { type: array, uniqueItems: true, items: { type: string } }
+        outputs: { type: array, uniqueItems: true, items: { type: string } }
   resources:
     type: object
     additionalProperties: { $ref: "#/$defs/resource" }
@@ -30,10 +38,26 @@ $defs:
   port:
     type: object
     additionalProperties: false
-    required: [type]
     properties:
       type: { type: string }
-      from: { type: string, description: "<sibling>.<port> or in.<port>" }
+      kind: { enum: [stream, rpc], default: stream }
+      response: { type: string, description: "Required response type for RPC definitions." }
+      qos: { enum: [reliable, sensor], default: reliable }
+      retention: { enum: [volatile, last], default: volatile }
+      replay: { enum: [live, last], default: live }
+      buffer:
+        oneOf:
+          - { const: fifo }
+          - type: object
+            additionalProperties: false
+            required: [latest]
+            properties:
+              latest: { type: integer, minimum: 1 }
+      from:
+        description: "<sibling>.<port> or in.<port>; lists are explicit stream fan-in."
+        oneOf:
+          - { type: string }
+          - { type: array, minItems: 1, uniqueItems: true, items: { type: string } }
   ports:
     type: object
     additionalProperties: { $ref: "#/$defs/port" }
@@ -59,6 +83,8 @@ $defs:
         additionalProperties: { type: string }
       in: { $ref: "#/$defs/ports" }
       out: { $ref: "#/$defs/ports" }
+      config: { type: string, description: "Caller-relative replacement for a leaf's run.config." }
+      args: { type: array, items: { type: string }, description: "Replace a leaf's args, including with an empty list." }
   provider:
     type: object
     additionalProperties: false
@@ -73,9 +99,12 @@ $defs:
     additionalProperties: false
     required: [provider, bin]
     properties:
+      kind: { enum: [service, task], default: service }
       provider: { type: string }
       bin: { type: string }
       config: { type: string }
+      companions: { type: array, items: { type: string }, default: [], description: "Companion binary names without an executable suffix." }
+      config_assets: { type: array, items: { type: string }, default: [], description: "Relative to the selected config origin, including caller overrides. Absolute paths are rejected." }
       args: { type: array, items: { type: string } }
       restart: { enum: [manual, on_failure, always], default: manual }
       on_failure: { enum: [report, suspend_deployment], default: report }

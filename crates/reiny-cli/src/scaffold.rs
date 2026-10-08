@@ -186,7 +186,7 @@ const BUILD_RS: &str = "//! main.yaml schema code generation.\nfn main() {\n    
 
 fn main_yaml(proj: &str, bin: &str, publish: Option<&str>, locked: bool) -> Result<String> {
     let mut doc = Mapping::from_iter([
-        (Value::from("version"), Value::from(1)),
+        (Value::from("version"), Value::from(2)),
         (Value::from("deployment"), Value::from(proj)),
         (
             Value::from("providers"),
@@ -356,7 +356,7 @@ mod tests {
     fn dependencies_preserve_runtime_when_schema_dependency_is_added() {
         // Given
         let mut doc: Value = serde_yaml::from_str(
-            "version: 1\ndeployment: demo\nrun: {provider: process, bin: demo}\nschema:\n  project: {name: demo}\n  publications: {Ping: {proto: ping.proto}}\n",
+            "version: 2\ndeployment: demo\nrun: {provider: process, bin: demo}\nschema:\n  project: {name: demo}\n  publications: {Ping: {proto: ping.proto}}\n",
         ).unwrap();
         let before = doc.clone();
         // When
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn dependencies_are_created_when_schema_is_absent() {
         // Given
-        let mut doc: Value = serde_yaml::from_str("version: 1\ndeployment: demo").unwrap();
+        let mut doc: Value = serde_yaml::from_str("version: 2\ndeployment: demo").unwrap();
         // When
         insert_dependency(&mut doc, "ping", "0.1", "../ping").unwrap();
         // Then
@@ -402,6 +402,7 @@ mod tests {
         let text = main_yaml("demo", "demo", Some("Ping"), false).unwrap();
         // Then
         let module: reiny_launch::ModuleManifest = serde_yaml::from_str(&text).unwrap();
+        assert_eq!(module.version, 2);
         assert_eq!(module.outputs["ping"].type_name, "ping.Ping");
         assert!(!module.build.unwrap().locked);
         assert_eq!(module.run.unwrap().bin, "demo");
@@ -415,6 +416,7 @@ mod tests {
         let text = main_yaml("demo", "demo", None, true).unwrap();
         // Then
         let module: reiny_launch::ModuleManifest = serde_yaml::from_str(&text).unwrap();
+        assert_eq!(module.version, 2);
         assert!(module.inputs.is_empty());
         assert!(module.outputs.is_empty());
         assert!(module.build.unwrap().locked);

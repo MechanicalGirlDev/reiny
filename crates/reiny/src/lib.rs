@@ -52,7 +52,7 @@ mod shutdown;
 use engine::{Engine, Guard, Key, QueryParams, SCHEMA_CHUNK, SERVICE_CHUNK, SUB_CHUNK};
 use shutdown::Shutdown;
 
-pub use managed::MODULE_REPORT_ENV;
+pub use managed::{BUNDLE_DIR_ENV, CONFIG_DIR_ENV, MODULE_REPORT_ENV, OwnedChild};
 pub use pubsub::{
     Envelope, Presence, PresenceEvent, Publisher, PublisherBuilder, RawDescriptor, RawEnvelope,
     RawPresence, RawSubscriber, RawSubscriberBuilder, Subscriber, SubscriberBuilder,
@@ -284,6 +284,7 @@ impl Cloudy {
     /// Stand up a server for the request type `S`. It puts a queryable on
     /// `reiny/<domain>/<id>/<S::TYPE>`; take requests off [`Server::recv`] and answer with [`Request::reply`].
     pub fn serve<S: Service>(&self) -> Result<Server<S>> {
+        self.ensure_standalone()?;
         Server::declare(self)
     }
 
@@ -298,7 +299,11 @@ impl Cloudy {
         &self,
         request: S,
     ) -> std::result::Result<S::Response, CallError> {
-        self.caller::<S>().build().call(request).await
+        self.caller::<S>()
+            .build()
+            .map_err(CallError::Engine)?
+            .call(request)
+            .await
     }
 
     /// The launch ids currently serving the request type `S` (ourselves included, sorted by id).
@@ -370,15 +375,17 @@ impl Cloudy {
     }
 
     /// The engine underneath. Reach another engine's own features through `engine().as_any().downcast_ref::<E>()`.
-    #[must_use]
-    pub fn engine(&self) -> &Arc<dyn Engine> {
-        &self.engine
+    pub fn engine(&self) -> Result<&Arc<dyn Engine>> {
+        self.ensure_standalone()?;
+        Ok(&self.engine)
     }
 
     /// A second `Cloudy` on **another engine**, sharing this one's id / domain / shutdown / config.
     /// The door through which a bridge (`reiny::bridge::forward`) holds "the zenoh `Cloudy`" and "the
     /// link `Cloudy`" in one process. The `@launch` token is declared on the new engine as well.
     pub async fn with_engine(&self, engine: Arc<dyn Engine>) -> Result<Self> {
+        self.ensure_standalone()?;
+        managed::check_engine(&engine, false)?;
         let mut cloudy = Self::new(
             engine,
             self.id.clone(),
@@ -400,6 +407,7 @@ impl Cloudy {
     #[cfg(feature = "zenoh")]
     #[must_use]
     pub fn session(&self) -> Option<&zenoh::Session> {
+        self.ensure_standalone().ok()?;
         self.engine
             .as_any()
             .downcast_ref::<engine::Zenoh>()

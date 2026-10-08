@@ -42,7 +42,7 @@ fn runtime_only_modules_inherit_the_ancestor_catalog() {
     );
     f.write(
         "modules/worker/main.yaml",
-        "version: 1\nproviders: runtime-only\nrun: { provider: remote, bin: worker }\n",
+        "version: 2\nproviders: runtime-only\nrun: { provider: remote, bin: worker }\n",
     );
     std::fs::create_dir_all(f.path("modules/worker/src")).unwrap();
 
@@ -53,4 +53,21 @@ fn runtime_only_modules_inherit_the_ancestor_catalog() {
     assert_eq!(res.manifest_path(), f.path("main.yaml"));
     assert_eq!(res.types()[0].proto, f.path("proto/shared.proto"));
     assert_eq!(res.types()[0].message, "ws.Shared");
+}
+
+#[test]
+fn v2_catalog_resolves_types_without_interpreting_runtime_contracts() {
+    // Given a v2 catalog beside deliberately opaque runtime provider data.
+    let fixture = Fixture::new("v2-catalog");
+    fixture.write("proto/state.proto", "");
+    fixture.write("main.yaml",
+        "version: 2\nproviders: runtime-only\nschema:\n  project: {name: app}\n  publications:\n    State: {proto: proto/state.proto, message: probe.State}\n");
+    // When codegen resolves the app's catalog.
+    let resolution = describe(fixture.root()).unwrap();
+    // Then catalog-relative type resolution does not require a runtime deployment.
+    assert_eq!(
+        resolution.types()[0].proto,
+        fixture.path("proto/state.proto")
+    );
+    assert_eq!(resolution.types()[0].message, "probe.State");
 }

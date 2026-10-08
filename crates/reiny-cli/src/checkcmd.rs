@@ -20,7 +20,7 @@ pub(crate) fn check(path: Option<&Path>) -> Result<()> {
         .with_context(|| format!("reading {}", manifest.display()))?;
     let module: reiny_launch::ModuleManifest =
         serde_yaml::from_str(&text).with_context(|| format!("parsing {}", manifest.display()))?;
-    if module.version != 1 {
+    if !matches!(module.version, 1 | 2) {
         bail!(
             "{}: unsupported module version {}",
             manifest.display(),

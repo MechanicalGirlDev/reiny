@@ -14,13 +14,18 @@ use std::time::Duration;
 use prost::Message;
 use tokio::time::timeout;
 
-use crate::bindings::{InputBinding, ModuleBindings, ModuleReport, OutputBinding};
+use crate::bindings::{
+    CONTRACT_VERSION, EndpointContract, InputBinding, ModuleBindings, ModuleReport, OutputBinding,
+};
 use crate::engine::{Engine, Key, Local, Presence, QueryParams};
 use crate::{Cloudy, Descriptor, Qos, RuntimeOptions, Topic};
 
 mod bridge;
+mod delegation;
 mod lifecycle;
+mod policy;
 mod ports;
+mod rpc;
 mod startup;
 
 const PATIENCE: Duration = Duration::from_secs(5);
@@ -55,17 +60,27 @@ impl Topic for Bare {
 
 fn bindings(namespace: &str) -> ModuleBindings {
     ModuleBindings {
-        version: 1,
+        version: CONTRACT_VERSION,
         namespace: namespace.to_string(),
+        endpoint_namespace: namespace.to_string(),
         inputs: BTreeMap::new(),
         outputs: BTreeMap::new(),
+        children: BTreeMap::new(),
+        executables: Vec::new(),
     }
 }
 
 fn input(source: &str) -> InputBinding {
     InputBinding {
-        type_name: "test.Probe".to_string(),
-        source: source.to_string(),
+        contract: contract("test.Probe"),
+        sources: vec![source.to_string()],
+    }
+}
+
+fn contract(name: &str) -> EndpointContract {
+    EndpointContract {
+        type_name: name.to_string(),
+        ..EndpointContract::default()
     }
 }
 
@@ -93,7 +108,7 @@ async fn producer(bus: Arc<dyn Engine>, namespace: &str) -> Cloudy {
     contract.outputs.insert(
         "outgoing".to_string(),
         OutputBinding {
-            type_name: "test.Probe".to_string(),
+            contract: self::contract("test.Probe"),
         },
     );
     Cloudy::open(options(bus, contract))
