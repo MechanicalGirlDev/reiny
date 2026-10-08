@@ -2,6 +2,7 @@
 
 #![allow(clippy::expect_used)]
 
+use reiny_core::bindings::{QosProfile, ReceiveBuffer, Replay, Retention};
 use reiny_launch::{DeploymentPlan, ModuleError};
 
 fn write(dir: &std::path::Path, name: &str, text: &str) {
@@ -327,7 +328,7 @@ fn instance_config_and_args_replace_app_defaults_relative_to_caller() {
     assert_eq!(plan.nodes[0].run.config, Some(root.join("settings/a.yaml")));
     assert_eq!(plan.nodes[1].run.config, Some(root.join("settings/b.yaml")));
     assert_eq!(plan.nodes[0].run.args, ["project-a"]);
-    assert!(plan.nodes[1].run.args.is_empty());
+    assert_eq!(plan.nodes[1].run.args.len(), 0);
 }
 
 #[test]
@@ -377,7 +378,6 @@ fn app_policy_is_carried_in_bindings_without_becoming_project_policy() {
     // When app policies are resolved.
     let plan = DeploymentPlan::load(fixture.path(), false).expect("policy-compatible plan");
     // Then the app-owned publication and receive policies survive resolution.
-    use reiny_core::bindings::{QosProfile, ReceiveBuffer, Replay, Retention};
     assert_eq!(
         plan.nodes[0].bindings.outputs["state"].contract.qos,
         QosProfile::Sensor
