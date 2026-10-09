@@ -214,13 +214,12 @@ fn topic_node_service_against_live_launch() {
         .wait()
         .expect("sub token");
     let _cmd_schema = schema_queryable(&fab, cmd_key, "e2e.Sum");
-    let cmd_seen = Arc::new(AtomicBool::new(false));
+    let (cmd_seen, cmd_received) = std::sync::mpsc::channel();
     let _cmd_sub = {
-        let seen = Arc::clone(&cmd_seen);
         fab.declare_subscriber("reiny/lab/*/Cmd")
             .callback(move |s| {
                 if Sum::decode(s.payload().to_bytes().as_ref()).is_ok_and(|v| v.sum == 7) {
-                    seen.store(true, Ordering::SeqCst);
+                    let _ = cmd_seen.send(());
                 }
             })
             .wait()
@@ -315,16 +314,9 @@ fn topic_node_service_against_live_launch() {
         out.contains("reiny/lab/sim/Cmd: sent 1") && out.contains("e2e.Sum"),
         "topic pub: {out}"
     );
-    for _ in 0..50 {
-        if cmd_seen.load(Ordering::SeqCst) {
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    assert!(
-        cmd_seen.load(Ordering::SeqCst),
-        "the subscriber must have received the published Cmd"
-    );
+    cmd_received
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the subscriber must have received the published Cmd");
     // A source id that would corrupt the key is refused before anything is declared.
     assert!(
         !reiny(&["topic", "pub", "Cmd", "{}", "--as", "a/b"])

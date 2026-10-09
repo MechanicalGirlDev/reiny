@@ -37,7 +37,9 @@ deployment opens its declared ports by name instead
 [`docs/modules.md`](docs/modules.md).
 Version 2 app manifests own endpoint policies and executable definitions;
 project manifests reuse them through `source` and supply instance wiring and
-configuration. The [0.8 migration guide](docs/design/0.8.0.md) covers upgrades.
+configuration. The [0.9 migration guide](docs/design/0.9.0.md) covers instance
+asset overrides; the [0.8 migration guide](docs/design/0.8.0.md) covers named
+endpoint contracts.
 
 Request/response rides the same model — the **request type is the address**:
 
@@ -120,7 +122,7 @@ has one `main.yaml`; the format, wiring rules and lifecycle are described in
 [`docs/modules.md`](docs/modules.md).
 
 ```sh
-cargo install reiny-cli   # installs the `reiny` command
+cargo install reiny-cli --version 0.9.0 --locked   # installs the `reiny` command
 reiny new my-module
 reiny check my-module      # validate and show the type → topic map (no build)
 

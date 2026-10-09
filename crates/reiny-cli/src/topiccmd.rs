@@ -162,6 +162,8 @@ fn publish(args: &PubArgs) -> Result<()> {
     let key = format!("{KEY_ROOT}/{domain}/{}/{}", args.as_id, args.ty);
     let publisher = session
         .declare_publisher(key.clone())
+        // A one-shot CLI exits after put; do not leave its sample in a transport batch.
+        .express(true)
         .wait()
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("declaring publisher {key}"))?;

@@ -22,7 +22,7 @@ path = "src/bin/bindgen.rs"
 required-features = ["bindgen"]
 
 [dependencies]
-reiny = { path = "../reiny", version = "0.8.0", default-features = false }
+reiny = { path = "../reiny", version = "0.9.0", default-features = false }
 uniffi = "=0.32.2"
 tokio.workspace = true
 thiserror.workspace = true

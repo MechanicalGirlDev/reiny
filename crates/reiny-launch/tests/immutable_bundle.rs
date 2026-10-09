@@ -248,6 +248,95 @@ fn config_assets_follow_the_selected_config_origin() -> anyhow::Result<()> {
 }
 
 #[test]
+fn caller_assets_replace_defaults_and_freeze_from_selected_config_parent() -> anyhow::Result<()> {
+    let root = fixture()?;
+    fs::create_dir(root.path().join("app"))?;
+    fs::rename(root.path().join("config"), root.path().join("app/config"))?;
+    fs::write(root.path().join("app/config/override.bin"), b"app override")?;
+    fs::write(
+        root.path().join("app/main.yaml"),
+        "version: 2\nrun: {provider: process, bin: app, config: config/app.yaml, config_assets: [nested/input.bin]}\n",
+    )?;
+    fs::create_dir_all(root.path().join("settings/nested"))?;
+    fs::create_dir(root.path().join("assets"))?;
+    fs::write(root.path().join("settings/instance.yaml"), b"caller config")?;
+    fs::write(
+        root.path().join("settings/nested/input.bin"),
+        b"caller default",
+    )?;
+    fs::write(root.path().join("assets/override.bin"), b"caller override")?;
+    fs::write(
+        root.path().join("main.yaml"),
+        r"version: 2
+deployment: frozen
+providers:
+  process: {type: process, bin_dir: bin}
+modules:
+  a: {source: app}
+  b: {source: app, config_assets: [override.bin]}
+  c: {source: app, config_assets: []}
+  d: {source: app, config: settings/instance.yaml}
+  e: {source: app, config: settings/instance.yaml, config_assets: [../assets/override.bin]}
+",
+    )?;
+    let plan = DeploymentPlan::load(root.path(), false)?;
+    let prepared = plan.prepare()?;
+    // Unselected app assets must not enter the caller's fingerprint or bundle.
+    fs::write(
+        root.path().join("settings/nested/input.bin"),
+        b"changed default",
+    )?;
+    let changed_default = plan.prepare()?;
+    assert_ne!(
+        prepared.nodes[3].fingerprint,
+        changed_default.nodes[3].fingerprint
+    );
+    assert_eq!(
+        prepared.nodes[4].fingerprint,
+        changed_default.nodes[4].fingerprint
+    );
+    fs::write(root.path().join("assets/override.bin"), b"changed override")?;
+    let changed_override = plan.prepare()?;
+    assert_ne!(
+        prepared.nodes[4].fingerprint,
+        changed_override.nodes[4].fingerprint
+    );
+    fs::remove_dir_all(root.path().join("app"))?;
+    fs::remove_dir_all(root.path().join("settings"))?;
+    fs::remove_dir_all(root.path().join("assets"))?;
+    for (index, asset, bytes) in [
+        (0, "nested/input.bin", b"asset bytes".as_slice()),
+        (1, "override.bin", b"app override".as_slice()),
+        (3, "nested/input.bin", b"caller default".as_slice()),
+        (4, "../assets/override.bin", b"caller override".as_slice()),
+    ] {
+        let node = &prepared.nodes[index];
+        let origin = node.config_dir.as_ref().context("missing frozen origin")?;
+        assert_eq!(fs::read(origin.join(asset))?, bytes);
+        if index == 1 || index == 4 {
+            assert!(!origin.join("nested/input.bin").exists());
+        }
+        let config = node.run.config.as_ref().context("missing frozen config")?;
+        assert_eq!(config.parent(), Some(origin.as_path()));
+        assert_eq!(
+            fs::read(config)?,
+            if index < 3 {
+                b"asset: nested/input.bin\n".as_slice()
+            } else {
+                b"caller config".as_slice()
+            }
+        );
+    }
+    let cleared = prepared.nodes[2]
+        .config_dir
+        .as_ref()
+        .context("missing cleared origin")?;
+    assert!(!cleared.join("nested/input.bin").exists());
+    assert!(!cleared.join("override.bin").exists());
+    Ok(())
+}
+
+#[test]
 fn cargo_builds_only_declared_companions_and_launches_frozen_helper() -> anyhow::Result<()> {
     let root = fixture()?;
     fs::create_dir_all(root.path().join("src/bin"))?;

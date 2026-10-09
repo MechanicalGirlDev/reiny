@@ -158,6 +158,9 @@ pub struct ModuleCall {
     /// Instance configuration, relative to this caller, replacing the app default.
     #[serde(default)]
     pub config: Option<PathBuf>,
+    /// Instance assets replacing app defaults, relative to the selected config's parent.
+    #[serde(default)]
+    pub config_assets: Option<Vec<PathBuf>>,
     /// Instance arguments replacing, not appending to, the app defaults.
     #[serde(default)]
     pub args: Option<Vec<String>>,
@@ -604,15 +607,18 @@ impl Loader {
                 }
                 validate_connection(&child_namespace, port)?;
             }
-            if call.config.is_some() || call.args.is_some() {
+            if call.config.is_some() || call.config_assets.is_some() || call.args.is_some() {
                 let run = child.run.as_mut().ok_or_else(|| {
                     invalid(
                         &child_namespace,
-                        "config and args overrides require an executable app",
+                        "config, config_assets and args overrides require an executable app",
                     )
                 })?;
                 if let Some(config) = &call.config {
                     run.config = Some(absolute(&dir, config));
+                }
+                if let Some(config_assets) = &call.config_assets {
+                    run.config_assets.clone_from(config_assets);
                 }
                 if let Some(args) = &call.args {
                     run.args.clone_from(args);

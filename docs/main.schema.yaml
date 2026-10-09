@@ -84,6 +84,7 @@ $defs:
       in: { $ref: "#/$defs/ports" }
       out: { $ref: "#/$defs/ports" }
       config: { type: string, description: "Caller-relative replacement for a leaf's run.config." }
+      config_assets: { type: array, items: { type: string }, description: "Replace a leaf's assets, including with an empty list. Relative to the selected config's parent, not the caller. Omission retains app assets; nonempty assets require a selected config. Absolute paths are rejected." }
       args: { type: array, items: { type: string }, description: "Replace a leaf's args, including with an empty list." }
   provider:
     type: object

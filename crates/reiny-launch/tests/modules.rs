@@ -303,20 +303,20 @@ fn app_contract_is_reused_without_caller_type_or_output_redeclarations() {
 }
 
 #[test]
-fn instance_config_and_args_replace_app_defaults_relative_to_caller() {
-    // Given two instances use one app with defaults and distinct project settings.
+fn instance_config_assets_and_args_replace_app_defaults_relative_to_caller() {
+    // Given instances use one app with defaults and distinct project settings.
     let fixture = tempfile::tempdir().expect("fixture");
     write(
         fixture.path(),
         "main.yaml",
         &format!(
-            "{PROVIDER}modules:\n  a: {{source: apps/app, config: settings/a.yaml, args: [project-a]}}\n  b: {{source: apps/app, config: settings/b.yaml, args: []}}\n"
+            "{PROVIDER}modules:\n  a: {{source: apps/app, config: settings/a.yaml, config_assets: [a.bin], args: [project-a]}}\n  b: {{source: apps/app, config: settings/b.yaml, config_assets: [], args: []}}\n  c: {{source: apps/app}}\n  d: {{source: apps/app, config_assets: [d.bin]}}\n  e: {{source: apps/app, config: settings/a.yaml}}\n"
         ),
     );
     write(
         fixture.path(),
         "apps/app/main.yaml",
-        "version: 2\nrun: {provider: process, bin: app, config: defaults.yaml, args: [app-default]}\n",
+        "version: 2\nrun: {provider: process, bin: app, config: defaults.yaml, config_assets: [default.bin], args: [app-default]}\n",
     );
     write(fixture.path(), "apps/app/defaults.yaml", "default: true");
     write(fixture.path(), "settings/a.yaml", "instance: a");
@@ -329,6 +329,70 @@ fn instance_config_and_args_replace_app_defaults_relative_to_caller() {
     assert_eq!(plan.nodes[1].run.config, Some(root.join("settings/b.yaml")));
     assert_eq!(plan.nodes[0].run.args, ["project-a"]);
     assert_eq!(plan.nodes[1].run.args.len(), 0);
+    assert_eq!(
+        plan.nodes[0].run.config_assets,
+        [std::path::PathBuf::from("a.bin")]
+    );
+    assert_eq!(
+        plan.nodes[1].run.config_assets,
+        [] as [std::path::PathBuf; 0]
+    );
+    assert_eq!(
+        plan.nodes[2].run.config,
+        Some(root.join("apps/app/defaults.yaml"))
+    );
+    assert_eq!(
+        plan.nodes[2].run.config_assets,
+        [std::path::PathBuf::from("default.bin")]
+    );
+    assert_eq!(plan.nodes[2].run.args, ["app-default"]);
+    assert_eq!(plan.nodes[3].run.config, plan.nodes[2].run.config);
+    assert_eq!(
+        plan.nodes[3].run.config_assets,
+        [std::path::PathBuf::from("d.bin")]
+    );
+    assert_eq!(plan.nodes[4].run.config, plan.nodes[0].run.config);
+    assert_eq!(
+        plan.nodes[4].run.config_assets,
+        plan.nodes[2].run.config_assets
+    );
+}
+
+#[test]
+fn instance_overrides_require_an_executable_and_assets_require_config() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    for overrides in [
+        "config: settings.yaml",
+        "args: []",
+        "config_assets: []",
+        "config_assets: [asset.bin]",
+    ] {
+        write(
+            fixture.path(),
+            "main.yaml",
+            &format!("{PROVIDER}modules:\n  app: {{source: app, {overrides}}}\n"),
+        );
+        write(fixture.path(), "app/main.yaml", "version: 2\n");
+        assert!(matches!(
+            DeploymentPlan::load(fixture.path(), false),
+            Err(ModuleError::Invalid { module, .. }) if module == "test/app"
+        ));
+    }
+    write(
+        fixture.path(),
+        "app/main.yaml",
+        "version: 2\nrun: {provider: process, bin: app}\n",
+    );
+    assert!(matches!(
+        DeploymentPlan::load(fixture.path(), false),
+        Err(ModuleError::Invalid { module, .. }) if module == "test/app"
+    ));
+    write(
+        fixture.path(),
+        "main.yaml",
+        &format!("{PROVIDER}modules:\n  app: {{source: app, config_assets: []}}\n"),
+    );
+    assert!(DeploymentPlan::load(fixture.path(), false).is_ok());
 }
 
 #[test]

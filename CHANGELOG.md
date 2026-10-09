@@ -5,6 +5,22 @@ All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
 `reiny-launch`, `reiny-cli`, `reiny-ffi`).
 Versions are kept in lockstep via `[workspace.package].version`.
 
+## 0.9.0 - 2026-10-09
+
+**Breaking Rust API.** `ModuleCall` gains an optional `config_assets` field.
+Rust struct literals must supply it; YAML callers that do not use the new field
+retain the app's asset defaults.
+
+- Module calls can replace app-owned `run.config_assets` without redefining
+  endpoint contracts. Paths remain relative to the selected config directory,
+  including a caller-selected config.
+- An omitted override preserves app defaults; an explicit empty list clears
+  them. Frozen snapshots and relocated bundles use the effective instance assets.
+- Runtime manifests, managed bindings, compiled reports, and wire identities
+  remain version 2. Topic keys and schema fingerprints are unchanged.
+- Single-shot `topic pub` messages bypass transport batching so CLI exit does
+  not discard the final sample.
+
 ## 0.8.0 - 2026-10-08
 
 **Breaking.** Runtime manifests, managed bindings, and compiled reports use

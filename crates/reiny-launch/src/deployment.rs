@@ -670,8 +670,8 @@ impl<'a> Owner<'a> {
                             }
                             action @ (Action::WaitReady { timeout_ms }
                             | Action::WaitRevision { timeout_ms, .. }) => {
-                                let timeout = Duration::from_millis(timeout_ms)
-                                    .min(Duration::from_secs(3600));
+                                let timeout =
+                                    Duration::from_millis(timeout_ms).min(Duration::from_hours(1));
                                 self.waiters.push(Waiter {
                                     stream: connection.stream,
                                     action,
@@ -1087,7 +1087,7 @@ impl Owner<'_> {
                     } else {
                         DeploymentPhase::Starting
                     };
-                    if started.elapsed() >= Duration::from_secs(60) {
+                    if started.elapsed() >= Duration::from_mins(1) {
                         self.attempts.remove(name);
                     }
                 }

@@ -69,6 +69,7 @@ modules:
     in:
       <port>: { from: "<sibling>.<port>" }  # or "in.<port>"
     config: "instances/robot.yaml"  # optional, caller-relative
+    config_assets: ["assets/model.bin"] # optional replacement, config-parent-relative
     args: ["--mode", "lab"]         # optional replacement, not append
 ```
 
@@ -80,9 +81,11 @@ modules:
   is visible by default, so callers need not repeat `out`. Calls cannot
   redefine endpoint policies.
 - Call `config` paths are relative to the caller; default `run.config` paths
-  are relative to the app. Call `args` replaces the app list, including with
-  `[]`. These overrides apply only to a called executable, not descendants of
-  a composite.
+  are relative to the app. Call `config_assets` and `args` replace their app
+  lists, including with `[]`; omission retains the app defaults.
+  Asset paths are relative to the selected config's parent, whether that config
+  comes from the app or caller. Nonempty assets require a selected config.
+  These overrides apply only to a called executable, not descendants of a composite.
 - A Git source is `{ git: <url>, ref: <branch|tag|commit>, path: <subdir> }`.
   `path` defaults to the repository root. The first resolution pins the commit
   in the root's `lock.yaml`, and later runs reuse that pin. Only

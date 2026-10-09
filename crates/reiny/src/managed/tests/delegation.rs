@@ -27,9 +27,13 @@ fn host_bindings() -> ModuleBindings {
     binding
 }
 
-// The child OS process blocks on its owned stdin. Its managed endpoints use a real Local
+// The child OS process blocks on a pipe retained by the fixture, not Child::stdin, which
+// Tokio's Child::wait closes before reaping. Its managed endpoints use a real Local
 // engine in this test process, so process exit and bus readiness can be exercised independently.
-async fn spawn_fixture(bus: Arc<Local>, directory: &Directory) -> (Cloudy, OwnedChild) {
+async fn spawn_fixture(
+    bus: Arc<Local>,
+    directory: &Directory,
+) -> (Cloudy, OwnedChild, std::io::PipeWriter) {
     let mut host = Cloudy::open(options(bus, host_bindings()))
         .await
         .expect("host");
@@ -51,14 +55,15 @@ async fn spawn_fixture(bus: Arc<Local>, directory: &Directory) -> (Cloudy, Owned
     command.args(["/D", "/C", "set", "/P", "reiny_fixture="]);
     #[cfg(not(windows))]
     command.args(["-c", "read reiny_fixture"]);
+    let (stdin, hold_stdin) = std::io::pipe().expect("fixture input pipe");
     command
-        .stdin(Stdio::piped())
+        .stdin(Stdio::from(stdin))
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let child = host
         .spawn_owned_child("driver", &mut command, &directory.0)
         .expect("spawn owned");
-    (host, child)
+    (host, child, hold_stdin)
 }
 
 async fn open_child(bus: Arc<Local>, directory: &Directory) -> Cloudy {
@@ -69,6 +74,24 @@ async fn open_child(bus: Arc<Local>, directory: &Directory) -> Cloudy {
     let mut opts = options(bus, child_bindings);
     opts.module_report_path = Some(directory.0.join("driver/report.json"));
     Cloudy::open(opts).await.expect("child context")
+}
+
+async fn announce_child_ready(bus: &Local, child: &Cloudy) {
+    let namespace = &child
+        .module
+        .bindings
+        .as_ref()
+        .expect("child bindings")
+        .namespace;
+    let (_watch, mut events) = watch_ready(bus, namespace);
+    child.ready().expect("child initialization complete");
+    let key = Key::topic(DOMAIN, Some(namespace), READY_CHUNK);
+    assert_eq!(
+        timeout(PATIENCE, events.recv())
+            .await
+            .expect("child ready token delivered"),
+        Some(Presence::Joined(key))
+    );
 }
 
 fn watch_ready(
@@ -130,13 +153,13 @@ async fn delegation_is_exclusive_and_child_runtime_identity_is_distinct() {
 async fn host_requires_child_report_and_live_readiness_then_withdraws_on_port_loss() {
     let directory = Directory::new();
     let bus = Arc::new(Local::new());
-    let (mut host, mut process) = spawn_fixture(bus.clone(), &directory).await;
+    let (mut host, mut process, _stdin) = spawn_fixture(bus.clone(), &directory).await;
     host.module.report_path = Some(directory.0.join("host-report.json"));
     let child = open_child(bus.clone(), &directory).await;
     let incoming = child.input::<Probe>("incoming").expect("child input");
     let output = child.output::<Probe>("outgoing").expect("child output");
     assert!(host.ready().is_err());
-    child.ready().expect("child initialization complete");
+    announce_child_ready(&bus, &child).await;
     // The token alone cannot satisfy the host: the child report must be accepted first.
     assert!(host.ready().is_err());
     timeout(PATIENCE, process.wait_ready())
@@ -183,11 +206,11 @@ async fn host_requires_child_report_and_live_readiness_then_withdraws_on_port_lo
 async fn process_exit_with_a_stale_child_token_withdraws_host_readiness() {
     let directory = Directory::new();
     let bus = Arc::new(Local::new());
-    let (host, mut process) = spawn_fixture(bus.clone(), &directory).await;
+    let (host, mut process, _stdin) = spawn_fixture(bus.clone(), &directory).await;
     let child = open_child(bus.clone(), &directory).await;
     let _incoming = child.input::<Probe>("incoming").expect("input");
     let _outgoing = child.output::<Probe>("outgoing").expect("output");
-    child.ready().expect("child ready");
+    announce_child_ready(&bus, &child).await;
     timeout(PATIENCE, process.wait_ready())
         .await
         .expect("bounded readiness")
@@ -224,7 +247,7 @@ async fn process_exit_with_a_stale_child_token_withdraws_host_readiness() {
 async fn a_ready_child_cannot_substitute_a_report_from_another_namespace() {
     let directory = Directory::new();
     let bus = Arc::new(Local::new());
-    let (host, mut process) = spawn_fixture(bus.clone(), &directory).await;
+    let (host, mut process, _stdin) = spawn_fixture(bus.clone(), &directory).await;
     let child = open_child(bus, &directory).await;
     let _incoming = child.input::<Probe>("incoming").expect("input");
     let _outgoing = child.output::<Probe>("outgoing").expect("output");
@@ -251,7 +274,7 @@ async fn a_ready_child_cannot_substitute_a_report_from_another_namespace() {
 async fn artifacts_require_a_staged_allowlisted_path_and_delegation_is_not_repeatable() {
     let directory = Directory::new();
     let bus = Arc::new(Local::new());
-    let (host, mut child) = spawn_fixture(bus, &directory).await;
+    let (host, mut child, _stdin) = spawn_fixture(bus, &directory).await;
     assert!(host.artifact("not-declared").is_err());
     assert!(host.artifact("../helper").is_err());
     let mut command = tokio::process::Command::new(host.artifact("helper").expect("helper"));
@@ -279,7 +302,7 @@ async fn host_shutdown_delivers_child_stop_before_enforcing_process_reaping() {
     // Given a real blocked process and its distinct managed control endpoint.
     let directory = Directory::new();
     let bus = Arc::new(Local::new());
-    let (host, mut process) = spawn_fixture(bus.clone(), &directory).await;
+    let (host, mut process, _stdin) = spawn_fixture(bus.clone(), &directory).await;
     let child = open_child(bus, &directory).await;
     // When the host receives cooperative shutdown.
     host.shutdown_now();
