@@ -3374,7 +3374,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reiny"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "flume 0.12.0",
@@ -3392,7 +3392,7 @@ dependencies = [
 
 [[package]]
 name = "reiny-build"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "prost",
@@ -3406,7 +3406,7 @@ dependencies = [
 
 [[package]]
 name = "reiny-cli"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3433,7 +3433,7 @@ dependencies = [
 
 [[package]]
 name = "reiny-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "prost",
  "serde",
@@ -3441,7 +3441,7 @@ dependencies = [
 
 [[package]]
 name = "reiny-ffi"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "prost",
  "reiny",
@@ -3455,7 +3455,7 @@ dependencies = [
 
 [[package]]
 name = "reiny-iceoryx2"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "iceoryx2",
@@ -3468,7 +3468,7 @@ dependencies = [
 
 [[package]]
 name = "reiny-launch"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "getrandom 0.3.4",
@@ -3486,7 +3486,7 @@ dependencies = [
 
 [[package]]
 name = "reiny-link"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "cobs 0.5.1",
@@ -3501,7 +3501,7 @@ dependencies = [
 
 [[package]]
 name = "reiny-macros"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3510,7 +3510,7 @@ dependencies = [
 
 [[package]]
 name = "reiny-ros2"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "prost",
@@ -4009,9 +4009,9 @@ dependencies = [
 
 [[package]]
 name = "serialport"
-version = "4.10.0"
+version = "4.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a2f4ac56b5d3af3c40fbbee17be96d532cba02fa5853926aacdb77d926272ab"
+checksum = "6ba5f8f29aa20853c4e3e85a33ec580eb66be1f057142e77a333834a318bacf2"
 dependencies = [
  "bitflags 2.13.1",
  "cfg-if 1.0.4",

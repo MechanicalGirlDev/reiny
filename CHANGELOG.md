@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
+`reiny-link`, `reiny-iceoryx2`, `reiny-ros2`, `reiny-build`, `reiny-macros`,
+`reiny-launch`, `reiny-cli`, `reiny-ffi`).
+Versions are kept in lockstep via `[workspace.package].version`.
+
+## 0.10.0 - 2026-10-13
+
 ### Breaking changes
 
 - Build-time catalogs move to `schema.yaml` (`version: 2` and `schema` envelope).
@@ -20,10 +27,20 @@
 - Topics require an explicit `SCHEMA: u64` and `DESCRIPTOR` declaration. Typed pub/sub and RPC reject missing, malformed, and mismatched fingerprints.
 - Link RPC replies carry the response fingerprint; raw replies require it and raw calls return it alongside the prost bytes.
 
-All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
-`reiny-link`, `reiny-iceoryx2`, `reiny-ros2`, `reiny-build`, `reiny-macros`,
-`reiny-launch`, `reiny-cli`, `reiny-ffi`).
-Versions are kept in lockstep via `[workspace.package].version`.
+### Changed
+
+- SDK and CLI share resolved binding validation, including exact sources,
+  endpoint policies, exclusive child delegation, and wire-address collisions.
+- CLI `topic echo`, `hz`, and `bw` reuse SDK named raw inputs, readiness, and
+  shutdown. Declared latest buffers and retained startup replay are supported.
+- Typed and raw publishers share byte sending, retained history, and presence
+  declaration while preserving lazy typed sends and schema advertisement.
+
+### Fixed
+
+- Native C, C++, and C# smoke checks receive explicit fixture paths in CI.
+- ROS2 loopback test bindings use a concrete map default for strict Clippy.
+- Locked serial transport builds use the non-yanked `serialport` 4.10.1 release.
 
 ## 0.9.0 - 2026-10-09
 
