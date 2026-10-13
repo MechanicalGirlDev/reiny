@@ -177,11 +177,10 @@ async fn duplicate_transport_outputs_fail_even_when_declared_names_differ() {
             },
         );
     }
-    let cloudy = Cloudy::open(options(Arc::new(Local::new()), contract))
-        .await
-        .expect("cloudy");
-    let _first = cloudy.output::<Probe>("short").expect("first output");
-
-    // When the second alias is created, then the executable cannot publish ambiguously.
-    assert!(cloudy.output::<Probe>("qualified").is_err());
+    // The shared contract validator rejects ambiguous addresses before opening the context.
+    assert!(
+        Cloudy::open(options(Arc::new(Local::new()), contract))
+            .await
+            .is_err()
+    );
 }

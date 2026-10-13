@@ -14,7 +14,7 @@ use anyhow::{Context, Result, ensure};
 use clap::Args;
 use reiny::bindings::{
     CONTRACT_VERSION, EndpointContract, ModuleBindings, ModuleReport, PortKind, PortReport,
-    QosProfile, ReceiveBuffer, Replay, Retention,
+    ReceiveBuffer, Replay,
 };
 use reiny::zenoh::{self, Wait};
 use reiny::{RuntimeOptions, ZenohSource};
@@ -209,138 +209,13 @@ fn segment(value: &str) -> bool {
         && !value.contains(char::is_whitespace)
 }
 
-fn namespace(value: &str) -> bool {
-    value
-        .split('/')
-        .all(|part| segment(part) && !matches!(part, "." | ".."))
-}
-
-fn type_name(value: &str) -> bool {
-    value.split('.').all(|part| {
-        !part.is_empty()
-            && part
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    })
-}
-
 pub(crate) fn validate_bindings(bindings: &ModuleBindings, domain: &str) -> Result<()> {
     ensure!(segment(domain), "data domain must be one exact key segment");
+    bindings.validate()?;
     ensure!(
-        bindings.version == CONTRACT_VERSION,
-        "unsupported module bindings version"
+        bindings.children.is_empty(),
+        "CLI bindings cannot delegate endpoints to owned children"
     );
-    ensure!(
-        namespace(&bindings.namespace) && namespace(&bindings.endpoint_namespace),
-        "invalid module bindings identity"
-    );
-    ensure!(
-        (bindings.namespace == bindings.endpoint_namespace
-            || bindings
-                .namespace
-                .strip_prefix(&format!("{}/owned/", bindings.endpoint_namespace))
-                .is_some_and(|child| !child.is_empty() && !child.contains('/')))
-            && bindings.children.is_empty(),
-        "CLI bindings must identify their own namespace or a declared owned child without child delegations"
-    );
-    let mut addresses = BTreeMap::new();
-    let mut output_types = std::collections::BTreeSet::new();
-    for (name, contract, sources, input) in bindings
-        .inputs
-        .iter()
-        .map(|(name, port)| (name, &port.contract, port.sources.as_slice(), true))
-        .chain(
-            bindings
-                .outputs
-                .iter()
-                .map(|(name, port)| (name, &port.contract, &[][..], false)),
-        )
-    {
-        validate_endpoint_contract(name, contract, sources.len(), input)?;
-        ensure!(
-            !input || !sources.is_empty(),
-            "input endpoint {name} requires exact sources"
-        );
-        ensure!(
-            sources.iter().all(|source| namespace(source)),
-            "endpoint {name} has a wildcard or invalid source"
-        );
-        let unique: std::collections::BTreeSet<_> = sources.iter().collect();
-        ensure!(
-            unique.len() == sources.len(),
-            "endpoint {name} has duplicate sources"
-        );
-        if !input {
-            ensure!(
-                output_types.insert(&contract.type_name),
-                "duplicate output type in module bindings"
-            );
-        }
-        let sources = if input {
-            sources
-        } else {
-            std::slice::from_ref(&bindings.endpoint_namespace)
-        };
-        for source in sources {
-            let address = (source, topic_type(contract), contract.kind == PortKind::Rpc);
-            if let Some(previous) = addresses.insert(address, &contract.type_name) {
-                ensure!(
-                    previous == &contract.type_name,
-                    "endpoint types collide on one wire address"
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_endpoint_contract(
-    name: &str,
-    contract: &EndpointContract,
-    source_count: usize,
-    input: bool,
-) -> Result<()> {
-    ensure!(segment(name), "invalid endpoint name {name:?}");
-    ensure!(
-        type_name(&contract.type_name),
-        "invalid type for endpoint {name}"
-    );
-    ensure!(
-        !matches!(contract.buffer, ReceiveBuffer::Latest(0)),
-        "zero buffer for endpoint {name}"
-    );
-    ensure!(
-        !input
-            || (contract.retention == Retention::Volatile && contract.qos == QosProfile::Reliable),
-        "qos and retention belong to outputs"
-    );
-    ensure!(
-        input || (contract.replay == Replay::Live && contract.buffer == ReceiveBuffer::Fifo),
-        "replay and buffer belong to inputs"
-    );
-    match contract.kind {
-        PortKind::Stream => ensure!(
-            contract.response.is_none(),
-            "stream endpoint {name} has a response"
-        ),
-        PortKind::Rpc => {
-            ensure!(
-                contract.response.as_deref().is_some_and(type_name),
-                "RPC endpoint {name} requires a valid response type"
-            );
-            ensure!(
-                !input || source_count == 1,
-                "uses endpoint {name} requires exactly one source"
-            );
-            ensure!(
-                contract.retention == Retention::Volatile
-                    && contract.replay == Replay::Live
-                    && contract.buffer == ReceiveBuffer::Fifo
-                    && contract.qos == QosProfile::Reliable,
-                "stream policy does not apply to RPC endpoints"
-            );
-        }
-    }
     Ok(())
 }
 
@@ -450,46 +325,6 @@ pub(crate) fn output_key(
     );
     key.validate()?;
     Ok((port.contract.clone(), key.to_string()))
-}
-
-/// One receive queue fed only by exact declared source keys, never a domain wildcard.
-pub(crate) struct BoundSubscription {
-    receiver: std::sync::mpsc::Receiver<zenoh::sample::Sample>,
-    _subscribers: Vec<zenoh::pubsub::Subscriber<()>>,
-}
-
-impl BoundSubscription {
-    pub(crate) fn open(session: &zenoh::Session, keys: &[String]) -> Result<Self> {
-        let (sender, receiver) = std::sync::mpsc::sync_channel(256);
-        let mut subscribers = Vec::new();
-        for key in keys {
-            let sender = sender.clone();
-            subscribers.push(
-                session
-                    .declare_subscriber(key.clone())
-                    .callback(move |sample| {
-                        let _ = sender.send(sample);
-                    })
-                    .wait()
-                    .map_err(anyhow::Error::msg)?,
-            );
-        }
-        Ok(Self {
-            receiver,
-            _subscribers: subscribers,
-        })
-    }
-
-    pub(crate) fn recv_timeout(
-        &self,
-        timeout: std::time::Duration,
-    ) -> Result<Option<zenoh::sample::Sample>, std::sync::mpsc::RecvTimeoutError> {
-        match self.receiver.recv_timeout(timeout) {
-            Ok(sample) => Ok(Some(sample)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(None),
-            Err(error) => Err(error),
-        }
-    }
 }
 
 /// The domain, hierarchical source and type of a topic. Side chunks are rejected.
@@ -626,6 +461,7 @@ pub(crate) fn collect_schemas_all(
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use reiny::bindings::Retention;
 
     #[test]
     fn dynamic_samples_require_the_exact_descriptor_fingerprint() {

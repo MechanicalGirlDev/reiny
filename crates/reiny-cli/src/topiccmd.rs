@@ -19,13 +19,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use reiny::bindings::PortKind;
-use reiny::zenoh;
 
 use crate::bus::{
-    BoundSubscription, BusArgs, KEY_ROOT, KeyParts, LAUNCH_CHUNK, SERVICE_CHUNK, SUB_CHUNK,
-    alive_keys, attachment_u64, collect_schemas, contract_schema, input_keys, input_policy,
-    key_source, output_key, ready_inputs, schema_fingerprint, stream_report, topic_type,
-    verify_fingerprint,
+    BusArgs, KEY_ROOT, KeyParts, LAUNCH_CHUNK, SERVICE_CHUNK, SUB_CHUNK, alive_keys,
+    collect_schemas, contract_schema, input_keys, key_source, output_key, schema_fingerprint,
+    topic_type, verify_fingerprint,
 };
 use crate::codec::{Codec, hex};
 
@@ -230,7 +228,6 @@ fn echo(args: &EchoArgs) -> Result<()> {
         PortKind::Stream,
         args.from.as_deref(),
     )?;
-    input_policy(&contract, false)?;
     let (_, all_keys) = input_keys(&bindings, &domain, &args.ty, PortKind::Stream, None)?;
     let (session, _) = args.bus.open()?;
     let mut codecs = BTreeMap::new();
@@ -238,8 +235,6 @@ fn echo(args: &EchoArgs) -> Result<()> {
         let (fqn, set) = contract_schema(&session, key, &contract)?;
         codecs.insert(key.clone(), Codec::from_file_set(&set, &fqn)?);
     }
-    let subscriber = BoundSubscription::open(&session, &all_keys)?;
-
     let stop = Arc::new(AtomicBool::new(false));
     let expected = codecs
         .values()
@@ -250,13 +245,17 @@ fn echo(args: &EchoArgs) -> Result<()> {
         codecs.values().all(|codec| codec.fingerprint == expected),
         "declared input sources disagree on schema fingerprint"
     );
-    let _ready = ready_inputs(
-        &session,
-        &domain,
-        &bindings,
-        BTreeMap::from([(args.ty.clone(), stream_report(&contract, expected))]),
-        Arc::clone(&stop),
-    )?;
+    let (runtime, cloudy) = args.bus.context(session, bindings)?;
+    let mut subscriber = cloudy.raw_input(&args.ty, &contract.type_name, expected)?;
+    cloudy.ready()?;
+    {
+        let cloudy = Arc::clone(&cloudy);
+        let stop = Arc::clone(&stop);
+        runtime.spawn(async move {
+            cloudy.shutdown().await;
+            stop.store(true, Ordering::SeqCst);
+        });
+    }
     {
         let stop = Arc::clone(&stop);
         ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst))
@@ -274,26 +273,27 @@ fn echo(args: &EchoArgs) -> Result<()> {
         if args.count.is_some_and(|n| shown >= n) {
             break;
         }
-        match subscriber.recv_timeout(Duration::from_millis(100)) {
+        match runtime.block_on(async {
+            tokio::time::timeout(Duration::from_millis(100), subscriber.recv()).await
+        }) {
             Ok(Some(sample)) => {
-                if sample.kind() != zenoh::sample::SampleKind::Put {
-                    continue;
-                }
-                let key = sample.key_expr().as_str().to_string();
+                let key = format!(
+                    "{KEY_ROOT}/{domain}/{}/{}",
+                    sample.source,
+                    topic_type(&contract)
+                );
                 if !keys.contains(&key) {
                     continue;
                 }
-                let source = key_source(&key).to_string();
-                let payload = sample.payload().to_bytes();
                 let codec = codecs
                     .get(&key)
                     .context("sample came from an undeclared source")?;
-                let text = echo_text(codec, &payload, attachment_u64(&sample), args.raw)?;
-                println!("{source}  {text}");
+                let text = echo_text(codec, &sample.payload, sample.schema, args.raw)?;
+                println!("{}  {text}", sample.source);
                 shown += 1;
             }
-            Ok(None) => {}
-            Err(_) => break,
+            Ok(None) => break,
+            Err(_) => {}
         }
     }
     Ok(())
@@ -437,7 +437,6 @@ fn rate(args: &RateArgs, mode: Mode) -> Result<()> {
         PortKind::Stream,
         args.from.as_deref(),
     )?;
-    input_policy(&contract, false)?;
     let (_, all_keys) = input_keys(&bindings, &domain, &args.ty, PortKind::Stream, None)?;
     let (session, _) = args.bus.open()?;
     let mut fingerprints = BTreeMap::new();
@@ -445,8 +444,6 @@ fn rate(args: &RateArgs, mode: Mode) -> Result<()> {
         let (fqn, set) = contract_schema(&session, key, &contract)?;
         fingerprints.insert(key.clone(), schema_fingerprint(&set, &fqn)?);
     }
-    let subscriber = BoundSubscription::open(&session, &all_keys)?;
-
     let stop = Arc::new(AtomicBool::new(false));
     let expected = *fingerprints
         .values()
@@ -458,13 +455,17 @@ fn rate(args: &RateArgs, mode: Mode) -> Result<()> {
             .all(|fingerprint| *fingerprint == expected),
         "declared input sources disagree on schema fingerprint"
     );
-    let _ready = ready_inputs(
-        &session,
-        &domain,
-        &bindings,
-        BTreeMap::from([(args.ty.clone(), stream_report(&contract, expected))]),
-        Arc::clone(&stop),
-    )?;
+    let (runtime, cloudy) = args.bus.context(session, bindings)?;
+    let mut subscriber = cloudy.raw_input(&args.ty, &contract.type_name, expected)?;
+    cloudy.ready()?;
+    {
+        let cloudy = Arc::clone(&cloudy);
+        let stop = Arc::clone(&stop);
+        runtime.spawn(async move {
+            cloudy.shutdown().await;
+            stop.store(true, Ordering::SeqCst);
+        });
+    }
     {
         let stop = Arc::clone(&stop);
         ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst))
@@ -482,27 +483,30 @@ fn rate(args: &RateArgs, mode: Mode) -> Result<()> {
         if deadline.is_some_and(|d| Instant::now() >= d) {
             break;
         }
-        match subscriber.recv_timeout(Duration::from_millis(100)) {
+        match runtime.block_on(async {
+            tokio::time::timeout(Duration::from_millis(100), subscriber.recv()).await
+        }) {
             Ok(Some(sample)) => {
-                if sample.kind() != zenoh::sample::SampleKind::Put {
-                    continue;
-                }
-                if !keys.iter().any(|key| key == sample.key_expr().as_str()) {
+                let key = format!(
+                    "{KEY_ROOT}/{domain}/{}/{}",
+                    sample.source,
+                    topic_type(&contract)
+                );
+                if !keys.contains(&key) {
                     continue;
                 }
                 let expected = fingerprints
-                    .get(sample.key_expr().as_str())
+                    .get(&key)
                     .context("sample came from an undeclared source")?;
-                verify_fingerprint(*expected, attachment_u64(&sample))?;
-                let source = key_source(sample.key_expr().as_str()).to_string();
-                series.entry(source).or_default().push(
+                verify_fingerprint(*expected, sample.schema)?;
+                series.entry(sample.source).or_default().push(
                     Instant::now(),
-                    sample.payload().len(),
+                    sample.payload.len(),
                     window,
                 );
             }
-            Ok(None) => {}
-            Err(_) => break,
+            Ok(None) => break,
+            Err(_) => {}
         }
         if last_print.elapsed() >= Duration::from_secs(1) {
             print_rates(&series, mode, &args.ty);

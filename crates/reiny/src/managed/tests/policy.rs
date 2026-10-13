@@ -11,6 +11,7 @@ use std::sync::Mutex;
 struct Declarations {
     subscriptions: Vec<Key>,
     publishers: Vec<(Key, Qos)>,
+    publisher_events: Vec<(Key, &'static str)>,
 }
 
 // Instrument the real ordered Local engine; every operation still reaches the bus.
@@ -25,11 +26,11 @@ impl Engine for Observed {
         self.local.caps()
     }
     fn publisher(&self, key: &Key, qos: &Qos) -> Result<Box<dyn RawPublisher>> {
-        self.declarations
-            .lock()
-            .expect("declarations")
-            .publishers
-            .push((key.clone(), *qos));
+        {
+            let mut declarations = self.declarations.lock().expect("declarations");
+            declarations.publishers.push((key.clone(), *qos));
+            declarations.publisher_events.push((key.clone(), "sender"));
+        }
         self.local.publisher(key, qos)
     }
     fn subscribe(&self, key: &Key, callback: Callback<Sample>) -> Result<Guard> {
@@ -41,6 +42,11 @@ impl Engine for Observed {
         self.local.subscribe(key, callback)
     }
     fn declare_alive(&self, key: &Key) -> Result<Guard> {
+        self.declarations
+            .lock()
+            .expect("declarations")
+            .publisher_events
+            .push((key.clone(), "presence"));
         self.local.declare_alive(key)
     }
     fn alive(&self, key: &Key, duration: Duration) -> BoxFuture<'_, Result<Vec<Key>>> {
@@ -50,6 +56,11 @@ impl Engine for Observed {
         self.local.watch_alive(key, callback)
     }
     fn respond(&self, key: &Key, callback: QueryCallback) -> Result<Guard> {
+        self.declarations
+            .lock()
+            .expect("declarations")
+            .publisher_events
+            .push((key.clone(), "queryable"));
         self.local.respond(key, callback)
     }
     fn query(&self, key: &Key, params: QueryParams) -> Result<Box<dyn RawReplies>> {
@@ -57,6 +68,131 @@ impl Engine for Observed {
     }
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[tokio::test]
+async fn typed_and_dynamic_publishers_share_qos_retention_and_presence_order() {
+    for dynamic in [false, true] {
+        for profile in [QosProfile::Reliable, QosProfile::Sensor] {
+            for retention in [Retention::Volatile, Retention::Last] {
+                let bus = Arc::new(Observed::default());
+                let mut binding = bindings(SENDER);
+                let mut output = contract("test.Probe");
+                output.qos = profile;
+                output.retention = retention;
+                binding
+                    .outputs
+                    .insert("outgoing".into(), OutputBinding { contract: output });
+                let sender = Cloudy::open(options(bus.clone(), binding))
+                    .await
+                    .expect("sender");
+                let key = Key::topic(DOMAIN, Some(SENDER), Probe::TYPE);
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let _subscription = bus
+                    .subscribe(
+                        &key,
+                        Box::new(move |sample| {
+                            tx.send(sample).expect("live receiver");
+                        }),
+                    )
+                    .expect("subscription");
+                let typed = if dynamic {
+                    None
+                } else {
+                    Some(sender.output::<Probe>("outgoing").expect("typed"))
+                };
+                let raw = if dynamic {
+                    Some(
+                        sender
+                            .raw_output("outgoing", "test.Probe", Probe::SCHEMA)
+                            .expect("dynamic"),
+                    )
+                } else {
+                    None
+                };
+                for value in [7, 8] {
+                    let message = Probe { value };
+                    if let Some(publisher) = &typed {
+                        publisher.send(message).await.expect("typed send");
+                    } else {
+                        raw.as_ref()
+                            .expect("dynamic publisher")
+                            .send(message.encode_to_vec())
+                            .expect("dynamic send");
+                    }
+                    let sample = timeout(PATIENCE, rx.recv())
+                        .await
+                        .expect("live sample")
+                        .expect("open");
+                    assert_eq!(sample.payload, Probe { value }.encode_to_vec());
+                    assert_eq!(
+                        sample.attachment,
+                        Some(Probe::SCHEMA.to_le_bytes().to_vec())
+                    );
+                }
+                {
+                    let declarations = bus.declarations.lock().expect("declarations");
+                    let mut qos = match profile {
+                        QosProfile::Reliable => Qos::DEFAULT,
+                        QosProfile::Sensor => Qos::SENSOR,
+                    };
+                    qos.durability = if retention == Retention::Last {
+                        Durability::TransientLocal
+                    } else {
+                        Durability::Volatile
+                    };
+                    assert_eq!(declarations.publishers, vec![(key.clone(), qos)]);
+                    let events: Vec<_> = declarations
+                        .publisher_events
+                        .iter()
+                        .filter(|(event_key, _)| event_key == &key)
+                        .map(|(_, event)| *event)
+                        .collect();
+                    assert_eq!(
+                        events,
+                        if retention == Retention::Last {
+                            vec!["sender", "queryable", "presence"]
+                        } else {
+                            vec!["sender", "presence"]
+                        }
+                    );
+                }
+                assert_retained_reply(bus.as_ref(), &key, retention).await;
+            }
+        }
+    }
+}
+
+async fn assert_retained_reply(bus: &Observed, key: &Key, retention: Retention) {
+    let mut replies = bus
+        .query(
+            key,
+            QueryParams {
+                payload: None,
+                attachment: None,
+                timeout: PATIENCE,
+            },
+        )
+        .expect("retained query");
+    let reply = timeout(PATIENCE, replies.next())
+        .await
+        .expect("query complete");
+    if retention == Retention::Last {
+        let sample = reply.expect("retained reply").expect("successful reply");
+        assert_eq!(sample.payload, Probe { value: 8 }.encode_to_vec());
+        assert_eq!(
+            sample.attachment,
+            Some(Probe::SCHEMA.to_le_bytes().to_vec())
+        );
+        assert!(
+            timeout(PATIENCE, replies.next())
+                .await
+                .expect("query complete")
+                .is_none()
+        );
+    } else {
+        assert!(reply.is_none());
     }
 }
 

@@ -1,35 +1,26 @@
 //! Declared endpoints for languages supplying encoded protobuf messages.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use reiny_core::bindings::{
     EndpointContract, PortKind, PortReport, QosProfile, ReceiveBuffer, Replay, Retention,
 };
 
 use super::{ManagedPort, Registration};
-use crate::engine::{Guard, RawPublisher, SUB_CHUNK};
-use crate::pubsub::{Core, declare_latch};
+use crate::engine::SUB_CHUNK;
+use crate::pubsub::{Core, PublisherCore};
 use crate::{Cloudy, Durability, Qos, RawSubscriber, Result, validate_segment};
 
 /// An owned, declared publisher of encoded protobuf messages.
 pub struct DeclaredPublisher {
-    sender: Box<dyn RawPublisher>,
-    schema: u64,
-    last: Arc<Mutex<Option<Vec<u8>>>>,
-    retained: bool,
-    _queryable: Option<Guard>,
-    _presence: Guard,
+    core: PublisherCore,
     _managed: ManagedPort,
 }
 
 impl DeclaredPublisher {
     /// Publish bytes with the mandatory declared schema fingerprint.
     pub fn send(&self, payload: Vec<u8>) -> Result<()> {
-        if self.retained {
-            *self.last.lock().unwrap_or_else(PoisonError::into_inner) = Some(payload.clone());
-        }
-        self.sender
-            .put(payload, Some(self.schema.to_le_bytes().to_vec()))
+        self.core.send(payload)
     }
 }
 
@@ -135,21 +126,9 @@ impl Cloudy {
             Some(self.endpoint_namespace()),
             &registration.transport_type,
         );
-        let sender = self.engine.publisher(&key, &qos)?;
-        let last = Arc::new(Mutex::new(None));
-        let queryable = if retained {
-            Some(declare_latch(self, &key, last.clone(), Some(schema))?)
-        } else {
-            None
-        };
-        let presence = self.engine.declare_alive(&key)?;
+        let core = PublisherCore::declare(self, &key, &qos, schema)?;
         let publisher = DeclaredPublisher {
-            sender,
-            schema,
-            last,
-            retained,
-            _queryable: queryable,
-            _presence: presence,
+            core,
             _managed: ManagedPort::new(self, live),
         };
         ports.outputs.insert(name.to_owned(), registration);

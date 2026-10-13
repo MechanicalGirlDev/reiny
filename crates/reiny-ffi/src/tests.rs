@@ -194,12 +194,11 @@ fn dynamic_outputs_refuse_duplicate_short_transport_types() {
         "second":{"contract":{"type":"b.Ping"}}}}"#,
         )
         .unwrap();
-    let session = bus
-        .connect("sender".into(), "test".into(), path(&bindings))
-        .unwrap();
-    assert!(session.publisher("first", "Ping", 42).is_err());
-    let _first = session.publisher("first", "a.Ping", 42).unwrap();
-    assert!(session.publisher("second", "b.Ping", 42).is_err());
+    // Reject ambiguous wire addresses before opening the session or any publisher.
+    assert!(
+        bus.connect("sender".into(), "test".into(), path(&bindings))
+            .is_err()
+    );
 }
 
 #[test]

@@ -103,11 +103,26 @@ fn fabric() -> zenoh::Session {
 }
 
 fn reiny(args: &[&str]) -> Output {
+    reiny_with_policy(
+        args,
+        reiny::bindings::ReceiveBuffer::Fifo,
+        reiny::bindings::Replay::Live,
+    )
+}
+
+fn reiny_with_policy(
+    args: &[&str],
+    buffer: reiny::bindings::ReceiveBuffer,
+    replay: reiny::bindings::Replay,
+) -> Output {
     let bindings =
         std::env::temp_dir().join(format!("reiny-topic-bindings-{}.json", std::process::id()));
     let mut contract: reiny::bindings::ModuleBindings = serde_yaml::from_str(
         "version: 2\nnamespace: sim\nendpoint_namespace: sim\ninputs:\n  Probe:\n    contract: {type: e2e.Probe}\n    sources: [ctrl]\n  Add:\n    contract: {type: e2e.Add, kind: rpc, response: e2e.Sum}\n    sources: [ctrl]\noutputs:\n  Cmd:\n    contract: {type: e2e.Sum, qos: sensor, retention: last}\n",
     ).unwrap();
+    let probe = &mut contract.inputs.get_mut("Probe").unwrap().contract;
+    probe.buffer = buffer;
+    probe.replay = replay;
     let data = args.len() > 2
         && matches!(
             (args[0], args[1]),
@@ -240,27 +255,44 @@ fn topic_node_service_against_live_launch() {
         .wait()
         .expect("add queryable");
 
-    // --- keep Probe flowing at 50 Hz (for echo / hz to pick up) ---
-    let stop = Arc::new(AtomicBool::new(false));
-    let feeder = {
-        let stop = Arc::clone(&stop);
+    // Publish only after the CLI announces its opened input, never after a timed settle.
+    let live = Arc::new(AtomicBool::new(true));
+    let _feed = {
+        let live = Arc::clone(&live);
         let publisher = Arc::clone(&probe_pub);
-        thread::spawn(move || {
-            let mut seq = 0u32;
-            while !stop.load(Ordering::SeqCst) {
-                seq += 1;
-                let bytes = Probe {
-                    seq,
-                    name: "probe".into(),
+        fab.liveliness()
+            .declare_subscriber("reiny/lab/sim/@ready")
+            .callback(move |sample| {
+                if sample.kind() != zenoh::sample::SampleKind::Put || !live.load(Ordering::SeqCst) {
+                    return;
+                }
+                let invalid = Probe {
+                    seq: 99,
+                    name: "invalid".into(),
                 }
                 .encode_to_vec();
-                let _ = publisher
-                    .put(bytes)
-                    .attachment(fp.to_le_bytes().to_vec())
-                    .wait();
-                thread::sleep(Duration::from_millis(20));
-            }
-        })
+                publisher.put(invalid.clone()).wait().unwrap();
+                publisher
+                    .put(invalid)
+                    .attachment((fp ^ 1).to_le_bytes().to_vec())
+                    .wait()
+                    .unwrap();
+                for seq in 1..=3 {
+                    publisher
+                        .put(
+                            Probe {
+                                seq,
+                                name: "probe".into(),
+                            }
+                            .encode_to_vec(),
+                        )
+                        .attachment(fp.to_le_bytes().to_vec())
+                        .wait()
+                        .unwrap();
+                }
+            })
+            .wait()
+            .unwrap()
     };
 
     // --- playing the launch gui: it only subscribes to Cmd (@sub + @schema; there is no publisher) ---
@@ -321,7 +353,17 @@ fn topic_node_service_against_live_launch() {
     );
 
     // --- topic echo: the JSON decoded through @schema, with its source ---
-    let out = stdout(&reiny(&["topic", "echo", "Probe", "--count", "3"]));
+    let out = stdout(&reiny(&[
+        "topic",
+        "echo",
+        "Probe",
+        "--count",
+        "3",
+        "--from",
+        "ctrl",
+        "--duration",
+        "5",
+    ]));
     let lines: Vec<&str> = out.lines().filter(|l| l.starts_with("ctrl")).collect();
     assert_eq!(lines.len(), 3, "topic echo: {out}");
     assert!(
@@ -336,6 +378,74 @@ fn topic_node_service_against_live_launch() {
         out.contains("120570726f6265"),
         "raw hex of \"probe\": {out}"
     );
+
+    // The SDK, not a CLI-specific queue, implements latest buffering and retained replay.
+    live.store(false, Ordering::SeqCst);
+    let _retained = fab
+        .declare_queryable(probe_key)
+        .callback(move |q| {
+            q.reply(
+                probe_key,
+                Probe {
+                    seq: 42,
+                    name: "retained".into(),
+                }
+                .encode_to_vec(),
+            )
+            .attachment(fp.to_le_bytes().to_vec())
+            .wait()
+            .unwrap();
+        })
+        .wait()
+        .unwrap();
+    let out = stdout(&reiny_with_policy(
+        &["topic", "echo", "Probe", "--count", "1", "--duration", "5"],
+        reiny::bindings::ReceiveBuffer::Latest(1),
+        reiny::bindings::Replay::Last,
+    ));
+    let retained = out.trim().strip_prefix("ctrl  ").unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(retained).unwrap(),
+        serde_json::json!({"seq": 42, "name": "retained"})
+    );
+
+    // A cooperative stop ends both receive commands even without count/duration limits.
+    for command in ["echo", "hz"] {
+        let (ready, seen) = std::sync::mpsc::channel();
+        let _ready = fab
+            .liveliness()
+            .declare_subscriber("reiny/lab/sim/@ready")
+            .callback(move |sample| {
+                if sample.kind() == zenoh::sample::SampleKind::Put {
+                    ready.send(()).unwrap();
+                }
+            })
+            .wait()
+            .unwrap();
+        let (finished, result) = std::sync::mpsc::channel();
+        let cli = thread::spawn(move || {
+            finished.send(reiny(&["topic", command, "Probe"])).unwrap();
+        });
+        seen.recv_timeout(Duration::from_secs(10))
+            .expect("CLI readiness");
+        let replies = fab.get("reiny/lab/sim/@stop").wait().unwrap();
+        let reply = replies
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reply.result().unwrap().payload().to_bytes().as_ref(),
+            b"ack"
+        );
+        assert!(
+            result
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap()
+                .status
+                .success()
+        );
+        cli.join().unwrap();
+    }
 
     // --- service list / call ---
     let out = stdout(&reiny(&["service", "list"]));
@@ -386,7 +496,4 @@ fn topic_node_service_against_live_launch() {
         !reiny(&["topic", "pub", "Nope", "{}"]).status.success(),
         "an undescribed type must fail rather than guess"
     );
-
-    stop.store(true, Ordering::SeqCst);
-    feeder.join().expect("feeder");
 }

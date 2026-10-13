@@ -151,24 +151,7 @@ impl<'a, T> PublisherBuilder<'a, T> {
         let key = self
             .cloudy
             .key_for(Some(self.cloudy.endpoint_namespace()), T::TYPE);
-        let publisher = engine.publisher(&key, &self.qos)?;
-
-        let last: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
-        let queryable = if latched {
-            Some(declare_latch(
-                self.cloudy,
-                &key,
-                Arc::clone(&last),
-                Some(T::SCHEMA),
-            )?)
-        } else {
-            None
-        };
-
-        // The token is declared **after** the latched queryable. A subscriber takes presence (this very
-        // token) as its cue to ask for the most recent value, so in the other order the query would fly
-        // during the instant where "it is there but its queryable has not arrived yet" and come back
-        let token = engine.declare_alive(&key)?;
+        let core = PublisherCore::declare(self.cloudy, &key, &self.qos, T::SCHEMA)?;
         // `@schema` is for diagnostics, so on an engine without query it is silently skipped rather than
         // being an error (every `reiny-build` generated type carries a DESCRIPTOR).
         let schema = match T::DESCRIPTOR {
@@ -178,11 +161,8 @@ impl<'a, T> PublisherBuilder<'a, T> {
 
         tracing::debug!(key = %key, latched, "publisher declared");
         Ok(Publisher {
-            raw: publisher,
-            _token: token,
-            queryable,
+            core,
             _schema: schema,
-            last,
             _marker: PhantomData,
             managed: None,
         })
@@ -253,16 +233,50 @@ pub(crate) fn declare_latch(
 /// Dropping it drops the liveliness token too, so subscribers watching through
 /// [`Cloudy::watch_publishers`] get a [`PresenceEvent::Left`].
 pub struct Publisher<T> {
+    core: PublisherCore,
+    /// The queryable announcing the descriptor at `@schema`, only when `T::DESCRIPTOR` is set (merely held).
+    _schema: Option<Guard>,
+    _marker: PhantomData<T>,
+    pub(crate) managed: Option<crate::managed::ManagedPort>,
+}
+
+/// The byte sender, retained sample and presence shared by typed and declared publishers.
+pub(crate) struct PublisherCore {
     raw: Box<dyn RawPublisher>,
     /// The presence token that lives and dies with the publisher (merely held).
     _token: Guard,
     /// The queryable answering with the most recent value, declared only when latched (merely held).
     queryable: Option<Guard>,
-    /// The queryable announcing the descriptor at `@schema`, only when `T::DESCRIPTOR` is set (merely held).
-    _schema: Option<Guard>,
     last: Arc<Mutex<Option<Vec<u8>>>>,
-    _marker: PhantomData<T>,
-    pub(crate) managed: Option<crate::managed::ManagedPort>,
+    schema: u64,
+}
+
+impl PublisherCore {
+    pub(crate) fn declare(cloudy: &Cloudy, key: &Key, qos: &Qos, schema: u64) -> Result<Self> {
+        let raw = cloudy.engine.publisher(key, qos)?;
+        let last = Arc::new(Mutex::new(None));
+        let queryable = if qos.durability == Durability::TransientLocal {
+            Some(declare_latch(cloudy, key, Arc::clone(&last), Some(schema))?)
+        } else {
+            None
+        };
+        // Presence cues subscribers to query the last value, so the latch must already be declared.
+        let token = cloudy.engine.declare_alive(key)?;
+        Ok(Self {
+            raw,
+            _token: token,
+            queryable,
+            last,
+            schema,
+        })
+    }
+
+    pub(crate) fn send(&self, payload: Vec<u8>) -> Result<()> {
+        if self.queryable.is_some() {
+            *lock(&self.last) = Some(payload.clone());
+        }
+        self.raw.put(payload, fingerprint(Some(self.schema)))
+    }
 }
 
 impl<T: Message + Topic> Publisher<T> {
@@ -271,11 +285,7 @@ impl<T: Message + Topic> Publisher<T> {
     /// Under `Reliable` (the default) polling the future blocks while the send path is congested.
     /// The future is lazy, even though no engine today has an await point in here.
     pub async fn send(&self, message: T) -> Result<()> {
-        let buf = message.encode_to_vec();
-        if self.queryable.is_some() {
-            *lock(&self.last) = Some(buf.clone());
-        }
-        std::future::ready(self.raw.put(buf, fingerprint(Some(T::SCHEMA)))).await
+        std::future::ready(self.core.send(message.encode_to_vec())).await
     }
 }
 
@@ -1021,10 +1031,15 @@ mod tests {
         let bus = Arc::new(crate::engine::Local::new());
         let sender = crate::engine::conformance::cloudy(bus.clone(), "sender").await;
         let receiver = crate::engine::conformance::cloudy(bus, "receiver").await;
-        let publisher = sender.publish::<State>().expect("publisher");
+        let publisher = sender
+            .publisher::<State>()
+            .latched()
+            .build()
+            .expect("publisher");
         let mut subscriber = receiver.subscribe::<State>().expect("subscriber");
 
         let unpolled = publisher.send(State { x: 1 });
+        assert!(lock(&publisher.core.last).is_none());
         // The ordered local bus delivers this sentinel after any earlier publication.
         publisher.send(State { x: 2 }).await.expect("sentinel");
         let message = tokio::time::timeout(Duration::from_secs(5), subscriber.recv())
@@ -1032,6 +1047,10 @@ mod tests {
             .expect("sample within patience")
             .expect("subscription open");
         assert_eq!(message.x, 2);
+        assert_eq!(
+            *lock(&publisher.core.last),
+            Some(State { x: 2 }.encode_to_vec())
+        );
         drop(unpolled);
     }
 

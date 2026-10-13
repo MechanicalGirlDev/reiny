@@ -1,6 +1,7 @@
 //! Engine-neutral named-port contracts handed to a managed module at startup.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -212,4 +213,340 @@ pub struct ResponseReport {
     pub type_name: String,
     /// Compiled response fingerprint.
     pub schema: u64,
+}
+
+/// A malformed resolved runtime contract, rejected before opening transport ports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BindingError(&'static str);
+
+impl core::fmt::Display for BindingError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl core::error::Error for BindingError {}
+
+fn require(condition: bool, message: &'static str) -> Result<(), BindingError> {
+    if condition {
+        Ok(())
+    } else {
+        Err(BindingError(message))
+    }
+}
+
+fn segment(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains(['/', '*', '?', '#', '$', '@'])
+        && !value.contains(char::is_whitespace)
+}
+
+fn type_name(value: &str) -> bool {
+    value.split('.').all(|part| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    })
+}
+
+/// Validate an exact hierarchical module identity or source.
+pub fn validate_namespace(value: &str) -> Result<(), BindingError> {
+    require(
+        value
+            .split('/')
+            .all(|part| segment(part) && !matches!(part, "." | "..")),
+        "invalid module namespace",
+    )
+}
+
+impl EndpointContract {
+    fn validate(&self, input: bool) -> Result<(), BindingError> {
+        require(type_name(&self.type_name), "invalid endpoint type")?;
+        require(
+            self.buffer != ReceiveBuffer::Latest(0),
+            "latest buffer depth must be positive",
+        )?;
+        require(
+            !input || (self.qos == QosProfile::Reliable && self.retention == Retention::Volatile),
+            "qos and retention belong to outputs",
+        )?;
+        require(
+            input || (self.replay == Replay::Live && self.buffer == ReceiveBuffer::Fifo),
+            "replay and buffer belong to inputs",
+        )?;
+        match self.kind {
+            PortKind::Stream => {
+                require(self.response.is_none(), "stream cannot declare a response")
+            }
+            PortKind::Rpc => {
+                require(
+                    self.response.as_deref().is_some_and(type_name),
+                    "RPC requires a valid response type",
+                )?;
+                require(
+                    self.qos == QosProfile::Reliable
+                        && self.retention == Retention::Volatile
+                        && self.replay == Replay::Live
+                        && self.buffer == ReceiveBuffer::Fifo,
+                    "stream policies do not apply to RPC",
+                )
+            }
+        }
+    }
+}
+
+impl ModuleBindings {
+    /// Validate identity, endpoint policies, exact sources and exclusive delegation.
+    ///
+    /// Transport-specific domain and executable identity checks belong to callers.
+    pub fn validate(&self) -> Result<(), BindingError> {
+        require(
+            self.version == CONTRACT_VERSION,
+            "unsupported module bindings version",
+        )?;
+        validate_namespace(&self.namespace)?;
+        validate_namespace(&self.endpoint_namespace)?;
+        require(
+            self.namespace == self.endpoint_namespace
+                || self
+                    .namespace
+                    .strip_prefix(&format!("{}/owned/", self.endpoint_namespace))
+                    .is_some_and(|child| !child.is_empty() && !child.contains('/')),
+            "endpoint namespace must be the module or its owning host",
+        )?;
+        require(
+            self.namespace == self.endpoint_namespace || self.children.is_empty(),
+            "owned children cannot delegate endpoints",
+        )?;
+        let mut executables = BTreeSet::new();
+        for executable in &self.executables {
+            require(
+                segment(executable)
+                    && !matches!(executable.as_str(), "." | "..")
+                    && executables.insert(executable),
+                "invalid or duplicate executable",
+            )?;
+        }
+        let mut addresses = BTreeMap::new();
+        let mut output_types = BTreeSet::new();
+        for (name, contract, sources, input) in self
+            .inputs
+            .iter()
+            .map(|(name, port)| (name, &port.contract, port.sources.as_slice(), true))
+            .chain(self.outputs.iter().map(|(name, port)| {
+                (
+                    name,
+                    &port.contract,
+                    core::slice::from_ref(&self.endpoint_namespace),
+                    false,
+                )
+            }))
+        {
+            require(segment(name), "invalid endpoint name")?;
+            contract.validate(input)?;
+            if input {
+                require(!sources.is_empty(), "input requires exact sources")?;
+                require(
+                    contract.kind != PortKind::Rpc || sources.len() == 1,
+                    "RPC input requires exactly one source",
+                )?;
+                let mut unique = BTreeSet::new();
+                for source in sources {
+                    validate_namespace(source)?;
+                    require(unique.insert(source), "duplicate input source")?;
+                }
+            } else {
+                require(
+                    output_types.insert(&contract.type_name),
+                    "duplicate output type in module bindings",
+                )?;
+            }
+            for source in sources {
+                let short = contract
+                    .type_name
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(&contract.type_name);
+                let address = (source, short, contract.kind == PortKind::Rpc);
+                if let Some(previous) = addresses.insert(address, &contract.type_name) {
+                    require(
+                        previous == &contract.type_name,
+                        "endpoint types collide on one wire address",
+                    )?;
+                }
+            }
+        }
+        self.validate_delegations()
+    }
+
+    fn validate_delegations(&self) -> Result<(), BindingError> {
+        let mut delegated = BTreeSet::new();
+        for (name, child) in &self.children {
+            require(
+                segment(name) && !matches!(name.as_str(), "." | ".."),
+                "invalid owned child name",
+            )?;
+            for (port, input) in child
+                .inputs
+                .iter()
+                .map(|port| (port, true))
+                .chain(child.outputs.iter().map(|port| (port, false)))
+            {
+                require(
+                    if input {
+                        self.inputs.contains_key(port)
+                    } else {
+                        self.outputs.contains_key(port)
+                    },
+                    "child delegates undefined endpoint",
+                )?;
+                require(
+                    delegated.insert((port, input)),
+                    "endpoint delegated more than once",
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)] // tests may fail by panicking
+mod tests {
+    use super::*;
+
+    fn bindings() -> ModuleBindings {
+        ModuleBindings {
+            version: CONTRACT_VERSION,
+            namespace: "robot/control".into(),
+            endpoint_namespace: "robot/control".into(),
+            inputs: BTreeMap::from([(
+                "state".into(),
+                InputBinding {
+                    contract: EndpointContract {
+                        type_name: "robot.State".into(),
+                        ..EndpointContract::default()
+                    },
+                    sources: alloc::vec!["robot/sensor".into()],
+                },
+            )]),
+            outputs: BTreeMap::from([(
+                "command".into(),
+                OutputBinding {
+                    contract: EndpointContract {
+                        type_name: "robot.Command".into(),
+                        ..EndpointContract::default()
+                    },
+                },
+            )]),
+            children: BTreeMap::new(),
+            executables: alloc::vec!["worker".into()],
+        }
+    }
+
+    #[test]
+    fn stream_policies_and_owned_delegations_are_validated() {
+        let mut bindings = bindings();
+        let input = &mut bindings.inputs.get_mut("state").unwrap().contract;
+        input.replay = Replay::Last;
+        input.buffer = ReceiveBuffer::Latest(2);
+        let output = &mut bindings.outputs.get_mut("command").unwrap().contract;
+        output.qos = QosProfile::Sensor;
+        output.retention = Retention::Last;
+        bindings.children.insert(
+            "worker".into(),
+            PortDelegation {
+                inputs: alloc::vec!["state".into()],
+                outputs: alloc::vec!["command".into()],
+            },
+        );
+        bindings.validate().unwrap();
+        bindings.children.clear();
+        bindings.namespace = "robot/control/owned/worker".into();
+        bindings.validate().unwrap();
+    }
+
+    #[test]
+    fn malformed_bindings_are_rejected() {
+        for mutation in 0..18 {
+            let mut bindings = bindings();
+            match mutation {
+                0 => bindings.version = 1,
+                1 => bindings.namespace = "robot/../control".into(),
+                2 => bindings.endpoint_namespace = "other".into(),
+                3 => bindings.inputs.get_mut("state").unwrap().sources.clear(),
+                4 => bindings
+                    .inputs
+                    .get_mut("state")
+                    .unwrap()
+                    .sources
+                    .push("robot/sensor".into()),
+                5 => bindings.inputs.get_mut("state").unwrap().sources[0] = "**".into(),
+                6 => {
+                    bindings.inputs.get_mut("state").unwrap().contract.buffer =
+                        ReceiveBuffer::Latest(0);
+                }
+                7 => bindings.inputs.get_mut("state").unwrap().contract.retention = Retention::Last,
+                8 => bindings.outputs.get_mut("command").unwrap().contract.replay = Replay::Last,
+                9 => {
+                    bindings.inputs.get_mut("state").unwrap().contract.response =
+                        Some("robot.Result".into());
+                }
+                10 => bindings.inputs.get_mut("state").unwrap().contract.kind = PortKind::Rpc,
+                11 => {
+                    let duplicate = bindings.outputs["command"].clone();
+                    bindings.outputs.insert("duplicate".into(), duplicate);
+                }
+                12 => bindings.executables.push("worker".into()),
+                13 => bindings.executables[0] = "..".into(),
+                14 => {
+                    bindings.children.insert(
+                        "worker".into(),
+                        PortDelegation {
+                            inputs: alloc::vec!["missing".into()],
+                            outputs: Vec::new(),
+                        },
+                    );
+                }
+                15 => {
+                    let child = PortDelegation {
+                        inputs: alloc::vec!["state".into()],
+                        outputs: Vec::new(),
+                    };
+                    bindings.children.insert("first".into(), child.clone());
+                    bindings.children.insert("second".into(), child);
+                }
+                16 => {
+                    bindings.inputs.get_mut("state").unwrap().contract.type_name =
+                        "robot..State".into();
+                }
+                _ => {
+                    let mut collision = bindings.inputs["state"].clone();
+                    collision.contract.type_name = "other.State".into();
+                    bindings.inputs.insert("collision".into(), collision);
+                }
+            }
+            assert!(bindings.validate().is_err(), "mutation {mutation}");
+        }
+    }
+
+    #[test]
+    fn rpc_requires_one_source_and_default_stream_policies() {
+        let mut bindings = bindings();
+        let input = bindings.inputs.get_mut("state").unwrap();
+        input.contract.kind = PortKind::Rpc;
+        input.contract.response = Some("robot.Result".into());
+        bindings.validate().unwrap();
+        bindings
+            .inputs
+            .get_mut("state")
+            .unwrap()
+            .sources
+            .push("robot/other".into());
+        assert!(bindings.validate().is_err());
+        bindings.inputs.get_mut("state").unwrap().sources.pop();
+        bindings.inputs.get_mut("state").unwrap().contract.qos = QosProfile::Sensor;
+        assert!(bindings.validate().is_err());
+    }
 }
