@@ -7,6 +7,12 @@ All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
 `reiny-launch`, `reiny-cli`, `reiny-ffi`).
 Versions are kept in lockstep via `[workspace.package].version`.
 
+## 0.10.1 - 2026-10-13
+
+- Synchronize all nine independent example lockfiles with the workspace release
+  version so their locked Clippy and build checks remain reproducible.
+- Runtime APIs and wire contracts are unchanged from 0.10.0.
+
 ## 0.10.0 - 2026-10-13
 
 ### Breaking changes
