@@ -208,7 +208,7 @@ pub mod flags {
     pub const SERVE: u8 = 4;
     /// The publication is latched (a promise to re-send the most recent value on link up).
     pub const LATCHED: u8 = 8;
-    /// `schema` is present (`Topic::SCHEMA` is `Some`).
+    /// `schema` is present. Required for every declared type.
     pub const SCHEMA: u8 = 16;
     /// Calls this request type (`Link::calls`). When the peer is a bridge, this exists purely to
     /// tell it the type's name.
@@ -223,7 +223,7 @@ pub struct HelloEntry<'a> {
     /// The OR of [`flags`].
     pub flags: u8,
     /// `Topic::SCHEMA`.
-    pub schema: Option<u64>,
+    pub schema: u64,
     /// `Topic::TYPE`. It rides here and nowhere else, to recover the hash and to detect collisions.
     pub name: &'a str,
 }
@@ -248,8 +248,8 @@ pub fn hello_write<'a>(
     let mut count: u8 = 0;
     for e in entries {
         w.u32(e.hash)?;
-        w.u8(e.flags | if e.schema.is_some() { flags::SCHEMA } else { 0 })?;
-        w.u64(e.schema.unwrap_or(0))?;
+        w.u8(e.flags | flags::SCHEMA)?;
+        w.u64(e.schema)?;
         w.str(e.name)?;
         count = count.checked_add(1).ok_or(WireError::TooLarge)?;
     }
@@ -306,7 +306,7 @@ impl<'a> Iterator for HelloEntries<'a> {
             hash,
             // The SCHEMA bit is an encoding detail (whether `schema` is present). Do not surface it.
             flags: flags & !flags::SCHEMA,
-            schema: (flags & flags::SCHEMA != 0).then_some(schema),
+            schema,
             name,
         })
     }
@@ -326,7 +326,9 @@ pub fn hello_parse(payload: &[u8]) -> Result<Hello<'_>, WireError> {
     let entries = &payload[r.pos..];
     for _ in 0..count {
         r.u32().ok_or(WireError::Malformed)?;
-        r.u8().ok_or(WireError::Malformed)?;
+        if r.u8().ok_or(WireError::Malformed)? & flags::SCHEMA == 0 {
+            return Err(WireError::Malformed);
+        }
         r.u64().ok_or(WireError::Malformed)?;
         r.str().ok_or(WireError::Malformed)?;
     }
@@ -598,13 +600,13 @@ mod tests {
             HelloEntry {
                 hash: 1,
                 flags: flags::PUB | flags::LATCHED,
-                schema: Some(0x1234),
+                schema: 0x1234,
                 name: "State",
             },
             HelloEntry {
                 hash: 2,
                 flags: flags::SUB,
-                schema: None,
+                schema: 0x5678,
                 name: "Cmd",
             },
         ];
@@ -645,7 +647,7 @@ mod tests {
             [HelloEntry {
                 hash: 9,
                 flags: flags::PUB,
-                schema: Some(0),
+                schema: 0,
                 name: "S",
             }]
             .into_iter(),
@@ -653,8 +655,29 @@ mod tests {
         .unwrap();
         let e = hello_parse(&buf[..n]).unwrap().entries().next().unwrap();
         assert_eq!(e.flags, flags::PUB, "SCHEMA bit leaked into the flags");
-        // `Some(0)` is a real fingerprint, not "absent" — the bit is what distinguishes them.
-        assert_eq!(e.schema, Some(0));
+        // Zero is a real fingerprint, not "absent" — the bit is what distinguishes them.
+        assert_eq!(e.schema, 0);
+    }
+
+    #[test]
+    fn hello_rejects_missing_fingerprint_bit() {
+        let mut buf = [0u8; 64];
+        let n = hello_write(
+            &mut buf,
+            false,
+            false,
+            "x",
+            [HelloEntry {
+                hash: 9,
+                flags: flags::PUB,
+                schema: 0,
+                name: "S",
+            }]
+            .into_iter(),
+        )
+        .unwrap();
+        buf[8] &= !flags::SCHEMA;
+        assert!(hello_parse(&buf[..n]).is_err());
     }
 
     #[test]
@@ -668,7 +691,7 @@ mod tests {
             [HelloEntry {
                 hash: 1,
                 flags: flags::PUB,
-                schema: None,
+                schema: 1,
                 name: "Long",
             }]
             .into_iter(),
@@ -702,7 +725,7 @@ mod tests {
             [HelloEntry {
                 hash: 1,
                 flags: flags::PUB,
-                schema: None,
+                schema: 1,
                 name: "AB",
             }]
             .into_iter(),
@@ -731,7 +754,7 @@ mod tests {
                 [HelloEntry {
                     hash: 1,
                     flags: flags::PUB,
-                    schema: None,
+                    schema: 1,
                     name: &long
                 }]
                 .into_iter()
@@ -743,7 +766,7 @@ mod tests {
             HelloEntry {
                 hash: 1,
                 flags: flags::PUB,
-                schema: None,
+                schema: 1,
                 name: "",
             },
             256,

@@ -14,7 +14,8 @@
 //! | query (no payload = latched) | the engine remembers the peer's most recent Data for LATCHED types and answers with it |
 //! | respond | a Request from the peer (hash = S) goes to the responder for the type `S`. Dropping it unanswered sends the peer `Error("no reply")` |
 //!
-//! `Caps.attachment = false`: the fingerprint travels in the Hello (`put`'s attachment is dropped).
+//! `Caps.attachment = false`: fingerprints travel in Hello, not arbitrary per-frame attachments.
+//! Outgoing data and requests must supply a matching fingerprint before reaching the link.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -88,8 +89,16 @@ fn peer_keys(domain: &str, peer: &PeerInfo) -> Vec<Key> {
     keys
 }
 
-fn fingerprint(schema: Option<u64>) -> Option<Vec<u8>> {
-    schema.map(|s| s.to_le_bytes().to_vec())
+fn fingerprint(schema: u64) -> Vec<u8> {
+    schema.to_le_bytes().to_vec()
+}
+
+fn check_fingerprint(attachment: Option<&[u8]>, schema: u64) -> Result<()> {
+    anyhow::ensure!(
+        attachment == Some(schema.to_le_bytes().as_slice()),
+        "link engine: missing or mismatching schema fingerprint"
+    );
+    Ok(())
 }
 
 impl State {
@@ -202,7 +211,7 @@ async fn run(host: Arc<Host>, domain: String, state: Arc<Mutex<State>>) {
                 let sample = Sample {
                     key: Key::topic(&domain, Some(&peer.id), &t.name),
                     payload,
-                    attachment: fingerprint(t.schema),
+                    attachment: Some(fingerprint(t.schema)),
                     timestamp: now_unix_ns(),
                 };
                 if t.flags & flags::LATCHED != 0 {
@@ -239,6 +248,7 @@ async fn run(host: Arc<Host>, domain: String, state: Arc<Mutex<State>>) {
                     hash,
                     key: pattern,
                     payload: Some(payload),
+                    attachment: fingerprint(t.schema),
                     answered: false,
                 }));
             }
@@ -280,6 +290,7 @@ impl Engine for LinkEngine {
         );
         Ok(Box::new(LinkPublisher {
             host: Arc::clone(&self.host),
+            state: Arc::clone(&self.state),
             hash: wire::type_hash(type_of(key)?),
         }))
     }
@@ -355,15 +366,26 @@ impl Engine for LinkEngine {
         if !key.matches(&peer_key) {
             return Ok(Box::new(Ready(None))); // wrong namespace, domain or chunk: no replies
         }
+        {
+            let st = lock(&self.state);
+            let Some(t) = st
+                .peer
+                .as_ref()
+                .and_then(|p| p.types.iter().find(|t| t.hash == hash))
+            else {
+                return Ok(Box::new(Ready(None)));
+            };
+            check_fingerprint(params.attachment.as_deref(), t.schema)?;
+        }
         let host = Arc::clone(&self.host);
         let domain = self.domain.clone();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let result = match host.call_raw(hash, payload, params.timeout).await {
-                Ok(bytes) => Some(Ok(Sample {
+                Ok((schema, bytes)) => Some(Ok(Sample {
                     key: Key::topic(&domain, peer_id.as_deref(), &ty),
                     payload: bytes,
-                    attachment: None,
+                    attachment: Some(schema.to_le_bytes().to_vec()),
                     timestamp: now_unix_ns(),
                 })),
                 Err(CallError::Remote(message)) => Some(Err(message.into_bytes())),
@@ -412,11 +434,23 @@ impl Drop for LinkGuard {
 
 struct LinkPublisher {
     host: Arc<Host>,
+    state: Arc<Mutex<State>>,
     hash: u32,
 }
 
 impl RawPublisher for LinkPublisher {
-    fn put(&self, payload: Vec<u8>, _attachment: Option<Vec<u8>>) -> Result<()> {
+    fn put(&self, payload: Vec<u8>, attachment: Option<Vec<u8>>) -> Result<()> {
+        {
+            let st = lock(&self.state);
+            let Some(t) = st
+                .peer
+                .as_ref()
+                .and_then(|p| p.types.iter().find(|t| t.hash == self.hash))
+            else {
+                return Ok(()); // no subscriber
+            };
+            check_fingerprint(attachment.as_deref(), t.schema)?;
+        }
         // `Ok(false)` when the peer does not subscribe = simply dropped (publish is fire and forget).
         self.host
             .send_raw(self.hash, &payload)
@@ -431,6 +465,7 @@ struct LinkQuery {
     hash: u32,
     key: Key,
     payload: Option<Vec<u8>>,
+    attachment: Vec<u8>,
     answered: bool,
 }
 
@@ -444,18 +479,23 @@ impl RawQuery for LinkQuery {
     }
 
     fn attachment(&self) -> Option<&[u8]> {
-        None
+        Some(&self.attachment)
     }
 
     fn reply(
         mut self: Box<Self>,
         _key: &Key,
         payload: Vec<u8>,
-        _attachment: Option<Vec<u8>>,
+        attachment: Option<Vec<u8>>,
     ) -> Result<()> {
+        let schema = attachment
+            .as_deref()
+            .and_then(|a| a.try_into().ok())
+            .map(u64::from_le_bytes)
+            .ok_or_else(|| anyhow::anyhow!("link reply requires a schema fingerprint"))?;
         self.answered = true;
         self.host
-            .reply_raw(self.seq, self.hash, &payload)
+            .reply_raw(self.seq, self.hash, schema, &payload)
             .map_err(|e| anyhow::anyhow!("link: {e}"))
     }
 

@@ -17,6 +17,8 @@ struct State {
 }
 impl Topic for State {
     const TYPE: &'static str = "LoopState";
+    const SCHEMA: u64 = 0x11;
+    const DESCRIPTOR: Option<reiny_link::Descriptor> = None;
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -28,6 +30,8 @@ struct Add {
 }
 impl Topic for Add {
     const TYPE: &'static str = "LoopAdd";
+    const SCHEMA: u64 = 0x22;
+    const DESCRIPTOR: Option<reiny_link::Descriptor> = None;
 }
 #[derive(Clone, PartialEq, prost::Message)]
 struct Sum {
@@ -36,6 +40,8 @@ struct Sum {
 }
 impl Topic for Sum {
     const TYPE: &'static str = "LoopSum";
+    const SCHEMA: u64 = 0x33;
+    const DESCRIPTOR: Option<reiny_link::Descriptor> = None;
 }
 impl Service for Add {
     type Response = Sum;

@@ -10,7 +10,7 @@ pub(super) struct RequestProbe {
 
 impl Topic for RequestProbe {
     const TYPE: &'static str = "RequestProbe";
-    const SCHEMA: Option<u64> = Some(0xabcd);
+    const SCHEMA: u64 = 0xabcd;
     const DESCRIPTOR: Option<Descriptor> = Some(Descriptor {
         message: "test.RequestProbe",
         file_set: b"request-descriptor",
@@ -52,6 +52,12 @@ async fn service(bus: Arc<dyn Engine>) -> Cloudy {
     Cloudy::open(options(bus, binding)).await.expect("service")
 }
 
+async fn standalone_node(bus: Arc<dyn Engine>, namespace: &str) -> Cloudy {
+    let mut opts = options(bus, bindings(namespace));
+    opts.module_bindings = None;
+    Cloudy::open(opts).await.expect("standalone node")
+}
+
 #[tokio::test]
 async fn named_rpc_uses_exact_target_and_reports_both_compiled_schemas() {
     let bus = Arc::new(Local::new());
@@ -72,7 +78,7 @@ async fn named_rpc_uses_exact_target_and_reports_both_compiled_schemas() {
                     .reply(
                         &reply_key,
                         Probe { value: 99 }.encode_to_vec(),
-                        crate::pubsub::fingerprint(Probe::SCHEMA),
+                        crate::pubsub::fingerprint(Some(Probe::SCHEMA)),
                     )
                     .expect("other reply");
             }),
@@ -111,99 +117,130 @@ async fn named_rpc_uses_exact_target_and_reports_both_compiled_schemas() {
 }
 
 #[tokio::test]
-async fn managed_server_rejects_unstamped_malformed_and_mismatching_requests() {
-    let bus = Arc::new(Local::new());
-    let service = service(bus.clone()).await;
-    let mut server = service.provides::<RequestProbe>("request").expect("server");
-    let task = tokio::spawn(async move {
-        let request = server.recv().await.expect("verified request");
-        assert_eq!(request.value.value, 2);
-        request.reply(Probe { value: 2 }).await.expect("reply");
-    });
-    let key = Key::topic(DOMAIN, Some(SENDER), RequestProbe::TYPE);
-    for attachment in [
-        None,
-        Some(vec![1]),
-        crate::pubsub::fingerprint(Some(0xffff)),
-    ] {
-        let mut replies = bus
-            .query(
-                &key,
-                QueryParams {
-                    payload: Some(RequestProbe { value: 1 }.encode_to_vec()),
-                    attachment,
-                    timeout: PATIENCE,
-                },
-            )
-            .expect("raw request");
-        let response = timeout(PATIENCE, replies.next())
+async fn server_rejects_unstamped_malformed_and_mismatching_requests() {
+    for managed in [false, true] {
+        let bus = Arc::new(Local::new());
+        let service = if managed {
+            service(bus.clone()).await
+        } else {
+            standalone_node(bus.clone(), SENDER).await
+        };
+        let mut server = if managed {
+            service.provides::<RequestProbe>("request")
+        } else {
+            service.serve::<RequestProbe>()
+        }
+        .expect("server");
+        let task = tokio::spawn(async move {
+            let request = server.recv().await.expect("verified request");
+            assert_eq!(request.value.value, 2);
+            request.reply(Probe { value: 2 }).await.expect("reply");
+        });
+        let key = Key::topic(DOMAIN, Some(SENDER), RequestProbe::TYPE);
+        for attachment in [
+            None,
+            Some(vec![1]),
+            crate::pubsub::fingerprint(Some(0xffff)),
+        ] {
+            let mut replies = bus
+                .query(
+                    &key,
+                    QueryParams {
+                        payload: Some(RequestProbe { value: 1 }.encode_to_vec()),
+                        attachment,
+                        timeout: PATIENCE,
+                    },
+                )
+                .expect("raw request");
+            let response = timeout(PATIENCE, replies.next())
+                .await
+                .expect("bounded rejection")
+                .expect("reply");
+            assert!(response.is_err());
+        }
+        let client = if managed {
+            client(bus).await
+        } else {
+            standalone_node(bus, RECEIVER).await
+        };
+        let caller = if managed {
+            client.uses::<RequestProbe>("request")
+        } else {
+            client.caller::<RequestProbe>().to(SENDER).build()
+        }
+        .expect("caller");
+        assert_eq!(
+            timeout(PATIENCE, caller.call(RequestProbe { value: 2 }))
+                .await
+                .expect("call")
+                .expect("reply")
+                .value,
+            2
+        );
+        timeout(PATIENCE, task)
             .await
-            .expect("bounded rejection")
-            .expect("reply");
-        assert!(response.is_err());
+            .expect("server finished")
+            .expect("server task");
     }
-    let client = client(bus).await;
-    let caller = client.uses::<RequestProbe>("request").expect("caller");
-    assert_eq!(
-        timeout(PATIENCE, caller.call(RequestProbe { value: 2 }))
-            .await
-            .expect("call")
-            .expect("reply")
-            .value,
-        2
-    );
-    timeout(PATIENCE, task)
-        .await
-        .expect("server finished")
-        .expect("server task");
 }
 
 #[tokio::test]
-async fn managed_caller_rejects_unstamped_malformed_and_mismatching_responses() {
-    let bus = Arc::new(Local::new());
-    let client = client(bus.clone()).await;
-    let caller = client.uses::<RequestProbe>("request").expect("caller");
-    let count = AtomicU64::new(0);
-    let key = Key::topic(DOMAIN, Some(SENDER), RequestProbe::TYPE);
-    let reply_key = key.clone();
-    let _server = bus
-        .respond(
-            &key,
-            Box::new(move |query| {
-                let attachment = match count.fetch_add(1, Ordering::SeqCst) {
-                    0 => None,
-                    1 => Some(vec![1]),
-                    2 => crate::pubsub::fingerprint(Some(0xffff)),
-                    _ => crate::pubsub::fingerprint(Probe::SCHEMA),
-                };
-                query
-                    .reply(&reply_key, Probe { value: 3 }.encode_to_vec(), attachment)
-                    .expect("reply");
-            }),
-        )
-        .expect("raw server");
-    for _ in 0..2 {
+async fn caller_rejects_unstamped_malformed_and_mismatching_responses() {
+    for managed in [false, true] {
+        let bus = Arc::new(Local::new());
+        let client = if managed {
+            client(bus.clone()).await
+        } else {
+            standalone_node(bus.clone(), RECEIVER).await
+        };
+        let caller = if managed {
+            client.uses::<RequestProbe>("request")
+        } else {
+            client.caller::<RequestProbe>().to(SENDER).build()
+        }
+        .expect("caller");
+        let count = AtomicU64::new(0);
+        let key = Key::topic(DOMAIN, Some(SENDER), RequestProbe::TYPE);
+        let reply_key = key.clone();
+        let _server = bus
+            .respond(
+                &key,
+                Box::new(move |query| {
+                    let attachment = match count.fetch_add(1, Ordering::SeqCst) {
+                        0 => None,
+                        1 => Some(vec![1]),
+                        2 => crate::pubsub::fingerprint(Some(0xffff)),
+                        _ => crate::pubsub::fingerprint(Some(Probe::SCHEMA)),
+                    };
+                    query
+                        .reply(&reply_key, Probe { value: 3 }.encode_to_vec(), attachment)
+                        .expect("reply");
+                }),
+            )
+            .expect("raw server");
+        for _ in 0..2 {
+            assert!(matches!(
+                timeout(PATIENCE, caller.call(RequestProbe { value: 1 }))
+                    .await
+                    .expect("call"),
+                Err(CallError::MissingSchema)
+            ));
+        }
         assert!(matches!(
             timeout(PATIENCE, caller.call(RequestProbe { value: 1 }))
                 .await
                 .expect("call"),
-            Err(CallError::MissingSchema)
+            Err(CallError::Schema { .. })
         ));
+        assert_eq!(
+            timeout(PATIENCE, caller.call(RequestProbe { value: 1 }))
+                .await
+                .expect("call")
+                .expect("verified reply")
+                .value,
+            3
+        );
     }
-    assert!(matches!(
-        timeout(PATIENCE, caller.call(RequestProbe { value: 1 }))
-            .await
-            .expect("call"),
-        Err(CallError::Schema { .. })
-    ));
-    assert_eq!(
-        timeout(PATIENCE, caller.call(RequestProbe { value: 1 }))
-            .await
-            .expect("call")
-            .expect("verified reply")
-            .value,
-        3
-    );
 }
 
 #[tokio::test]

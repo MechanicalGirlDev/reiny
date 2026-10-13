@@ -14,12 +14,11 @@ fn main() {
 `compile()` searches upward for the nearest `main.yaml` containing a `schema`
 block, skipping runtime-only module manifests. It reads only that build-time
 catalog; runtime providers and module wiring are never evaluated by codegen.
-Catalogs accept versions 1 and 2 because their schema shape is unchanged.
-Managed runtime manifests and bindings still require version 2.
+Catalogs and runtime manifests require `version: 2`; version 1 is rejected.
 It compiles the declared
 protos with prost, and writes `$OUT_DIR/reiny_generated.rs`. The output contains
 re-exports of the publication/dependency types, a `reiny::Topic` impl for each
-type (with the topic string embedded), and - if `schema.config` is present - a typed
+type (with a mandatory fingerprint and its descriptor), and - if `schema.config` is present - a typed
 `config::Config`.
 
 The schema block supports both per-project catalogs (`project`, `publications`,
@@ -27,6 +26,24 @@ The schema block supports both per-project catalogs (`project`, `publications`,
 crates and `services`). Proto and dependency paths are relative to the directory
 containing that catalog. Dependency projects provide their public catalog in
 their own `main.yaml`.
+
+Shared schema crates use named parts under `schema.schema`, even when there is
+only one crate. Each part declares `crate`, a nonempty list of owned `protos`,
+and optional `depends` part names. The legacy `schema.schema.crate` shortcut
+is rejected.
+
+```yaml
+version: 2
+schema:
+  internals:
+    Ping: { proto: proto/ping.proto, message: ping.Ping }
+  schema:
+    messages:
+      crate: pingpong-schema
+      protos: [proto/ping.proto]
+  projects:
+    ping: { publications: [Ping] }
+```
 
 ```yaml
 version: 2

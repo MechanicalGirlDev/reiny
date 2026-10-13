@@ -498,23 +498,6 @@ pub mod prelude {
     };
 }
 
-/// The runtime `#[reiny::main]`'s expansion calls. Not meant to be touched directly.
-#[doc(hidden)]
-pub mod __rt {
-    use std::future::Future;
-
-    use crate::{Cloudy, Result, RuntimeOptions, run_with};
-
-    /// The 0.2-compatible entry point. Builds [`RuntimeOptions`] from the arguments and hands them to [`run_with`].
-    pub fn run<F, Fut>(default_name: &str, user: F) -> Result<()>
-    where
-        F: FnOnce(Cloudy) -> Fut,
-        Fut: Future<Output = Result<()>>,
-    {
-        run_with(RuntimeOptions::from_args(default_name), user)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

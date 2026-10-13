@@ -144,8 +144,8 @@ async fn undefined_and_wrong_type_ports_fail_before_registration() {
 }
 
 #[tokio::test]
-async fn managed_ports_reject_compiled_types_without_fingerprints() {
-    // Given a declared short transport name, matching a hand-written unverified type.
+async fn managed_ports_reject_incompatible_compiled_topic_metadata() {
+    // All Topics now carry fingerprints; incompatible type metadata still cannot bind.
     let mut contract = bindings(RECEIVER);
     contract.inputs.insert(
         "incoming".to_string(),
@@ -164,9 +164,8 @@ async fn managed_ports_reject_compiled_types_without_fingerprints() {
         .await
         .expect("cloudy");
 
-    // When both directions use an unverified type, then neither is accepted.
-    assert!(cloudy.input::<Bare>("incoming").is_err());
-    assert!(cloudy.output::<Bare>("outgoing").is_err());
+    assert!(cloudy.input::<OtherProbe>("incoming").is_err());
+    assert!(cloudy.output::<OtherProbe>("outgoing").is_err());
 }
 
 #[tokio::test]

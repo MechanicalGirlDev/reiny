@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn v1_catalog_is_rejected_at_discovery_and_dependency_boundaries() {
+    let f = Fixture::new("v1-catalog");
+    f.write(
+        "main.yaml",
+        "version: 1\nschema: { project: { name: app } }\n",
+    );
+    let err = find_manifest(f.root()).unwrap_err().to_string();
+    assert!(err.contains("unsupported main.yaml version 1"), "{err}");
+    let err = parse_manifest(&f.path("main.yaml"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("unsupported main.yaml version 1"), "{err}");
+}
+
+#[test]
+fn legacy_single_schema_crate_is_rejected() {
+    let f = Fixture::new("single-schema");
+    f.write(
+        "main.yaml",
+        "version: 2\nschema:\n  internals: {}\n  schema: { crate: app-schema }\n",
+    );
+    let err = describe_err(f.root());
+    assert!(err.contains("schema.schema.crate"), "{err}");
+    assert!(err.contains("invalid type"), "{err}");
+}
+
+#[test]
 fn main_manifest_requires_supported_version_and_valid_schema() {
     // Given malformed unified manifests.
     for (name, text) in [
@@ -11,9 +38,9 @@ fn main_manifest_requires_supported_version_and_valid_schema() {
         ),
         (
             "bad-schema",
-            "version: 1\nschema: { publications: invalid }\n",
+            "version: 2\nschema: { publications: invalid }\n",
         ),
-        ("bad-yaml", "version: 1\nschema: [\n"),
+        ("bad-yaml", "version: 2\nschema: [\n"),
     ] {
         let f = Fixture::new(name);
         f.write("main.yaml", text);
@@ -34,11 +61,11 @@ fn ancestor_catalog_still_rejects_topic_collisions() {
     f.write("proto/b.proto", "");
     f.write(
         "main.yaml",
-        "version: 1\nschema:\n  internals:\n    First: { proto: proto/a.proto, message: first.Value }\n    Second: { proto: proto/b.proto, message: second.Value }\n",
+        "version: 2\nschema:\n  internals:\n    First: { proto: proto/a.proto, message: first.Value }\n    Second: { proto: proto/b.proto, message: second.Value }\n",
     );
     f.write(
         "modules/leaf/main.yaml",
-        "version: 1\nrun: { provider: process, bin: leaf }\n",
+        "version: 2\nrun: { provider: process, bin: leaf }\n",
     );
 
     // When resolving the namespaced module.
@@ -52,7 +79,7 @@ fn ancestor_catalog_still_rejects_topic_collisions() {
 fn describe_reports_layout_mistakes() {
     // Neither [project] nor [internals]/[projects]: the message names both ways out.
     let f = Fixture::new("neither");
-    f.write("main.yaml", "version: 1\nschema: {}\n");
+    f.write("main.yaml", "version: 2\nschema: {}\n");
     let err = describe_err(f.root());
     assert!(err.contains("[project]"), "{err}");
     assert!(err.contains("[internals]"), "{err}");
@@ -62,7 +89,7 @@ fn describe_reports_layout_mistakes() {
     f.write(
         "main.yaml",
         r"
-{version: 1,schema: {project: {name: ping,version: 0.1.0},publications: {Ping: {proto: proto/ping.proto,message: ping.Ping}}}}
+{version: 2,schema: {project: {name: ping,version: 0.1.0},publications: {Ping: {proto: proto/ping.proto,message: ping.Ping}}}}
 ",
     );
     let err = describe_err(f.root());
@@ -75,14 +102,14 @@ fn describe_reports_layout_mistakes() {
     f.write(
         "dep/main.yaml",
         r"
-{version: 1,schema: {project: {name: dep,version: 0.1.0},publications: {D: {proto: proto/d.proto,message: d.D}}}}
+{version: 2,schema: {project: {name: dep,version: 0.1.0},publications: {D: {proto: proto/d.proto,message: d.D}}}}
 ",
     );
     f.write("app/proto/a.proto", "");
     f.write(
         "app/main.yaml",
         r#"
-{version: 1,schema: {project: {name: app,version: 0.1.0},publications: {A: {proto: proto/a.proto,message: a.A}},dependencies: {my-dep: {version: "0.1",path: ../dep}}}}
+{version: 2,schema: {project: {name: app,version: 0.1.0},publications: {A: {proto: proto/a.proto,message: a.A}},dependencies: {my-dep: {version: "0.1",path: ../dep}}}}
 "#,
     );
     let err = describe_err(&f.path("app"));

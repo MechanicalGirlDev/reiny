@@ -33,6 +33,8 @@ struct State {
 }
 impl Topic for State {
     const TYPE: &'static str = "RosState";
+    const SCHEMA: u64 = 0x1234;
+    const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -42,6 +44,8 @@ struct Cmd {
 }
 impl Topic for Cmd {
     const TYPE: &'static str = "RosCmd";
+    const SCHEMA: u64 = 0x1234;
+    const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -58,9 +62,13 @@ struct Sum {
 }
 impl Topic for Add {
     const TYPE: &'static str = "RosAdd";
+    const SCHEMA: u64 = 0x1234;
+    const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 impl Topic for Sum {
     const TYPE: &'static str = "RosSum";
+    const SCHEMA: u64 = 0x1234;
+    const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 impl Service for Add {
     type Response = Sum;
@@ -78,9 +86,13 @@ struct Echoed {
 }
 impl Topic for Echo {
     const TYPE: &'static str = "RosEcho";
+    const SCHEMA: u64 = 0x1234;
+    const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 impl Topic for Echoed {
     const TYPE: &'static str = "RosEchoed";
+    const SCHEMA: u64 = 0x1234;
+    const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 impl Service for Echo {
     type Response = Echoed;

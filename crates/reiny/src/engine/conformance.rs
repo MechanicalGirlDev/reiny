@@ -26,6 +26,8 @@ struct Probe {
 
 impl Topic for Probe {
     const TYPE: &'static str = "ConfProbe";
+    const SCHEMA: u64 = 0x1234;
+    const DESCRIPTOR: Option<crate::Descriptor> = None;
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -42,12 +44,14 @@ struct StampedV2 {
 
 impl Topic for StampedV1 {
     const TYPE: &'static str = "ConfStamped";
-    const SCHEMA: Option<u64> = Some(0x1111);
+    const DESCRIPTOR: Option<crate::Descriptor> = None;
+    const SCHEMA: u64 = 0x1111;
 }
 
 impl Topic for StampedV2 {
     const TYPE: &'static str = "ConfStamped";
-    const SCHEMA: Option<u64> = Some(0x2222);
+    const DESCRIPTOR: Option<crate::Descriptor> = None;
+    const SCHEMA: u64 = 0x2222;
 }
 
 /// A type that describes itself at `@schema`. reiny never interprets the set, so any bytes will do.
@@ -61,6 +65,7 @@ const DESCRIBED_SET: &[u8] = b"conf-descriptor-set";
 
 impl Topic for Described {
     const TYPE: &'static str = "ConfDescribed";
+    const SCHEMA: u64 = 0x1234;
     const DESCRIPTOR: Option<Descriptor> = Some(Descriptor {
         message: "conf.Described",
         file_set: DESCRIBED_SET,
@@ -83,10 +88,14 @@ struct Sum {
 
 impl Topic for Add {
     const TYPE: &'static str = "ConfAdd";
+    const SCHEMA: u64 = 0x1234;
+    const DESCRIPTOR: Option<crate::Descriptor> = None;
 }
 
 impl Topic for Sum {
     const TYPE: &'static str = "ConfSum";
+    const SCHEMA: u64 = 0x1234;
+    const DESCRIPTOR: Option<crate::Descriptor> = None;
 }
 
 impl Service for Add {
@@ -266,7 +275,7 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
         .expect("stream open");
     assert_eq!(
         (envelope.source.as_str(), envelope.schema),
-        ("a", StampedV1::SCHEMA)
+        ("a", Some(StampedV1::SCHEMA))
     );
     assert_eq!(
         StampedV1::decode(envelope.payload.as_slice())

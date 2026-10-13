@@ -28,6 +28,8 @@ struct Probe {
 
 impl Topic for Probe {
     const TYPE: &'static str = "ReinyE2eProbe";
+    const SCHEMA: u64 = 0x1234;
+    const DESCRIPTOR: Option<crate::Descriptor> = None;
 }
 
 /// The same type on the same topic but with **different schema fingerprints**. It recreates by hand
@@ -46,12 +48,14 @@ struct StampedV2 {
 
 impl Topic for StampedV1 {
     const TYPE: &'static str = "ReinyE2eStamped";
-    const SCHEMA: Option<u64> = Some(0x1111_1111_1111_1111);
+    const DESCRIPTOR: Option<crate::Descriptor> = None;
+    const SCHEMA: u64 = 0x1111_1111_1111_1111;
 }
 
 impl Topic for StampedV2 {
     const TYPE: &'static str = "ReinyE2eStamped";
-    const SCHEMA: Option<u64> = Some(0x2222_2222_2222_2222);
+    const DESCRIPTOR: Option<crate::Descriptor> = None;
+    const SCHEMA: u64 = 0x2222_2222_2222_2222;
 }
 
 /// A type that announces a descriptor. The bytes need not be a real descriptor set — reiny never
@@ -64,6 +68,7 @@ struct Described {
 
 impl Topic for Described {
     const TYPE: &'static str = "ReinyE2eDescribed";
+    const SCHEMA: u64 = 0x1234;
     const DESCRIPTOR: Option<Descriptor> = Some(Descriptor {
         message: "e2e.Described",
         file_set: b"not-a-real-descriptor-set",

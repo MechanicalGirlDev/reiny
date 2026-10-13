@@ -18,8 +18,7 @@
 //!    link comes up the moment either Hello lands).
 //!
 //! The schema fingerprint (`Topic::SCHEMA`) is checked exactly once, at Hello, and Data of a
-//! mismatching type is dropped (the same "only drop when we can actually compare" rule reiny
-//! proper uses).
+//! mismatching type is dropped. Every declared type must carry a fingerprint.
 
 use core::fmt;
 
@@ -79,7 +78,7 @@ impl IdBuf {
 struct LocalType {
     hash: u32,
     name: &'static str,
-    schema: Option<u64>,
+    schema: u64,
     flags: u8,
 }
 
@@ -91,8 +90,8 @@ pub struct RemoteType {
     /// The OR of [`wire::flags`].
     pub flags: u8,
     /// The peer's `Topic::SCHEMA`.
-    pub schema: Option<u64>,
-    /// Both this and our own `SCHEMA` are `Some` and they differ. Data of this type is dropped.
+    pub schema: u64,
+    /// This and our own `SCHEMA` differ. Data of this type is dropped.
     pub mismatch: bool,
 }
 
@@ -163,6 +162,8 @@ pub enum Error {
         /// The colliding type name.
         new: &'static str,
     },
+    /// The same type name was declared with different fingerprints.
+    SchemaMismatch,
     /// A type was declared after I/O had started. Declarations must precede the Hello, or the peer
     /// never hears about them.
     Started,
@@ -186,6 +187,7 @@ impl fmt::Display for Error {
             Self::HashCollision { existing, new } => {
                 write!(f, "type hash collision between '{existing}' and '{new}'")
             }
+            Self::SchemaMismatch => f.write_str("schema fingerprint mismatch"),
             Self::Started => f.write_str("types must be declared before the link starts"),
             Self::NotDeclared => f.write_str("type not declared with publishes()"),
             Self::NoPeerService => f.write_str("peer does not serve this request type"),
@@ -349,6 +351,9 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
                         existing: slot.name,
                         new: T::TYPE,
                     });
+                }
+                if slot.schema != T::SCHEMA {
+                    return Err(Error::SchemaMismatch);
                 }
                 slot.flags |= flag;
                 return Ok(());
@@ -557,13 +562,21 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
                     self.stats.dropped_unwanted = self.stats.dropped_unwanted.wrapping_add(1);
                     return None;
                 }
-                if self.remote_type(frame.hash).is_some_and(|t| t.mismatch) {
+                if !self.connected
+                    || (!self.peer_bridge
+                        && self.remote_type(frame.hash).is_none_or(|t| t.mismatch))
+                {
                     self.stats.dropped_schema = self.stats.dropped_schema.wrapping_add(1);
                     return None;
                 }
                 Some(Event::Data(frame))
             }
             Kind::Request => {
+                if !self.connected || self.remote_type(frame.hash).is_some_and(|t| t.mismatch) {
+                    self.stats.dropped_schema = self.stats.dropped_schema.wrapping_add(1);
+                    let _ = self.emit_error(frame.hash, frame.seq, "schema fingerprint mismatch");
+                    return None;
+                }
                 let served = self.bridge
                     || self
                         .local_type(frame.hash)
@@ -576,8 +589,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
                     None
                 }
             }
-            Kind::Reply => Some(Event::Reply(frame)),
-            Kind::Error => Some(Event::Error(frame)),
+            Kind::Reply => self.connected.then_some(Event::Reply(frame)),
+            Kind::Error => self.connected.then_some(Event::Error(frame)),
         }
     }
 
@@ -585,16 +598,22 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     fn on_hello(&mut self, frame: Frame) -> Option<Event> {
         let (peer, remote, overflow, ack, bridge) = {
             let payload = &self.rx.as_ref()[HEADER..HEADER + usize::from(frame.len)];
-            let hello = wire::hello_parse(payload).ok()?;
+            let Ok(hello) = wire::hello_parse(payload) else {
+                let was_connected = self.connected;
+                self.connected = false;
+                self.peer = None;
+                self.peer_bridge = false;
+                self.remote = [None; N];
+                return was_connected.then_some(Event::Disconnected);
+            };
             let peer = IdBuf::new(hello.id).ok()?;
             let mut remote = [None; N];
             let mut count = 0usize;
             let mut overflow = 0u32;
             for e in hello.entries() {
-                let mismatch = match (self.local_type(e.hash).and_then(|t| t.schema), e.schema) {
-                    (Some(mine), Some(theirs)) => mine != theirs,
-                    _ => false,
-                };
+                let mismatch = self
+                    .local_type(e.hash)
+                    .is_some_and(|t| t.schema != e.schema);
                 if count < N {
                     remote[count] = Some(RemoteType {
                         hash: e.hash,
@@ -633,6 +652,9 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     pub fn send<T: Topic + Message>(&mut self, msg: &T) -> Result<bool, Error> {
         let hash = wire::type_hash(T::TYPE);
         self.check_publishes(hash)?;
+        if self.local_type(hash).is_some_and(|t| t.schema != T::SCHEMA) {
+            return Err(Error::SchemaMismatch);
+        }
         if !self.peer_subscribes_hash(hash) {
             return Ok(false);
         }
@@ -659,6 +681,12 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         if !self.peer_serves_hash(hash) {
             return Err(Error::NoPeerService);
         }
+        if self
+            .remote_type(hash)
+            .is_some_and(|t| t.schema != S::SCHEMA)
+        {
+            return Err(Error::SchemaMismatch);
+        }
         let len = self.encode_payload(req)?;
         self.emit_request(hash, len)
     }
@@ -675,13 +703,19 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     /// Answer an [`Event::Request`]. `seq` is the request frame's.
     pub fn reply<S: Service>(&mut self, seq: u8, resp: &S::Response) -> Result<(), Error> {
         let len = self.encode_payload(resp)?;
-        self.emit(Kind::Reply, wire::type_hash(S::TYPE), seq, len)
+        self.emit_reply(wire::type_hash(S::TYPE), seq, S::Response::SCHEMA, len)
     }
 
     /// The pre-encoded form of [`Link::reply`]. `hash` is the *request* type's.
-    pub fn reply_raw(&mut self, seq: u8, hash: u32, payload: &[u8]) -> Result<(), Error> {
+    pub fn reply_raw(
+        &mut self,
+        seq: u8,
+        hash: u32,
+        schema: u64,
+        payload: &[u8],
+    ) -> Result<(), Error> {
         let len = self.copy_payload(payload)?;
-        self.emit(Kind::Reply, hash, seq, len)
+        self.emit_reply(hash, seq, schema, len)
     }
 
     /// Answer an [`Event::Request`] with an error.
@@ -692,6 +726,16 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     /// The type-hash form of [`Link::reply_err`].
     pub fn reply_err_raw(&mut self, seq: u8, hash: u32, message: &str) -> Result<(), Error> {
         self.emit_error(hash, seq, message)
+    }
+
+    fn emit_reply(&mut self, hash: u32, seq: u8, schema: u64, len: usize) -> Result<(), Error> {
+        let reply_len = len.checked_add(8).ok_or(Error::TooLarge)?;
+        if reply_len > FRAME.saturating_sub(OVERHEAD) {
+            return Err(Error::TooLarge);
+        }
+        self.scratch.copy_within(HEADER..HEADER + len, HEADER + 8);
+        self.scratch[HEADER..HEADER + 8].copy_from_slice(&schema.to_le_bytes());
+        self.emit(Kind::Reply, hash, seq, reply_len)
     }
 
     fn check_publishes(&self, hash: u32) -> Result<(), Error> {
@@ -845,6 +889,18 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         if !self.is_fresh(frame) || frame.hash != wire::type_hash(T::TYPE) {
             return None;
         }
+        // Services own the request declaration; a bridge mirrors our negotiated types.
+        let schema =
+            if frame.kind == Kind::Request || (frame.kind == Kind::Data && self.peer_bridge) {
+                self.local_type(frame.hash).map(|t| t.schema)
+            } else if frame.kind == Kind::Data {
+                self.remote_type(frame.hash).map(|t| t.schema)
+            } else {
+                None
+            };
+        if schema != Some(T::SCHEMA) {
+            return None;
+        }
         T::decode(self.payload(frame)).ok()
     }
 
@@ -852,10 +908,18 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     /// *request* type's hash, so that is what is checked.
     #[must_use]
     pub fn decode_reply<S: Service>(&self, frame: &Frame) -> Option<S::Response> {
-        if !self.is_fresh(frame) || frame.hash != wire::type_hash(S::TYPE) {
+        if !self.is_fresh(frame)
+            || frame.kind != Kind::Reply
+            || frame.hash != wire::type_hash(S::TYPE)
+        {
             return None;
         }
-        S::Response::decode(self.payload(frame)).ok()
+        let payload = self.payload(frame);
+        let schema = u64::from_le_bytes(payload.get(..8)?.try_into().ok()?);
+        if schema != S::Response::SCHEMA {
+            return None;
+        }
+        S::Response::decode(payload.get(8..)?).ok()
     }
 
     /// The message of an [`Event::Error`].
@@ -905,7 +969,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
             && (self.peer_bridge
                 || self
                     .remote_type(hash)
-                    .is_some_and(|t| t.flags & flags::SUB != 0))
+                    .is_some_and(|t| t.flags & flags::SUB != 0 && !t.mismatch))
     }
 
     /// Whether the peer serves the request type `T` (false when disconnected, true for a bridge).
@@ -921,7 +985,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
             && (self.peer_bridge
                 || self
                     .remote_type(hash)
-                    .is_some_and(|t| t.flags & flags::SERVE != 0))
+                    .is_some_and(|t| t.flags & flags::SERVE != 0 && !t.mismatch))
     }
 
     /// How much was thrown away.
@@ -943,7 +1007,8 @@ mod tests {
     }
     impl Topic for Pos {
         const TYPE: &'static str = "Pos";
-        const SCHEMA: Option<u64> = Some(0xaa);
+        const SCHEMA: u64 = 0xaa;
+        const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
 
     /// The same type name as `Pos` with a different fingerprint (a same-named type from another
@@ -955,7 +1020,8 @@ mod tests {
     }
     impl Topic for PosV2 {
         const TYPE: &'static str = "Pos";
-        const SCHEMA: Option<u64> = Some(0xbb);
+        const SCHEMA: u64 = 0xbb;
+        const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
 
     #[derive(Clone, PartialEq, prost::Message)]
@@ -965,6 +1031,8 @@ mod tests {
     }
     impl Topic for Cmd {
         const TYPE: &'static str = "Cmd";
+        const SCHEMA: u64 = 0xcc;
+        const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
 
     #[derive(Clone, PartialEq, prost::Message)]
@@ -976,6 +1044,8 @@ mod tests {
     }
     impl Topic for Add {
         const TYPE: &'static str = "Add";
+        const SCHEMA: u64 = 0xdd;
+        const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
     #[derive(Clone, PartialEq, prost::Message)]
     struct Sum {
@@ -984,8 +1054,26 @@ mod tests {
     }
     impl Topic for Sum {
         const TYPE: &'static str = "Sum";
+        const SCHEMA: u64 = 0xee;
+        const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
     impl Service for Add {
+        type Response = Sum;
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct AddV2 {
+        #[prost(int32, tag = "1")]
+        a: i32,
+        #[prost(int32, tag = "2")]
+        b: i32,
+    }
+    impl Topic for AddV2 {
+        const TYPE: &'static str = Add::TYPE;
+        const SCHEMA: u64 = Add::SCHEMA + 1;
+        const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
+    }
+    impl Service for AddV2 {
         type Response = Sum;
     }
 
@@ -1054,7 +1142,7 @@ mod tests {
             .find(|t| t.hash == wire::type_hash("Pos"))
             .unwrap();
         assert_eq!(pos.flags, flags::PUB | flags::LATCHED);
-        assert_eq!(pos.schema, Some(0xaa));
+        assert_eq!(pos.schema, 0xaa);
         assert!(!pos.mismatch);
         // Declarations cannot be added after the Hello.
         assert_eq!(a.subscribes::<Cmd>(), Err(Error::Started));
@@ -1168,6 +1256,34 @@ mod tests {
         assert_eq!(a.error_message(&err), "busy");
     }
 
+    #[test]
+    fn replies_without_the_matching_response_fingerprint_are_rejected() {
+        for schema in [None, Some(Sum::SCHEMA ^ 1)] {
+            let mut a = link("a");
+            let mut b = link("b");
+            b.serves::<Add>().unwrap();
+            connect(&mut a, &mut b);
+            a.request(&Add { a: 1, b: 2 }).unwrap();
+            while pump(&mut a, &mut b) {}
+            let Some(Event::Request(req)) = b.next() else {
+                panic!("expected request")
+            };
+            let payload = Sum { s: 3 }.encode_to_vec();
+            if let Some(schema) = schema {
+                b.reply_raw(req.seq, req.hash, schema, &payload).unwrap();
+            } else {
+                // A legacy peer sends only the prost bytes.
+                let len = b.copy_payload(&payload).unwrap();
+                b.emit(Kind::Reply, req.hash, req.seq, len).unwrap();
+            }
+            while pump(&mut a, &mut b) {}
+            let Some(Event::Reply(reply)) = a.next() else {
+                panic!("expected reply")
+            };
+            assert_eq!(a.decode_reply::<Add>(&reply), None);
+        }
+    }
+
     /// The correlation id is a u8 that wraps. Two outstanding requests must not be told apart by
     /// anything else, and the sequence has to advance by one per request.
     #[test]
@@ -1231,40 +1347,100 @@ mod tests {
         b.subscribes::<Pos>().unwrap();
         connect(&mut a, &mut b);
         assert!(b.peer_types().any(|t| t.mismatch));
-        assert_eq!(a.send(&PosV2 { x: 1 }), Ok(true));
+        assert_eq!(a.send(&PosV2 { x: 1 }), Ok(false));
+        // A peer ignoring negotiation must still not deliver incompatible bytes.
+        let len = a.encode_payload(&PosV2 { x: 1 }).unwrap();
+        a.emit_data(wire::type_hash(Pos::TYPE), len).unwrap();
         while pump(&mut a, &mut b) {}
         assert!(b.next().is_none());
         assert_eq!(b.stats().dropped_schema, 1);
     }
 
-    /// A fingerprint is only enforced when both sides have one. A hand-written `impl Topic` (no
-    /// `SCHEMA`) has to keep interoperating with a generated type — that is the promise `SCHEMA`'s
-    /// default exists for.
     #[test]
-    fn missing_fingerprint_passes_through() {
-        /// `Pos`'s name and shape without a fingerprint, as a hand-written impl would have it.
-        #[derive(Clone, PartialEq, prost::Message)]
-        struct PosNoSchema {
-            #[prost(int32, tag = "1")]
-            x: i32,
-        }
-        impl Topic for PosNoSchema {
-            const TYPE: &'static str = "Pos";
-        }
+    fn typed_send_and_call_cannot_use_another_fingerprint_for_the_same_name() {
+        let mut sender = link("sender");
+        sender.publishes::<Pos>().unwrap();
+        let mut receiver = link("receiver");
+        receiver.subscribes::<Pos>().unwrap();
+        receiver.serves::<Add>().unwrap();
+        connect(&mut sender, &mut receiver);
+        assert_eq!(sender.send(&PosV2 { x: 1 }), Err(Error::SchemaMismatch));
+        assert_eq!(
+            sender.request(&AddV2 { a: 1, b: 2 }),
+            Err(Error::SchemaMismatch)
+        );
+    }
 
-        let mut a = link("a");
-        let mut b = link("b");
-        a.publishes::<PosNoSchema>().unwrap();
-        b.subscribes::<Pos>().unwrap(); // SCHEMA = Some(0xaa)
-        connect(&mut a, &mut b);
-        assert!(b.peer_types().all(|t| !t.mismatch));
-        a.send(&PosNoSchema { x: 3 }).unwrap();
-        while pump(&mut a, &mut b) {}
-        let Some(Event::Data(f)) = b.next() else {
-            panic!("expected data")
+    #[test]
+    fn request_fingerprint_mismatch_is_replied_to_without_dispatching() {
+        let mut caller = link("caller");
+        caller.calls::<AddV2>().unwrap();
+        let mut server = link("server");
+        server.serves::<Add>().unwrap();
+        connect(&mut caller, &mut server);
+        settle(&mut caller, &mut server);
+        let len = caller.encode_payload(&AddV2 { a: 1, b: 2 }).unwrap();
+        let seq = caller
+            .emit_request(wire::type_hash(Add::TYPE), len)
+            .unwrap();
+        while pump(&mut caller, &mut server) {}
+        assert!(server.next().is_none());
+        while pump(&mut caller, &mut server) {}
+        let Some(Event::Error(frame)) = caller.next() else {
+            panic!("expected fingerprint rejection");
         };
-        assert_eq!(b.decode::<Pos>(&f), Some(Pos { x: 3 }));
-        assert_eq!(b.stats().dropped_schema, 0);
+        assert_eq!(frame.seq, seq);
+        assert_eq!(caller.error_message(&frame), "schema fingerprint mismatch");
+        assert_eq!(server.stats().dropped_schema, 1);
+    }
+
+    /// A legacy peer cannot negotiate a connection or deliver frames without a fingerprint.
+    #[test]
+    fn missing_fingerprint_rejects_hello_and_data() {
+        for (bridge, restart) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut legacy = link("old");
+            legacy.publishes::<Pos>().unwrap();
+            let mut receiver = link("new");
+            if bridge {
+                receiver = receiver.as_bridge();
+            } else {
+                receiver.subscribes::<Pos>().unwrap();
+            }
+            if restart {
+                connect(&mut legacy, &mut receiver);
+                settle(&mut legacy, &mut receiver);
+            }
+            legacy.ensure_started();
+            legacy.tx_len = 0;
+            let len = wire::hello_write(
+                &mut legacy.scratch[HEADER..],
+                false,
+                false,
+                "old",
+                [HelloEntry {
+                    hash: wire::type_hash(Pos::TYPE),
+                    flags: flags::PUB,
+                    schema: Pos::SCHEMA,
+                    name: Pos::TYPE,
+                }]
+                .into_iter(),
+            )
+            .unwrap();
+            // [hello flags][id length][old][count][hash u32][entry flags]
+            legacy.scratch[HEADER + 10] &= !flags::SCHEMA;
+            legacy.emit(Kind::Hello, 0, 0, len).unwrap();
+            let len = legacy.encode_payload(&Pos { x: 3 }).unwrap();
+            legacy.emit_data(wire::type_hash(Pos::TYPE), len).unwrap();
+            while pump(&mut legacy, &mut receiver) {}
+            if restart {
+                assert_eq!(receiver.next(), Some(Event::Disconnected));
+            }
+            assert!(receiver.next().is_none());
+            assert!(!receiver.is_connected());
+            assert_eq!(receiver.peer_id(), None);
+            assert_eq!(receiver.peer_types().count(), 0);
+            assert_eq!(receiver.stats().dropped_schema, 1);
+        }
     }
 
     #[test]
@@ -1558,7 +1734,7 @@ mod tests {
             panic!("bridge should receive reply")
         };
         assert_eq!(rep.seq, seq);
-        assert_eq!(Sum::decode(bridge.payload(&rep)), Ok(Sum { s: 5 }));
+        assert_eq!(bridge.decode_reply::<Add>(&rep), Some(Sum { s: 5 }));
 
         // mcu → bridge service call: a bridge accepts requests for types it does not serve.
         let seq = mcu.request(&Add { a: 1, b: 1 }).unwrap();
@@ -1568,7 +1744,7 @@ mod tests {
         };
         assert_eq!(Add::decode(bridge.payload(&r)), Ok(Add { a: 1, b: 1 }));
         bridge
-            .reply_raw(r.seq, r.hash, &Sum { s: 2 }.encode_to_vec())
+            .reply_raw(r.seq, r.hash, Sum::SCHEMA, &Sum { s: 2 }.encode_to_vec())
             .unwrap();
         while pump(&mut mcu, &mut bridge) {}
         let Some(Event::Reply(rep)) = mcu.next() else {
@@ -1584,7 +1760,7 @@ mod tests {
     #[test]
     fn bridge_does_not_enforce_fingerprints() {
         let mut mcu = link("mcu");
-        mcu.publishes::<PosV2>().unwrap(); // SCHEMA = Some(0xbb)
+        mcu.publishes::<PosV2>().unwrap(); // SCHEMA = 0xbb
         let mut bridge = link("bridge").as_bridge();
         connect(&mut mcu, &mut bridge);
 
@@ -1600,7 +1776,7 @@ mod tests {
             bridge
                 .peer_types()
                 .find(|t| t.hash == wire::type_hash("Pos"))
-                .and_then(|t| t.schema),
+                .map(|t| t.schema),
             Some(0xbb)
         );
     }
@@ -1644,10 +1820,14 @@ mod tests {
     struct Alias;
     impl Topic for Alias {
         const TYPE: &'static str = "Pos";
+        const SCHEMA: u64 = Pos::SCHEMA;
+        const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
     struct Other;
     impl Topic for Other {
         const TYPE: &'static str = "Other";
+        const SCHEMA: u64 = 0xff;
+        const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
 
     #[test]
@@ -1665,6 +1845,7 @@ mod tests {
             "same name, same hash: fine"
         );
         assert_eq!(l.subscribes::<Other>(), Ok(()));
+        assert_eq!(l.subscribes::<PosV2>(), Err(Error::SchemaMismatch));
     }
 
     /// Two different names hashing alike is the one failure a 32-bit type hash can produce, and it
@@ -1676,10 +1857,14 @@ mod tests {
         struct Costarring;
         impl Topic for Costarring {
             const TYPE: &'static str = "costarring";
+            const SCHEMA: u64 = 1;
+            const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
         }
         struct Liquid;
         impl Topic for Liquid {
             const TYPE: &'static str = "liquid";
+            const SCHEMA: u64 = 2;
+            const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
         }
         assert_eq!(
             wire::type_hash(Costarring::TYPE),

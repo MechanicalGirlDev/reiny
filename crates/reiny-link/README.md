@@ -33,4 +33,11 @@ you `send` / `call` / `recv`.
 
 Wire format and the reasoning: `docs/design/0.5.0.md` §3 in the repository.
 
+Current typed traffic requires schema fingerprints. Hello entries without a
+fingerprint are rejected. Reply payloads begin with the response fingerprint
+(8 bytes, little-endian), followed by the prost response; requests retain their
+request-type hash. `reply_raw` requires the response fingerprint and `call_raw`
+returns `(fingerprint, prost_bytes)`. Missing or mismatched response metadata is
+rejected before decoding.
+
 License: MIT

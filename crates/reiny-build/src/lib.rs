@@ -51,7 +51,7 @@ struct Manifest {
     #[serde(default)]
     projects: BTreeMap<String, ProjectDecl>,
     /// The workspace's shared schema crates (with them, a type is generated once and shared).
-    schema: Option<SchemaDecl>,
+    schema: Option<BTreeMap<String, SchemaPartDef>>,
     /// The per-project typed config schema + defaults (read through `cloudy.config()`).
     config: Option<toml::Table>,
     /// `[services]`: request type → response type (generates `impl reiny::Service`).
@@ -67,28 +67,6 @@ struct ServiceDef {
     response: String,
 }
 
-/// The two shapes of `[schema]`. `crate` is a keyword, so it is taken through a rename.
-///
-/// - **single** (0.2) `[schema] crate = "myapp-schema"` — one crate prost-compiles all of
-///   `[internals]` and writes the `impl Topic`s; launches re-export it as a Cargo dependency.
-/// - **multi-crate** (0.3) `[schema.<name>] crate/protos/depends` — the schema is split across
-///   several independently publishable crates. Ownership follows the proto path, and a leaf type is
-///   generated exactly once.
-///
-/// Untagged, so the single shape is tried first (a string `crate` key = single, otherwise a part table).
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum SchemaDecl {
-    Single(SchemaSingle),
-    Multi(BTreeMap<String, SchemaPartDef>),
-}
-
-#[derive(Debug, Deserialize)]
-struct SchemaSingle {
-    #[serde(rename = "crate")]
-    crate_name: String,
-}
-
 /// One part of `[schema.<name>]`.
 #[derive(Debug, Deserialize)]
 struct SchemaPartDef {
@@ -101,15 +79,14 @@ struct SchemaPartDef {
     depends: Vec<String>,
 }
 
-/// One normalized schema crate. The single shape folds in as `name: None` / `protos: None`
-/// (= it owns all of `[internals]`).
+/// One normalized named schema crate.
 #[derive(Debug, Clone)]
 struct SchemaPart {
-    /// The part name from `[schema.<name>]`. `None` for the single shape.
-    name: Option<String>,
+    /// The part name from `[schema.<name>]`.
+    name: String,
     crate_name: String,
-    /// The absolute paths of the owned protos. `None` for the single shape.
-    protos: Option<Vec<PathBuf>>,
+    /// The absolute paths of the owned protos.
+    protos: Vec<PathBuf>,
     depends: Vec<String>,
 }
 
@@ -123,7 +100,7 @@ impl SchemaPart {
 /// An introspection view of one schema crate (for `reiny check`).
 #[derive(Debug, Clone)]
 pub struct SchemaCrateInfo {
-    /// The part name from `[schema.<name>]`. `None` for a single `[schema]`.
+    /// The part name from `[schema.<name>]` (always present).
     pub part: Option<String>,
     /// The Cargo package name.
     pub crate_name: String,
@@ -232,8 +209,8 @@ pub enum Mode {
     /// Workspace + `[schema]`, and we are the **schema crate itself**: prost-compile our share and
     /// write the `impl Topic`s. Launches share it as a Cargo dependency.
     Schema {
-        /// The part we are responsible for in the multi-crate shape (`[schema.<name>]`). `None` for a
-        /// single `[schema]` (= it owns all of `[internals]`).
+        /// The named part we compile. `None` denotes a catalog introspection view,
+        /// not a compiling package.
         part: Option<String>,
     },
     /// Workspace + `[schema]`, and we are a launch **consuming** the schema. No proto is recompiled;
@@ -337,13 +314,13 @@ impl Resolution {
         self.config.is_some()
     }
 
-    /// The schema crates `[schema]` declares (empty when none). The single shape is one entry with `part` = `None`.
+    /// The named schema crates `[schema]` declares (empty when none).
     #[must_use]
     pub fn schema_crates(&self) -> Vec<SchemaCrateInfo> {
         self.schema_parts
             .iter()
             .map(|p| SchemaCrateInfo {
-                part: p.name.clone(),
+                part: Some(p.name.clone()),
                 crate_name: p.crate_name.clone(),
                 depends: p.depends.clone(),
             })
@@ -661,7 +638,7 @@ fn resolve_workspace(
         }
     } else if let Some(mine) = parts.iter().find(|p| p.crate_name == pkg_name) {
         Mode::Schema {
-            part: mine.name.clone(),
+            part: Some(mine.name.clone()),
         }
     } else if in_projects {
         // A consuming launch has to appear in [projects.<pkg>]. internals is the union of all parts.
@@ -709,50 +686,37 @@ fn canonical(path: &Path) -> PathBuf {
 /// Normalize `[schema]` into a list of parts and validate the identifiers and the dependencies.
 /// Empty when there is no `[schema]`.
 fn normalize_schema(manifest: &Manifest, root: &Path) -> Result<Vec<SchemaPart>> {
-    let Some(decl) = &manifest.schema else {
+    let Some(map) = &manifest.schema else {
         return Ok(Vec::new());
     };
-    let parts: Vec<SchemaPart> = match decl {
-        SchemaDecl::Single(single) => vec![SchemaPart {
-            name: None,
-            crate_name: single.crate_name.clone(),
-            protos: None,
-            depends: Vec::new(),
-        }],
-        SchemaDecl::Multi(map) => {
-            if map.is_empty() {
+    if map.is_empty() {
+        bail!("[schema] に区画がありません([schema.<name>] を書いてください)");
+    }
+    let mut parts = Vec::new();
+    for (name, def) in map {
+        if def.protos.is_empty() {
+            bail!(
+                "[schema.{name}] の protos が空です(この区画が所有する proto を列挙してください)"
+            );
+        }
+        let mut protos = Vec::new();
+        for p in &def.protos {
+            let abs = resolve_relative(root, Path::new(p));
+            if !abs.is_file() {
                 bail!(
-                    "[schema] に区画がありません([schema] crate = \"...\" か [schema.<name>] を書いてください)"
+                    "[schema.{name}] の proto が見つかりません: {}",
+                    abs.display()
                 );
             }
-            let mut out = Vec::new();
-            for (name, def) in map {
-                if def.protos.is_empty() {
-                    bail!(
-                        "[schema.{name}] の protos が空です(この区画が所有する proto を列挙してください)"
-                    );
-                }
-                let mut protos = Vec::new();
-                for p in &def.protos {
-                    let abs = resolve_relative(root, Path::new(p));
-                    if !abs.is_file() {
-                        bail!(
-                            "[schema.{name}] の proto が見つかりません: {}",
-                            abs.display()
-                        );
-                    }
-                    protos.push(abs);
-                }
-                out.push(SchemaPart {
-                    name: Some(name.clone()),
-                    crate_name: def.crate_name.clone(),
-                    protos: Some(protos),
-                    depends: def.depends.clone(),
-                });
-            }
-            out
+            protos.push(abs);
         }
-    };
+        parts.push(SchemaPart {
+            name: name.clone(),
+            crate_name: def.crate_name.clone(),
+            protos,
+            depends: def.depends.clone(),
+        });
+    }
 
     for p in &parts {
         ensure_rust_ident(&p.crate_ident(), "[schema].crate", "[schema]")?;
@@ -768,15 +732,10 @@ fn normalize_schema(manifest: &Manifest, root: &Path) -> Result<Vec<SchemaPart>>
 /// generated into `c` too and the same type exists twice.
 /// cargo hands `DEP_*` only to **direct** dependents, so reiny has to demand the closure itself.
 fn validate_depends(parts: &[SchemaPart]) -> Result<()> {
-    let by_name: BTreeMap<&str, &SchemaPart> = parts
-        .iter()
-        .filter_map(|p| p.name.as_deref().map(|n| (n, p)))
-        .collect();
+    let by_name: BTreeMap<&str, &SchemaPart> = parts.iter().map(|p| (p.name.as_str(), p)).collect();
 
     for p in parts {
-        let Some(me) = p.name.as_deref() else {
-            continue;
-        };
+        let me = p.name.as_str();
         for dep in &p.depends {
             if dep == me {
                 bail!("[schema.{me}] の depends が自分自身を指しています");
@@ -814,20 +773,18 @@ fn validate_depends(parts: &[SchemaPart]) -> Result<()> {
     Ok(())
 }
 
-/// Decide each `[internals]` type's owning part from its proto path. Only meaningful in the multi-crate shape.
+/// Decide each `[internals]` type's owning named part from its proto path.
 /// A proto belonging to no part, or one two parts fight over, is rejected here.
 fn assign_owners(entries: &mut [Entry], parts: &[SchemaPart], manifest_path: &Path) -> Result<()> {
-    // The single shape (protos = None) owns everything, so nothing needs assigning.
-    if parts.iter().all(|p| p.protos.is_none()) {
+    // An unpartitioned workspace compiles its catalog in each project.
+    if parts.is_empty() {
         return Ok(());
     }
 
     let mut owner_of: BTreeMap<PathBuf, &str> = BTreeMap::new();
     for part in parts {
-        let (Some(name), Some(protos)) = (part.name.as_deref(), part.protos.as_ref()) else {
-            continue;
-        };
-        for proto in protos {
+        let name = part.name.as_str();
+        for proto in &part.protos {
             let key = canonical(proto);
             if let Some(prev) = owner_of.get(&key) {
                 bail!(
@@ -889,7 +846,7 @@ fn split_message(message: &str) -> Result<(Vec<String>, String)> {
 // ---------------------------------------------------------------------------
 
 /// "What this package compiles and what it merely references", gathered into one place.
-/// For a single `[schema]` / workspace / per-project it simply holds everything; only while building
+/// For a workspace / per-project it simply holds everything; only while building
 /// one `[schema.<name>]` part is it narrowed to our share, with `externs` filled in.
 #[cfg(feature = "compile")]
 struct CompilePlan<'a> {
@@ -923,7 +880,7 @@ fn compile_plan(resolution: &Resolution) -> Result<CompilePlan<'_>> {
     };
 
     let Some(part_name) = part_name else {
-        // Single [schema] / workspace / per-project: compile all of it ourselves, as ever.
+        // Workspace / per-project: compile the catalog ourselves.
         let mut protos: Vec<PathBuf> = Vec::new();
         let mut includes: Vec<PathBuf> = Vec::new();
         for e in &resolution.entries {
@@ -949,12 +906,9 @@ fn compile_plan(resolution: &Resolution) -> Result<CompilePlan<'_>> {
     let part = resolution
         .schema_parts
         .iter()
-        .find(|p| p.name.as_deref() == Some(part_name.as_str()))
+        .find(|p| p.name == part_name)
         .with_context(|| format!("[schema.{part_name}] が見つかりません"))?;
-    let protos = part
-        .protos
-        .clone()
-        .with_context(|| format!("[schema.{part_name}] に protos がありません"))?;
+    let protos = part.protos.clone();
 
     // Make the common ancestor of our protos the single include. The file names in the descriptor
     // follow from it too, so it must be the very include handed downstream.
@@ -976,7 +930,7 @@ fn compile_plan(resolution: &Resolution) -> Result<CompilePlan<'_>> {
         let dep = resolution
             .schema_parts
             .iter()
-            .find(|p| p.name.as_deref() == Some(dep_name.as_str()))
+            .find(|p| p.name == *dep_name)
             .with_context(|| format!("[schema.{dep_name}] が見つかりません"))?;
         let (include, types) = read_dep_metadata(&dep.crate_name)?;
         if !includes.contains(&include) {
@@ -1451,7 +1405,7 @@ fn render_generated(
     );
 
     // The type → topic type segment. One impl per type (aliases may repeat, but the type is one, so dedup).
-    // SCHEMA / DESCRIPTOR come from the descriptor (they default to None, so silently omit what is missing).
+    // Every generated topic must carry its fingerprint and real descriptor.
     let mut seen = Vec::new();
     out.push_str(
         "// type → topic (publish: reiny/<domain>/<id>/<TYPE>, \
@@ -1464,14 +1418,14 @@ fn render_generated(
         }
         seen.push(path.clone());
         let fq_name = e.fq_name();
-        let schema = match fingerprints.get(&fq_name) {
-            Some(fp) => format!(
-                " const SCHEMA: Option<u64> = Some({fp:#018x}); \
+        let fp = fingerprints
+            .get(&fq_name)
+            .with_context(|| format!("missing schema fingerprint for message {fq_name}"))?;
+        let schema = format!(
+            " const SCHEMA: u64 = {fp:#018x}; \
                  const DESCRIPTOR: Option<::reiny::Descriptor> = \
                  Some(::reiny::Descriptor {{ message: {fq_name:?}, file_set: REINY_DESCRIPTORS }});"
-            ),
-            None => String::new(),
-        };
+        );
         writeln!(
             out,
             "impl ::reiny::Topic for {path} {{ const TYPE: &'static str = {:?};{schema} }}",
@@ -1525,7 +1479,7 @@ fn service_impls(resolution: &Resolution, plan_entries: &[&Entry]) -> Vec<(Strin
                 let ident = resolution
                     .schema_parts
                     .iter()
-                    .find(|p| p.name == resp.owner)
+                    .find(|p| Some(p.name.as_str()) == resp.owner.as_deref())
                     .map(SchemaPart::crate_ident)?;
                 format!("::{ident}::{}", resp.type_path())
             };
@@ -1803,7 +1757,7 @@ fn resolve_services(
         if req.owner != resp.owner
             && let Some(req_owner) = &req.owner
         {
-            let part = parts.iter().find(|p| p.name.as_deref() == Some(req_owner));
+            let part = parts.iter().find(|p| p.name == *req_owner);
             let reachable = part.is_some_and(|p| {
                 resp.owner
                     .as_deref()
@@ -2012,17 +1966,18 @@ mod tests {
             r#"
             [internals]
             Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
-            [schema]
+            [schema.messages]
             crate = "myapp-schema"
+            protos = ["proto/ping.proto"]
             [projects.ping]
             publications = ["Ping"]
         "#,
         )
         .unwrap();
-        match m.schema.unwrap() {
-            SchemaDecl::Single(s) => assert_eq!(s.crate_name, "myapp-schema"),
-            SchemaDecl::Multi(_) => panic!("did not parse as the single shape"),
-        }
+        let parts = m.schema.unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts["messages"].crate_name, "myapp-schema");
+        assert_eq!(parts["messages"].protos, ["proto/ping.proto"]);
     }
 
     #[test]
@@ -2041,23 +1996,19 @@ mod tests {
         "#,
         )
         .unwrap();
-        match m.schema.unwrap() {
-            SchemaDecl::Multi(parts) => {
-                assert_eq!(parts.len(), 2);
-                assert_eq!(parts["state"].crate_name, "myapp-proto-state");
-                assert_eq!(parts["state"].depends, vec!["geometry".to_string()]);
-                assert_eq!(parts["geometry"].protos.len(), 1);
-            }
-            SchemaDecl::Single(_) => panic!("did not parse as the multi-crate shape"),
-        }
+        let parts = m.schema.unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts["state"].crate_name, "myapp-proto-state");
+        assert_eq!(parts["state"].depends, vec!["geometry".to_string()]);
+        assert_eq!(parts["geometry"].protos.len(), 1);
     }
 
     /// A part for tests (protos never touch a real file here — only the depends validation is exercised).
     fn part(name: &str, depends: &[&str]) -> SchemaPart {
         SchemaPart {
-            name: Some(name.to_string()),
+            name: name.to_string(),
             crate_name: format!("p-{name}"),
-            protos: Some(Vec::new()),
+            protos: Vec::new(),
             depends: depends.iter().map(|d| (*d).to_string()).collect(),
         }
     }
@@ -2095,15 +2046,15 @@ mod tests {
     fn owners_come_from_proto_paths() {
         let parts = vec![
             SchemaPart {
-                name: Some("geometry".into()),
+                name: "geometry".into(),
                 crate_name: "p-geometry".into(),
-                protos: Some(vec![PathBuf::from("/x/geometry.proto")]),
+                protos: vec![PathBuf::from("/x/geometry.proto")],
                 depends: Vec::new(),
             },
             SchemaPart {
-                name: Some("state".into()),
+                name: "state".into(),
                 crate_name: "p-state".into(),
-                protos: Some(vec![PathBuf::from("/x/state.proto")]),
+                protos: vec![PathBuf::from("/x/state.proto")],
                 depends: vec!["geometry".into()],
             },
         ];
@@ -2323,6 +2274,30 @@ mod tests {
             },
         ];
         assert!(validate_no_topic_collision(&entries, Path::new("/x/main.yaml")).is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "compile")]
+    fn generated_topics_require_fingerprints_and_include_descriptors() {
+        let entries = svc_entries();
+        let entry = &entries[0];
+        let err = render_generated(&[entry], None, &BTreeMap::new(), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("missing schema fingerprint for message calc.Add"),
+            "{err}"
+        );
+
+        let fingerprints = BTreeMap::from([(entry.fq_name(), 42)]);
+        let out = render_generated(&[entry], None, &fingerprints, &[]).unwrap();
+        assert!(out.contains("const SCHEMA: u64 = 0x000000000000002a;"));
+        assert!(out.contains(
+            "Some(::reiny::Descriptor { message: \"calc.Add\", file_set: REINY_DESCRIPTORS })"
+        ));
+        assert!(
+            out.contains("include_bytes!(concat!(env!(\"OUT_DIR\"), \"/reiny_descriptors.bin\"))")
+        );
     }
 
     #[test]

@@ -168,6 +168,14 @@ sample (`services` in the `main.yaml` schema block).
 [`examples/owned-child`](examples/owned-child) demonstrates an app-owned helper
 with delegated retained state and RPC endpoints, plus a standalone probe.
 
+## Topic contract
+
+Generated topics declare a mandatory `SCHEMA: u64` and explicitly provide
+`DESCRIPTOR: Option<Descriptor>`. Type-only implementations are unsupported.
+Typed pub/sub and RPC reject missing, malformed, or mismatched fingerprints.
+Build-time catalogs require `version: 2` and named schema parts, including when
+there is only one schema crate.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

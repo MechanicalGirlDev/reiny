@@ -41,7 +41,7 @@ struct Probe {
 
 impl Topic for Probe {
     const TYPE: &'static str = "Probe";
-    const SCHEMA: Option<u64> = Some(0x1234);
+    const SCHEMA: u64 = 0x1234;
     const DESCRIPTOR: Option<Descriptor> = Some(Descriptor {
         message: "test.Probe",
         file_set: b"managed-test-descriptor",
@@ -49,13 +49,18 @@ impl Topic for Probe {
 }
 
 #[derive(Clone, PartialEq, Message)]
-struct Bare {
+struct OtherProbe {
     #[prost(uint32, tag = "1")]
     value: u32,
 }
 
-impl Topic for Bare {
-    const TYPE: &'static str = "Probe";
+impl Topic for OtherProbe {
+    const TYPE: &'static str = "OtherProbe";
+    const SCHEMA: u64 = 0x5678;
+    const DESCRIPTOR: Option<Descriptor> = Some(Descriptor {
+        message: "test.OtherProbe",
+        file_set: b"managed-test-descriptor",
+    });
 }
 
 fn bindings(namespace: &str) -> ModuleBindings {

@@ -110,28 +110,10 @@ impl<S: Service> Server<S> {
             let Some(payload) = query.payload() else {
                 continue; // drop = finalize
             };
-            if self.managed.is_some() && attachment_fingerprint(query.attachment()) != S::SCHEMA {
+            if attachment_fingerprint(query.attachment()) != Some(S::SCHEMA) {
                 reply_err(
                     query,
                     "missing or mismatching request schema fingerprint".to_string(),
-                );
-                continue;
-            }
-            if let (Some(mine), Some(theirs)) =
-                (S::SCHEMA, attachment_fingerprint(query.attachment()))
-                && theirs != mine
-            {
-                tracing::warn!(
-                    ty = S::TYPE,
-                    expected = format!("{mine:016x}"),
-                    received = format!("{theirs:016x}"),
-                    "schema fingerprint mismatch on request; replying with error"
-                );
-                reply_err(
-                    query,
-                    format!(
-                        "schema fingerprint mismatch: expected {mine:016x}, received {theirs:016x}"
-                    ),
                 );
                 continue;
             }
@@ -177,7 +159,7 @@ impl<S: Service> Request<S> {
         std::future::ready(self.query.reply(
             &self.key,
             response.encode_to_vec(),
-            fingerprint(S::Response::SCHEMA),
+            fingerprint(Some(S::Response::SCHEMA)),
         ))
         .await
     }
@@ -266,7 +248,7 @@ impl<S: Service> Caller<S> {
         // zenoh shows its own expiry as nothing but "no replies", indistinguishable from `NoReply`.
         let params = QueryParams {
             payload: Some(request.encode_to_vec()),
-            attachment: fingerprint(S::SCHEMA),
+            attachment: fingerprint(Some(S::SCHEMA)),
             timeout: self.timeout + ENGINE_TIMEOUT_MARGIN,
         };
         let mut replies = self
@@ -282,21 +264,16 @@ impl<S: Service> Caller<S> {
         };
         match reply {
             Ok(sample) => {
-                if self.managed.is_some() {
-                    if !self.key.matches(&sample.key) {
-                        return Err(CallError::Engine(anyhow::anyhow!(
-                            "response came from an undeclared target"
-                        )));
-                    }
-                    if attachment_fingerprint(sample.attachment.as_deref()).is_none() {
-                        return Err(CallError::MissingSchema);
-                    }
+                if self.managed.is_some() && !self.key.matches(&sample.key) {
+                    return Err(CallError::Engine(anyhow::anyhow!(
+                        "response came from an undeclared target"
+                    )));
                 }
-                if let (Some(expected), Some(received)) = (
-                    S::Response::SCHEMA,
-                    attachment_fingerprint(sample.attachment.as_deref()),
-                ) && expected != received
-                {
+                let expected = S::Response::SCHEMA;
+                let Some(received) = attachment_fingerprint(sample.attachment.as_deref()) else {
+                    return Err(CallError::MissingSchema);
+                };
+                if expected != received {
                     return Err(CallError::Schema { expected, received });
                 }
                 S::Response::decode(sample.payload.as_slice()).map_err(CallError::Decode)
@@ -325,7 +302,7 @@ pub enum CallError {
         /// The fingerprint that rode on the reply.
         received: u64,
     },
-    /// A managed response omitted its required schema fingerprint.
+    /// A response omitted its required schema fingerprint or carried malformed metadata.
     MissingSchema,
     /// The reply does not decode as `Response`.
     Decode(prost::DecodeError),

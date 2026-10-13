@@ -40,7 +40,9 @@ schema:
       proto: "proto/pong.proto"
       message: "pong.Pong"
   schema:
-    crate: "pingpong-schema"
+    messages:
+      crate: "pingpong-schema"
+      protos: ["proto/ping.proto", "proto/pong.proto"]
   projects:
     ping:
       version: "0.2.0"

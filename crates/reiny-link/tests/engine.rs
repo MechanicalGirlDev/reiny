@@ -20,7 +20,8 @@ struct Pos {
 }
 impl Topic for Pos {
     const TYPE: &'static str = "EngPos";
-    const SCHEMA: Option<u64> = Some(0x55);
+    const SCHEMA: u64 = 0x55;
+    const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -30,6 +31,8 @@ struct Cmd {
 }
 impl Topic for Cmd {
     const TYPE: &'static str = "EngCmd";
+    const SCHEMA: u64 = 0x66;
+    const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -41,6 +44,8 @@ struct Add {
 }
 impl Topic for Add {
     const TYPE: &'static str = "EngAdd";
+    const SCHEMA: u64 = 0x77;
+    const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 #[derive(Clone, PartialEq, prost::Message)]
 struct Sum {
@@ -49,6 +54,8 @@ struct Sum {
 }
 impl Topic for Sum {
     const TYPE: &'static str = "EngSum";
+    const SCHEMA: u64 = 0x88;
+    const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 impl Service for Add {
     type Response = Sum;
@@ -62,12 +69,72 @@ struct Echo {
 }
 impl Topic for Echo {
     const TYPE: &'static str = "EngEcho";
+    const SCHEMA: u64 = 0x99;
+    const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 impl Service for Echo {
     type Response = Echo;
 }
 
 const WAIT: Duration = Duration::from_secs(5);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn outgoing_data_and_requests_require_matching_fingerprints() {
+    use reiny::engine::{Key, QueryParams};
+
+    let mut mcu_link = HostLink::host("mcu").unwrap();
+    mcu_link.subscribes::<Cmd>().unwrap();
+    mcu_link.serves::<Add>().unwrap();
+    let (mcu, cloudy) = link_to_cloudy(mcu_link, "fingerprints").await;
+    let mut watch = cloudy.watch_subscribers::<Cmd>().unwrap();
+    assert_eq!(
+        timeout(WAIT, watch.recv()).await.unwrap(),
+        Some(PresenceEvent::Joined("mcu".to_string()))
+    );
+
+    let engine = cloudy.engine().unwrap();
+    let publisher = engine
+        .publisher(
+            &Key::topic("lab", Some("host"), Cmd::TYPE),
+            &reiny::Qos::default(),
+        )
+        .unwrap();
+    for attachment in [
+        None,
+        Some(vec![0; 7]),
+        Some((Cmd::SCHEMA + 1).to_le_bytes().to_vec()),
+    ] {
+        assert!(
+            publisher
+                .put(
+                    prost::Message::encode_to_vec(&Cmd { v: 1 }),
+                    attachment.clone()
+                )
+                .is_err()
+        );
+        assert!(
+            engine
+                .query(
+                    &Key::topic("lab", Some("mcu"), Add::TYPE),
+                    QueryParams {
+                        payload: Some(prost::Message::encode_to_vec(&Add { a: 1, b: 2 })),
+                        attachment,
+                        timeout: WAIT,
+                    },
+                )
+                .is_err()
+        );
+    }
+    publisher
+        .put(
+            prost::Message::encode_to_vec(&Cmd { v: 2 }),
+            Some(Cmd::SCHEMA.to_le_bytes().to_vec()),
+        )
+        .unwrap();
+    // The first event must be the valid send: rejected writes must not leak onto the wire.
+    let event = timeout(WAIT, mcu.recv()).await.unwrap().unwrap();
+    assert_eq!(event.decode::<Cmd>(), Some(Cmd { v: 2 }));
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn hierarchical_peer_namespace_keeps_type_identity_and_exact_routing() {

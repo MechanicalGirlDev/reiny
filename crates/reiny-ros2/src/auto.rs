@@ -220,6 +220,8 @@ mod tests {
         struct HandWritten;
         impl Topic for HandWritten {
             const TYPE: &'static str = "HandWritten";
+            const SCHEMA: u64 = 0x1234;
+            const DESCRIPTOR: Option<reiny::Descriptor> = None;
         }
 
         let err = descriptor::<HandWritten>().expect_err("no DESCRIPTOR");
@@ -234,6 +236,7 @@ mod tests {
         struct Broken;
         impl Topic for Broken {
             const TYPE: &'static str = "Broken";
+            const SCHEMA: u64 = 0x1234;
             const DESCRIPTOR: Option<Descriptor> = Some(Descriptor {
                 message: "hs.Broken",
                 file_set: b"not-a-descriptor-set",

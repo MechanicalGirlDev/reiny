@@ -34,7 +34,20 @@ properties:
     additionalProperties: { $ref: "#/$defs/resource" }
   schema:
     description: "Build-time catalog for reiny-build. Never run as runtime actions."
+    type: object
+    properties:
+      schema:
+        type: object
+        minProperties: 1
+        additionalProperties: { $ref: "#/$defs/schemaPart" }
 $defs:
+  schemaPart:
+    type: object
+    required: [crate, protos]
+    properties:
+      crate: { type: string }
+      protos: { type: array, minItems: 1, items: { type: string } }
+      depends: { type: array, items: { type: string }, default: [] }
   port:
     type: object
     additionalProperties: false

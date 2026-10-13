@@ -1,20 +1,52 @@
 use super::*;
 
 #[test]
+fn one_named_schema_part_assigns_ownership_and_compiles_its_protos() {
+    let f = Fixture::new("named-schema");
+    f.write(
+        "proto/ping.proto",
+        "syntax = \"proto3\"; package ping; message Ping { uint64 value = 1; }\n",
+    );
+    f.write(
+        "main.yaml",
+        "version: 2\nschema:\n  internals:\n    Ping: { proto: proto/ping.proto, message: ping.Ping }\n  schema:\n    messages:\n      crate: app-schema\n      protos: [proto/ping.proto]\n  projects:\n    ping: { publications: [Ping] }\n",
+    );
+    let res = describe(f.root()).unwrap();
+    assert_eq!(res.schema_crates()[0].part.as_deref(), Some("messages"));
+    assert_eq!(res.entries[0].owner.as_deref(), Some("messages"));
+    #[cfg(feature = "compile")]
+    {
+        let res = resolve_for(f.root(), "app-schema").unwrap();
+        assert!(matches!(res.mode(), Mode::Schema { part: Some(name) } if name == "messages"));
+        let consumer = resolve_for(f.root(), "ping").unwrap();
+        assert!(matches!(consumer.mode(), Mode::SchemaConsumer { .. }));
+        let plan = compile_plan(&res).unwrap();
+        assert_eq!(plan.protos, [f.path("proto/ping.proto")]);
+        let out_dir = f.path("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let fds = compile_protos(&plan, &out_dir, |_| {}).unwrap();
+        let scan = scan_descriptors(&fds, &plan.own_names);
+        let out = render_generated(&plan.entries, None, &scan.fingerprints, &[]).unwrap();
+        assert!(out.contains("const SCHEMA: u64"));
+        assert!(out.contains("message: \"ping.Ping\""));
+    }
+}
+
+#[test]
 fn describe_resolves_a_per_project_layout() {
     let f = Fixture::new("per-project");
     f.write("pong/proto/pong.proto", "");
     f.write(
         "pong/main.yaml",
         r"
-{version: 1,schema: {project: {name: pong,version: 0.1.0},publications: {Pong: {proto: proto/pong.proto,message: pong.Pong}}}}
+{version: 2,schema: {project: {name: pong,version: 0.1.0},publications: {Pong: {proto: proto/pong.proto,message: pong.Pong}}}}
 ",
     );
     f.write("ping/proto/ping.proto", "");
     f.write(
         "ping/main.yaml",
         r#"
-{version: 1,schema: {project: {name: ping,version: 0.1.0},publications: {Ping: {proto: proto/ping.proto,message: ping.Ping}},dependencies: {pong: {version: "0.1",path: ../pong}}}}
+{version: 2,schema: {project: {name: ping,version: 0.1.0},publications: {Ping: {proto: proto/ping.proto,message: ping.Ping}},dependencies: {pong: {version: "0.1",path: ../pong}}}}
 "#,
     );
 
@@ -61,7 +93,7 @@ fn describe_resolves_a_workspace_layout() {
     f.write(
         "main.yaml",
         r"
-{version: 1,schema: {internals: {Ping: {proto: proto/ping.proto,message: ping.Ping},Pong: {proto: proto/pong.proto,message: pong.Pong}},projects: {talker: {publications: [Ping],dependencies: [Pong]},listener: {publications: [Pong],dependencies: [Ping]}}}}
+{version: 2,schema: {internals: {Ping: {proto: proto/ping.proto,message: ping.Ping},Pong: {proto: proto/pong.proto,message: pong.Pong}},projects: {talker: {publications: [Ping],dependencies: [Pong]},listener: {publications: [Pong],dependencies: [Ping]}}}}
 ",
     );
 

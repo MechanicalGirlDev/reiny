@@ -15,7 +15,8 @@ struct Ping {
 
 impl Topic for Ping {
     const TYPE: &'static str = "Ping";
-    const SCHEMA: Option<u64> = Some(u64::MAX);
+    const DESCRIPTOR: Option<reiny::Descriptor> = None;
+    const SCHEMA: u64 = u64::MAX;
 }
 
 #[test]
@@ -58,7 +59,9 @@ fn rust_receives_ffi_encoded_protobuf() {
     options.install_tracing = false;
     let native = foreign.runtime.block_on(Cloudy::open(options)).unwrap();
     let mut subscriber = native.subscribe::<Ping>().unwrap();
-    let publisher = foreign.publisher("Ping".into(), Ping::SCHEMA).unwrap();
+    let publisher = foreign
+        .publisher("Ping".into(), Some(Ping::SCHEMA))
+        .unwrap();
     let ping = Ping {
         data: vec![0, 128, 255],
     };
@@ -250,7 +253,7 @@ fn network_sessions_exchange_protobuf_using_configuration_files() {
         .subscriber("Ping".into(), Some("network-sender".into()))
         .unwrap();
     matched_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    let publisher = sender.publisher("Ping".into(), Ping::SCHEMA).unwrap();
+    let publisher = sender.publisher("Ping".into(), Some(Ping::SCHEMA)).unwrap();
     let ping = Ping {
         data: vec![0, 128, 255],
     };
@@ -262,5 +265,5 @@ fn network_sessions_exchange_protobuf_using_configuration_files() {
     let message = subscription.receive(5000).unwrap().unwrap();
     assert_eq!(Ping::decode(message.payload.as_slice()).unwrap(), ping);
     assert_eq!(message.source, "network-sender");
-    assert_eq!(message.schema, Ping::SCHEMA);
+    assert_eq!(message.schema, Some(Ping::SCHEMA));
 }

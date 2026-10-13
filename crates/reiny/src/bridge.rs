@@ -367,7 +367,8 @@ mod tests {
     }
     impl Topic for Probe {
         const TYPE: &'static str = "BridgeProbe";
-        const SCHEMA: Option<u64> = Some(0x77);
+        const DESCRIPTOR: Option<crate::Descriptor> = None;
+        const SCHEMA: u64 = 0x77;
     }
 
     #[derive(Clone, PartialEq, prost::Message)]
@@ -377,6 +378,8 @@ mod tests {
     }
     impl Topic for Cmd {
         const TYPE: &'static str = "BridgeCmd";
+        const SCHEMA: u64 = 0x1234;
+        const DESCRIPTOR: Option<crate::Descriptor> = None;
     }
 
     #[derive(Clone, PartialEq, prost::Message)]
@@ -393,9 +396,13 @@ mod tests {
     }
     impl Topic for Add {
         const TYPE: &'static str = "BridgeAdd";
+        const SCHEMA: u64 = 0x1234;
+        const DESCRIPTOR: Option<crate::Descriptor> = None;
     }
     impl Topic for Sum {
         const TYPE: &'static str = "BridgeSum";
+        const SCHEMA: u64 = 0x1234;
+        const DESCRIPTOR: Option<crate::Descriptor> = None;
     }
     impl Service for Add {
         type Response = Sum;

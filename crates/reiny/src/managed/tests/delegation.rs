@@ -178,10 +178,7 @@ async fn host_requires_child_report_and_live_readiness_then_withdraws_on_port_lo
     )
     .expect("parse report");
     assert_eq!(report.namespace, SENDER);
-    assert_eq!(
-        report.outputs["outgoing"].schema,
-        Probe::SCHEMA.expect("schema")
-    );
+    assert_eq!(report.outputs["outgoing"].schema, Probe::SCHEMA);
     assert_eq!(report.outputs["outgoing"].contract, contract("test.Probe"));
     // The watch predates the child handle loss; no timer luck determines the assertion.
     drop(output);

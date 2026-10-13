@@ -27,12 +27,14 @@ struct Sum {
 
 impl Topic for Add {
     const TYPE: &'static str = "ReinyRpcAdd";
-    const SCHEMA: Option<u64> = Some(0xAAAA_AAAA_AAAA_AAAA);
+    const DESCRIPTOR: Option<crate::Descriptor> = None;
+    const SCHEMA: u64 = 0xAAAA_AAAA_AAAA_AAAA;
 }
 
 impl Topic for Sum {
     const TYPE: &'static str = "ReinyRpcSum";
-    const SCHEMA: Option<u64> = Some(0x5555_5555_5555_5555);
+    const DESCRIPTOR: Option<crate::Descriptor> = None;
+    const SCHEMA: u64 = 0x5555_5555_5555_5555;
 }
 
 /// A hand-written `impl Service` — also a regression test for a third-party type joining in one line.
@@ -51,7 +53,8 @@ struct AddV2 {
 
 impl Topic for AddV2 {
     const TYPE: &'static str = "ReinyRpcAdd";
-    const SCHEMA: Option<u64> = Some(0xBBBB_BBBB_BBBB_BBBB);
+    const DESCRIPTOR: Option<crate::Descriptor> = None;
+    const SCHEMA: u64 = 0xBBBB_BBBB_BBBB_BBBB;
 }
 
 impl Service for AddV2 {
@@ -67,6 +70,8 @@ struct Cfg {
 
 impl Topic for Cfg {
     const TYPE: &'static str = "ReinyRpcCfg";
+    const SCHEMA: u64 = 0x1234;
+    const DESCRIPTOR: Option<crate::Descriptor> = None;
 }
 
 impl Service for Cfg {

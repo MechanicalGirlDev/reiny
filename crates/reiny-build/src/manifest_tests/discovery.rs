@@ -7,14 +7,14 @@ fn manifest_search_takes_the_nearest_one_upward() {
     f.write(
         "main.yaml",
         r"
-{version: 1,schema: {internals: {Shared: {proto: proto/shared.proto,message: ws.Shared}},projects: {ping: {publications: [Shared]}}}}
+{version: 2,schema: {internals: {Shared: {proto: proto/shared.proto,message: ws.Shared}},projects: {ping: {publications: [Shared]}}}}
 ",
     );
     f.write("ping/proto/ping.proto", "");
     f.write(
         "ping/main.yaml",
         r"
-{version: 1,schema: {project: {name: ping,version: 0.1.0},publications: {Ping: {proto: proto/ping.proto,message: ping.Ping}}}}
+{version: 2,schema: {project: {name: ping,version: 0.1.0},publications: {Ping: {proto: proto/ping.proto,message: ping.Ping}}}}
 ",
     );
     std::fs::create_dir_all(f.path("ping/src")).unwrap();
@@ -38,7 +38,7 @@ fn runtime_only_modules_inherit_the_ancestor_catalog() {
     f.write("proto/shared.proto", "");
     f.write(
         "main.yaml",
-        "version: 1\nschema:\n  internals:\n    Shared: { proto: proto/shared.proto, message: ws.Shared }\n",
+        "version: 2\nschema:\n  internals:\n    Shared: { proto: proto/shared.proto, message: ws.Shared }\n",
     );
     f.write(
         "modules/worker/main.yaml",

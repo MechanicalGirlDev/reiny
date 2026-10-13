@@ -176,7 +176,7 @@ impl<'a, T> PublisherBuilder<'a, T> {
                 self.cloudy,
                 &key,
                 Arc::clone(&last),
-                T::SCHEMA,
+                Some(T::SCHEMA),
             )?)
         } else {
             None
@@ -292,7 +292,7 @@ impl<T: Message + Topic> Publisher<T> {
         if self.queryable.is_some() {
             *lock(&self.last) = Some(buf.clone());
         }
-        std::future::ready(self.raw.put(buf, fingerprint(T::SCHEMA))).await
+        std::future::ready(self.raw.put(buf, fingerprint(Some(T::SCHEMA)))).await
     }
 }
 
@@ -622,7 +622,7 @@ impl<T: Message + Default + Topic> Subscriber<T> {
             // Still cancel-safe: `Core::recv` is, and nothing after it awaits.
             let sample = self.core.recv().await?;
             if self.managed.is_some()
-                && attachment_fingerprint(sample.attachment.as_deref()) != T::SCHEMA
+                && attachment_fingerprint(sample.attachment.as_deref()) != Some(T::SCHEMA)
             {
                 continue;
             }
@@ -881,18 +881,12 @@ async fn recv_presence(presence: Option<&mut RawPresence>) -> Option<engine::Pre
 
 /// Match the sender's fingerprint from the attachment against our own `T::SCHEMA`.
 ///
-/// It passes through only when there is nothing to compare — either side is `None` (a hand-written
-/// `impl Topic`, a sender that carries no fingerprint, an engine with no attachments), or the
-/// attachment is not in the known shape (8 bytes, little-endian). Only a mismatch is dropped, and each
-/// source is warned about once (warning per sample would bury the log).
+/// Missing, malformed, and mismatched fingerprints are rejected. Each source is
+/// warned about once.
 fn schema_matches<T: Topic>(sample: &Sample, source: &str, warned: &mut HashSet<String>) -> bool {
-    let (Some(mine), Some(theirs)) = (
-        T::SCHEMA,
-        attachment_fingerprint(sample.attachment.as_deref()),
-    ) else {
-        return true;
-    };
-    if theirs == mine {
+    let mine = T::SCHEMA;
+    let theirs = attachment_fingerprint(sample.attachment.as_deref());
+    if theirs == Some(mine) {
         return true;
     }
     if warned.insert(source.to_string()) {
@@ -900,7 +894,7 @@ fn schema_matches<T: Topic>(sample: &Sample, source: &str, warned: &mut HashSet<
             ty = T::TYPE,
             source,
             expected = format!("{mine:016x}"),
-            received = format!("{theirs:016x}"),
+            received = ?theirs,
             "schema fingerprint mismatch; dropping samples from this source"
         );
     }
@@ -1016,17 +1010,8 @@ mod tests {
     }
     impl Topic for State {
         const TYPE: &'static str = "PubState";
-        const SCHEMA: Option<u64> = Some(0xaaaa_bbbb_cccc_dddd);
-    }
-
-    /// The same `TYPE` written by hand, with no fingerprint at all.
-    #[derive(Clone, PartialEq, prost::Message)]
-    struct StateNoSchema {
-        #[prost(int32, tag = "1")]
-        x: i32,
-    }
-    impl Topic for StateNoSchema {
-        const TYPE: &'static str = "PubState";
+        const DESCRIPTOR: Option<crate::Descriptor> = None;
+        const SCHEMA: u64 = 0xaaaa_bbbb_cccc_dddd;
     }
 
     fn sample(payload: Vec<u8>, attachment: Option<Vec<u8>>) -> Sample {
@@ -1062,9 +1047,9 @@ mod tests {
     #[test]
     fn fingerprint_is_eight_bytes_little_endian() {
         assert_eq!(fingerprint(None), None);
-        let bytes = fingerprint(State::SCHEMA).expect("State has a fingerprint");
+        let bytes = fingerprint(Some(State::SCHEMA)).expect("State has a fingerprint");
         assert_eq!(bytes.len(), 8);
-        assert_eq!(attachment_fingerprint(Some(&bytes)), State::SCHEMA);
+        assert_eq!(attachment_fingerprint(Some(&bytes)), Some(State::SCHEMA));
 
         assert_eq!(attachment_fingerprint(None), None);
         assert_eq!(attachment_fingerprint(Some(&[])), None);
@@ -1072,39 +1057,22 @@ mod tests {
         assert_eq!(attachment_fingerprint(Some(&[0u8; 9])), None, "too long");
     }
 
-    /// The check drops **only** a real mismatch. Everything it cannot compare passes through, which is
-    /// what keeps a hand-written `impl Topic` (no `SCHEMA`) and an engine without attachments working.
+    /// Matching fingerprints pass; missing, malformed, and mismatched metadata drop.
     #[test]
-    fn only_a_real_fingerprint_mismatch_is_dropped() {
-        let mut warned = HashSet::new();
+    fn schema_matches_and_missing_malformed_or_mismatched_metadata_drop() {
         let payload = State { x: 7 }.encode_to_vec();
-        let mine = fingerprint(State::SCHEMA);
-
-        // Both sides present and equal: delivered.
-        let ok = sample(payload.clone(), mine.clone());
+        let good = sample(payload.clone(), fingerprint(Some(State::SCHEMA)));
+        let mut warned = HashSet::new();
         assert_eq!(
-            unwrap_sample::<State>(&ok, "src".into(), &mut warned).map(|e| e.value),
+            unwrap_sample::<State>(&good, "src".into(), &mut warned).map(|e| e.value),
             Some(State { x: 7 })
         );
-
-        // Both sides present and different: dropped, even though the payload would decode fine.
-        let bad = sample(payload.clone(), fingerprint(Some(0x1234)));
-        assert!(unwrap_sample::<State>(&bad, "src".into(), &mut warned).is_none());
-
-        // No attachment at all: nothing to compare, so it passes.
-        let bare = sample(payload.clone(), None);
-        assert!(unwrap_sample::<State>(&bare, "src".into(), &mut warned).is_some());
-
-        // Our own side has no fingerprint: passes whatever the sender put there.
-        let mut warned2 = HashSet::new();
-        assert!(
-            unwrap_sample::<StateNoSchema>(&bad, "src".into(), &mut warned2).is_some(),
-            "a hand-written impl Topic must keep interoperating"
-        );
-
-        // An attachment of another shape is somebody else's, not a mismatch.
-        let alien = sample(payload, Some(b"not-a-fingerprint".to_vec()));
-        assert!(unwrap_sample::<State>(&alien, "src".into(), &mut warned).is_some());
+        assert!(warned.is_empty());
+        for attachment in [None, Some(vec![1, 2, 3]), fingerprint(Some(0xdead_beef))] {
+            let bad = sample(payload.clone(), attachment);
+            assert!(unwrap_sample::<State>(&bad, "src".into(), &mut warned).is_none());
+            assert_eq!(warned.len(), 1, "warn once per source");
+        }
     }
 
     /// A mismatch warns once per source, not once per sample — the log is the thing this protects.
@@ -1126,7 +1094,7 @@ mod tests {
     fn an_undecodable_payload_is_skipped() {
         let mut warned = HashSet::new();
         // A valid fingerprint with garbage behind it: the fingerprint check cannot catch this.
-        let broken = sample(vec![0xff, 0xff, 0xff], fingerprint(State::SCHEMA));
+        let broken = sample(vec![0xff, 0xff, 0xff], fingerprint(Some(State::SCHEMA)));
         assert!(unwrap_sample::<State>(&broken, "src".into(), &mut warned).is_none());
         assert!(
             warned.is_empty(),

@@ -106,8 +106,7 @@ fn compiled_type<T: Topic>(declared: &str) -> Result<ResponseReport> {
         declared == T::TYPE || declared == actual,
         "declared port type '{declared}' differs from actual type '{actual}'"
     );
-    let schema = T::SCHEMA
-        .ok_or_else(|| anyhow::anyhow!("managed port type '{actual}' has no schema fingerprint"))?;
+    let schema = T::SCHEMA;
     Ok(ResponseReport {
         type_name: actual.to_string(),
         schema,

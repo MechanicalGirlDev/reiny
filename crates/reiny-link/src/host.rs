@@ -39,7 +39,7 @@ pub struct PeerType {
     /// The OR of [`wire::flags`].
     pub flags: u8,
     /// The peer's `Topic::SCHEMA`.
-    pub schema: Option<u64>,
+    pub schema: u64,
 }
 
 /// What [`Host::recv`] reports. Reply / Error are consumed internally by [`Host::call`].
@@ -189,19 +189,31 @@ impl Host {
         req: &S,
         timeout: Duration,
     ) -> Result<S::Response, CallError> {
-        let bytes = self
+        {
+            let link = lock(&self.link);
+            if link
+                .peer_types()
+                .any(|t| t.hash == wire::type_hash(S::TYPE) && t.schema != S::SCHEMA)
+            {
+                return Err(CallError::Link(Error::SchemaMismatch));
+            }
+        }
+        let (schema, bytes) = self
             .call_raw(wire::type_hash(S::TYPE), req.encode_to_vec(), timeout)
             .await?;
+        if schema != S::Response::SCHEMA {
+            return Err(CallError::Link(Error::SchemaMismatch));
+        }
         S::Response::decode(bytes.as_slice()).map_err(CallError::Decode)
     }
 
-    /// The pre-encoded form of [`Host::call`]. The response stays prost bytes too.
+    /// The pre-encoded form of [`Host::call`]. Returns the response fingerprint and prost bytes.
     pub async fn call_raw(
         &self,
         hash: u32,
         payload: Vec<u8>,
         timeout: Duration,
-    ) -> Result<Vec<u8>, CallError> {
+    ) -> Result<(u64, Vec<u8>), CallError> {
         let (tx, rx) = oneshot::channel();
         let seq = {
             // Queuing the request and registering it in `pending` happen under the same lock — if
@@ -217,7 +229,14 @@ impl Host {
         };
         self.wake.notify_one();
         match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(Ok(bytes))) => Ok(bytes),
+            Ok(Ok(Ok(bytes))) => {
+                let schema = bytes
+                    .get(..8)
+                    .and_then(|b| b.try_into().ok())
+                    .map(u64::from_le_bytes)
+                    .ok_or(CallError::Link(Error::SchemaMismatch))?;
+                Ok((schema, bytes[8..].to_vec()))
+            }
             Ok(Ok(Err(message))) => Err(CallError::Remote(message)),
             Ok(Err(_)) => Err(CallError::Closed),
             Err(_) => {
@@ -235,8 +254,8 @@ impl Host {
     }
 
     /// The pre-encoded form of [`Host::reply`]. `hash` is the *request* type's.
-    pub fn reply_raw(&self, seq: u8, hash: u32, payload: &[u8]) -> Result<(), Error> {
-        lock(&self.link).reply_raw(seq, hash, payload)?;
+    pub fn reply_raw(&self, seq: u8, hash: u32, schema: u64, payload: &[u8]) -> Result<(), Error> {
+        lock(&self.link).reply_raw(seq, hash, schema, payload)?;
         self.wake.notify_one();
         Ok(())
     }
@@ -446,6 +465,8 @@ mod tests {
     }
     impl Topic for A {
         const TYPE: &'static str = "HostA";
+        const SCHEMA: u64 = 0xa;
+        const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
 
     #[derive(Clone, PartialEq, prost::Message)]
@@ -455,6 +476,8 @@ mod tests {
     }
     impl Topic for B {
         const TYPE: &'static str = "HostB";
+        const SCHEMA: u64 = 0xb;
+        const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
 
     fn data(hash: u32, payload: Vec<u8>) -> HostEvent {

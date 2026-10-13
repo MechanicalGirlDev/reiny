@@ -216,6 +216,11 @@ The optional `schema` block is the build-time type catalog that
 `reiny_build::compile()` reads. Runtime tooling keeps it intact but never
 executes anything from it.
 
+Build-time catalogs also require `version: 2`. Shared schema crates are named
+parts under `schema.schema.<name>`, with `crate`, a nonempty `protos` list, and
+optional `depends` part names. This applies to one-crate catalogs too; the
+legacy `schema.schema.crate` shortcut is rejected.
+
 ## Namespaces and topics
 
 Each executable gets a logical namespace `deployment/module/nested...`. Topic

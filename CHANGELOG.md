@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Breaking changes
+
+- Removed the 0.2 `reiny::__rt::run` entry point.
+- Build catalogs require version 2 and named schema parts; version 1 and the old single `crate` schema declaration are rejected.
+- Topics require an explicit `SCHEMA: u64` and `DESCRIPTOR` declaration. Typed pub/sub and RPC reject missing, malformed, and mismatched fingerprints.
+- Link RPC replies carry the response fingerprint; raw replies require it and raw calls return it alongside the prost bytes.
+
 All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
 `reiny-link`, `reiny-iceoryx2`, `reiny-ros2`, `reiny-build`, `reiny-macros`,
 `reiny-launch`, `reiny-cli`, `reiny-ffi`).
