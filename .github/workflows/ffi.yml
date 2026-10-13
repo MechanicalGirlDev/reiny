@@ -67,7 +67,11 @@ jobs:
             bindings/c/smoke.c -Ltarget/debug -lreiny_ffi -o target/debug/c-smoke
           c++ -std=c++17 -Wall -Wextra -Werror -Icrates/reiny-ffi/include \
             bindings/cpp/smoke.cpp -Ltarget/debug -lreiny_ffi -o target/debug/cpp-smoke
-          LD_LIBRARY_PATH=target/debug target/debug/c-smoke
-          LD_LIBRARY_PATH=target/debug target/debug/cpp-smoke
+          LD_LIBRARY_PATH=target/debug target/debug/c-smoke \
+            "$GITHUB_WORKSPACE/bindings/fixtures/sender.json" \
+            "$GITHUB_WORKSPACE/bindings/fixtures/receiver.json"
+          LD_LIBRARY_PATH=target/debug target/debug/cpp-smoke \
+            "$GITHUB_WORKSPACE/bindings/fixtures/sender.json" \
+            "$GITHUB_WORKSPACE/bindings/fixtures/receiver.json"
       - name: C# native smoke
         run: dotnet run --project bindings/csharp/Smoke/Smoke.csproj

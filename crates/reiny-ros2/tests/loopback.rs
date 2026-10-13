@@ -9,6 +9,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests may fail by panicking
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -209,7 +210,7 @@ fn bindings(
                 )
             })
             .collect(),
-        children: Default::default(),
+        children: BTreeMap::new(),
         executables: Vec::new(),
     }
 }
