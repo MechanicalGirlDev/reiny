@@ -247,6 +247,93 @@ fn runtime_check_does_not_build_when_root_declares_missing_cargo_manifest() {
 }
 
 #[test]
+fn runtime_check_rejects_legacy_reusable_definition() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.0.join("main.yaml"),
+        "version: 1\nrun: {provider: process, bin: absent}\n",
+    )
+    .unwrap();
+
+    assert!(!sandbox.run(&["check", "main.yaml"]).status.success());
+}
+
+#[test]
+fn runtime_check_rejects_definition_without_run_or_modules() {
+    let sandbox = Sandbox::new();
+    std::fs::write(sandbox.0.join("main.yaml"), "version: 2\n").unwrap();
+
+    assert!(!sandbox.run(&["check", "main.yaml"]).status.success());
+}
+
+#[test]
+fn runtime_check_accepts_reusable_leaf_without_provider_or_executable() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.0.join("main.yaml"),
+        "version: 2\nrun: {provider: external_process, bin: absent}\nin:\n  request: {type: test.Request}\nout:\n  response: {type: test.Response}\n",
+    )
+    .unwrap();
+
+    sandbox.success(&["check", "main.yaml"]);
+    assert!(!sandbox.0.join("absent").exists());
+    assert!(!sandbox.0.join(".reiny").exists());
+}
+
+#[test]
+fn explicit_runtime_check_is_independent_of_invalid_catalog() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.0.join("main.yaml"),
+        "version: 2\ndeployment: demo\nproviders: {process: {type: process}}\nrun: {provider: process, bin: absent}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sandbox.0.join("schema.yaml"),
+        "version: 1\nschema: {project: {name: demo}}\n",
+    )
+    .unwrap();
+
+    sandbox.success(&["check", "main.yaml"]);
+    assert!(!sandbox.run(&["check", "schema.yaml"]).status.success());
+    assert!(!sandbox.run(&["check", "."]).status.success());
+}
+
+#[test]
+fn explicit_catalog_check_is_independent_of_invalid_runtime() {
+    let sandbox = Sandbox::new();
+    std::fs::write(sandbox.0.join("main.yaml"), "version: 1\n").unwrap();
+    std::fs::write(
+        sandbox.0.join("schema.yaml"),
+        "version: 2\nschema: {project: {name: demo}, publications: {}}\n",
+    )
+    .unwrap();
+
+    sandbox.success(&["check", "schema.yaml"]);
+    assert!(!sandbox.run(&["check", "main.yaml"]).status.success());
+}
+
+#[test]
+fn runtime_check_rejects_root_with_unresolved_input_wiring() {
+    let sandbox = Sandbox::new();
+    std::fs::create_dir(sandbox.0.join("consumer")).unwrap();
+    std::fs::write(
+        sandbox.0.join("consumer/main.yaml"),
+        "version: 2\nrun: {provider: process, bin: absent}\nin:\n  state: {type: test.State}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sandbox.0.join("main.yaml"),
+        "version: 2\ndeployment: demo\nproviders: {process: {type: process}}\nmodules:\n  consumer:\n    source: ./consumer\n    in: {state: {type: test.State, from: missing.state}}\n",
+    )
+    .unwrap();
+
+    assert!(!sandbox.run(&["check", "main.yaml"]).status.success());
+    assert!(!sandbox.0.join(".reiny/build").exists());
+    assert!(!sandbox.0.join(".reiny/state.json").exists());
+}
+
+#[test]
 fn empty_scaffold_declares_no_ports_when_created() {
     // Given
     let sandbox = Sandbox::new();
@@ -296,5 +383,65 @@ fn schema_check_discovers_catalog_when_nearest_module_is_runtime_only() {
     // When
     sandbox.success(&["check", "leaf/src"]);
     // Then
+    assert!(!sandbox.0.join(".reiny/build").exists());
+}
+
+#[test]
+fn plan_json_retains_named_ports_and_alias_paths_without_building() {
+    // Given a composite exposes a differently named executable output.
+    let sandbox = Sandbox::new();
+    for directory in ["exporter/producer", "consumer"] {
+        std::fs::create_dir_all(sandbox.0.join(directory)).unwrap();
+    }
+    for (path, text) in [
+        (
+            "main.yaml",
+            "version: 2\ndeployment: demo\nproviders: {process: {type: process}}\nmodules:\n  exporter: {source: exporter}\n  consumer: {source: consumer, in: {incoming: {from: exporter.exposed}}}\n",
+        ),
+        (
+            "exporter/main.yaml",
+            "version: 2\nmodules: {producer: {source: producer}}\nout: {exposed: {from: producer.sent}}\n",
+        ),
+        (
+            "exporter/producer/main.yaml",
+            "version: 2\nrun: {provider: process, bin: absent-producer}\nout: {sent: {type: test.State}}\n",
+        ),
+        (
+            "consumer/main.yaml",
+            "version: 2\nrun: {provider: process, bin: absent-consumer}\nin: {incoming: {type: test.State}}\n",
+        ),
+    ] {
+        std::fs::write(sandbox.0.join(path), text).unwrap();
+    }
+    // When the real CLI resolves the runtime definition.
+    let output = sandbox.run(&["plan", "main.yaml", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    // Then its graph retains source, destination and intermediate public aliases.
+    let connections = plan["connections"].as_array().unwrap();
+    assert_eq!(connections.len(), 1);
+    assert_eq!(
+        connections[0]["source"],
+        serde_json::json!({
+            "namespace": "demo/exporter/producer", "input": false, "name": "sent"
+        })
+    );
+    assert_eq!(
+        connections[0]["destination"],
+        serde_json::json!({
+            "namespace": "demo/consumer", "input": true, "name": "incoming"
+        })
+    );
+    assert_eq!(
+        connections[0]["via"],
+        serde_json::json!([{
+            "namespace": "demo/exporter", "input": false, "name": "exposed"
+        }])
+    );
+    assert_eq!(connections[0]["contract"]["type"], "test.State");
     assert!(!sandbox.0.join(".reiny/build").exists());
 }

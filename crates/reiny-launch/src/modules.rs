@@ -130,6 +130,36 @@ impl PortSpec {
     }
 }
 
+/// A caller's connection or optional type assertion, without app-owned policies.
+///
+/// Existing explicit default policy fields are accepted when reading YAML, but
+/// nondefault policies are rejected rather than exposed on an invocation.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(try_from = "PortSpec")]
+pub struct PortConnection {
+    /// Optional assertion against the app's declared type.
+    #[serde(rename = "type", skip_serializing_if = "String::is_empty")]
+    pub type_name: String,
+    /// Exact sibling outputs or a parent input; absent for output assertions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<PortSources>,
+}
+
+impl TryFrom<PortSpec> for PortConnection {
+    type Error = ModuleError;
+
+    fn try_from(port: PortSpec) -> Result<Self, Self::Error> {
+        validate_connection("connection", &port)?;
+        if !port.type_name.is_empty() {
+            validate_contract("connection", &port.contract(), true)?;
+        }
+        Ok(Self {
+            type_name: port.type_name,
+            from: port.from,
+        })
+    }
+}
+
 /// A local module directory or a revision-pinned Git source.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -151,10 +181,10 @@ pub struct ModuleCall {
     pub providers: BTreeMap<String, String>,
     /// Input connections checked against the child's public contract.
     #[serde(default, rename = "in")]
-    pub inputs: BTreeMap<String, PortSpec>,
+    pub inputs: BTreeMap<String, PortConnection>,
     /// Public outputs visible to the caller.
     #[serde(default, rename = "out")]
-    pub outputs: BTreeMap<String, PortSpec>,
+    pub outputs: BTreeMap<String, PortConnection>,
     /// Instance configuration, relative to this caller, replacing the app default.
     #[serde(default)]
     pub config: Option<PathBuf>,
@@ -266,6 +296,17 @@ pub struct RunSpec {
 
 impl RunSpec {
     pub(crate) fn validate(&self, namespace: &str) -> Result<(), ModuleError> {
+        self.validate_names(namespace)?;
+        if self.config.is_none() && !self.config_assets.is_empty() {
+            return Err(invalid(
+                namespace,
+                "config_assets requires the selected instance config",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_names(&self, namespace: &str) -> Result<(), ModuleError> {
         validate_name(&self.bin, "binary")?;
         let mut binaries = BTreeSet::from([self.bin.as_str()]);
         for companion in &self.companions {
@@ -273,12 +314,6 @@ impl RunSpec {
             if !binaries.insert(companion.as_str()) {
                 return Err(invalid(namespace, "duplicate executable in runtime bundle"));
             }
-        }
-        if self.config.is_none() && !self.config_assets.is_empty() {
-            return Err(invalid(
-                namespace,
-                "config_assets requires the selected instance config",
-            ));
         }
         Ok(())
     }
@@ -379,15 +414,43 @@ pub struct DeploymentPlan {
     pub module_sources: BTreeMap<String, PathBuf>,
     /// Executable modules sorted by namespace.
     pub nodes: Vec<ExecutableModule>,
+    /// Concrete connections sorted by destination namespace and input name,
+    /// preserving declared fan-in order within each input.
+    pub connections: Vec<ResolvedConnection>,
     /// Managed immutable files.
     pub resources: Vec<ArtifactResource>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct PortAddress {
-    namespace: String,
-    input: bool,
-    name: String,
+/// One named input or output of a module instance.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct PortAddress {
+    /// Deployment-relative module namespace.
+    pub namespace: String,
+    /// Whether this address names an input rather than an output.
+    pub input: bool,
+    /// Declared port name.
+    pub name: String,
+}
+
+/// One resolved route between executable ports, without intermediate forwarding.
+#[derive(Clone, Debug, Serialize)]
+pub struct ResolvedConnection {
+    /// Concrete executable output publishing this route.
+    pub source: PortAddress,
+    /// Concrete executable input receiving this route.
+    pub destination: PortAddress,
+    /// Intermediate alias addresses, ordered from destination toward source,
+    /// excluding both concrete endpoints.
+    pub via: Vec<PortAddress>,
+    /// Contract of the concrete executable output.
+    pub contract: EndpointContract,
+}
+
+#[derive(Clone)]
+struct ResolvedRoute {
+    source: PortAddress,
+    via: Vec<PortAddress>,
+    contract: EndpointContract,
 }
 
 impl std::fmt::Display for PortAddress {
@@ -421,6 +484,10 @@ impl DeploymentPlan {
     pub fn load(path: &Path, update: bool) -> Result<Self, ModuleError> {
         let root = manifest_dir(path)?;
         let manifest = read_manifest(&root)?;
+        Self::resolve(root, manifest, update)
+    }
+
+    fn resolve(root: PathBuf, manifest: ModuleManifest, update: bool) -> Result<Self, ModuleError> {
         let deployment = manifest.deployment.clone().ok_or_else(|| {
             invalid(
                 root.display().to_string(),
@@ -450,7 +517,8 @@ impl DeploymentPlan {
             source_stack: Vec::new(),
         };
         loader.visit(&deployment, &root, manifest, providers, true)?;
-        let (nodes, resources) = loader.connect()?;
+        let mut connections = Vec::new();
+        let (nodes, resources) = loader.connect(&mut connections)?;
         let module_sources = loader
             .instances
             .iter()
@@ -463,8 +531,29 @@ impl DeploymentPlan {
             domain,
             module_sources,
             nodes,
+            connections,
             resources,
         })
+    }
+}
+
+/// Check a runtime definition, resolving it when it declares a deployment root.
+///
+/// Reusable app definitions are checked without requiring a caller's providers or
+/// sources. Deployment roots use the same resolver as [`DeploymentPlan::load`],
+/// without building artifacts or starting processes. Schema catalogs are not read.
+pub fn check_manifest(path: &Path) -> Result<Option<DeploymentPlan>, ModuleError> {
+    let root = manifest_dir(path)?;
+    let manifest = read_manifest(&root)?;
+    if manifest.deployment.is_some() {
+        DeploymentPlan::resolve(root, manifest, false).map(Some)
+    } else {
+        let name = root.display().to_string();
+        if manifest.domain.is_some() || !manifest.providers.is_empty() {
+            return Err(invalid(&name, "root settings require deployment"));
+        }
+        validate_definition(&name, &manifest)?;
+        Ok(None)
     }
 }
 
@@ -519,19 +608,9 @@ fn validate_name(name: &str, kind: &str) -> Result<(), ModuleError> {
     Ok(())
 }
 
-fn validate_ports(namespace: &str, ports: &BTreeMap<String, PortSpec>) -> Result<(), ModuleError> {
-    for (name, port) in ports {
+fn validate_port_names(ports: &BTreeMap<String, PortSpec>) -> Result<(), ModuleError> {
+    for name in ports.keys() {
         validate_name(name, "port")?;
-        if !port.type_name.is_empty()
-            && !port.type_name.split('.').all(|part| {
-                !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-            })
-        {
-            return Err(invalid(
-                namespace,
-                format!("invalid message type '{}'", port.type_name),
-            ));
-        }
     }
     Ok(())
 }
@@ -563,9 +642,6 @@ impl Loader {
         validate_manifest(namespace, &manifest, &providers, root)?;
         self.source_stack.push(dir.clone());
         for (name, call) in &manifest.modules {
-            validate_name(name, "module")?;
-            validate_ports(namespace, &call.inputs)?;
-            validate_ports(namespace, &call.outputs)?;
             let child_namespace = format!("{namespace}/{name}");
             let child_dir = match &call.source {
                 ModuleSource::Local(path) => absolute(&dir, path),
@@ -586,23 +662,12 @@ impl Loader {
                     &child.inputs[name],
                     port,
                 )?;
-                if port.from.is_none() {
-                    return Err(invalid(&child_namespace, "caller inputs require from"));
-                }
-                validate_connection(&child_namespace, port)?;
             }
             for (name, port) in &call.outputs {
                 let declared = child.outputs.get(name).ok_or_else(|| {
                     invalid(&child_namespace, format!("child has no output '{name}'"))
                 })?;
                 check_type(&format!("{child_namespace}.out.{name}"), declared, port)?;
-                if port.from.is_some() {
-                    return Err(invalid(
-                        &child_namespace,
-                        "caller output contracts cannot contain from",
-                    ));
-                }
-                validate_connection(&child_namespace, port)?;
             }
             if call.config.is_some() || call.config_assets.is_some() || call.args.is_some() {
                 let run = child.run.as_mut().ok_or_else(|| {
@@ -691,7 +756,10 @@ impl Loader {
         }
     }
 
-    fn connect(&self) -> Result<(Vec<ExecutableModule>, Vec<ArtifactResource>), ModuleError> {
+    fn connect(
+        &self,
+        connections: &mut Vec<ResolvedConnection>,
+    ) -> Result<(Vec<ExecutableModule>, Vec<ArtifactResource>), ModuleError> {
         let mut edges = BTreeMap::new();
         let mut port_types = BTreeMap::new();
         let mut terminals = BTreeMap::new();
@@ -714,7 +782,7 @@ impl Loader {
                 };
                 port_types.insert(address.clone(), port.contract());
                 if instance.manifest.run.is_some() {
-                    terminals.insert(address, (namespace.clone(), port.contract()));
+                    terminals.insert(address, port.contract());
                 } else if let Some(from) = &port.from {
                     edges.insert(address, self.references(namespace, from)?);
                 }
@@ -736,25 +804,29 @@ impl Loader {
                 }
             }
         }
-        for (destination, sources) in &edges {
+        let mut resolved = BTreeMap::new();
+        for address in port_types.keys() {
+            resolve_endpoint(
+                address,
+                &edges,
+                &terminals,
+                &mut BTreeSet::new(),
+                &mut resolved,
+            )?;
+        }
+        for destination in edges.keys() {
             let expected = port_types
                 .get(destination)
                 .ok_or_else(|| invalid(destination.to_string(), "unknown destination"))?;
-            for source in sources {
-                let endpoints = resolve_endpoint(source, &edges, &terminals)?;
-                for (_, actual) in endpoints {
-                    check_contract(&destination.to_string(), expected, &actual)?;
-                }
+            for route in &resolved[destination] {
+                check_contract(&destination.to_string(), expected, &route.contract)?;
             }
-        }
-        for address in edges.keys() {
-            resolve_endpoint(address, &edges, &terminals)?;
         }
         let mut nodes = Vec::new();
         let mut resources = Vec::new();
         for (namespace, instance) in &self.instances {
             resources.extend(instance.resources(namespace)?);
-            if let Some(node) = instance.executable(namespace, &edges, &terminals)? {
+            if let Some(node) = instance.executable(namespace, &resolved, connections)? {
                 nodes.push(node);
             }
         }
@@ -793,12 +865,6 @@ fn validate_manifest(
     providers: &BTreeMap<String, ProviderSpec>,
     root: bool,
 ) -> Result<(), ModuleError> {
-    if manifest.version != CONTRACT_VERSION {
-        return Err(invalid(
-            namespace,
-            format!("unsupported module version {}", manifest.version),
-        ));
-    }
     if !root
         && (manifest.deployment.is_some()
             || manifest.domain.is_some()
@@ -807,6 +873,56 @@ fn validate_manifest(
         return Err(invalid(
             namespace,
             "deployment, domain and provider configurations belong to the root",
+        ));
+    }
+    validate_definition(namespace, manifest)?;
+    if let Some(run) = &manifest.run {
+        run.validate(namespace)?;
+        providers
+            .get(&run.provider)
+            .filter(|provider| provider.kind == ProviderKind::Process)
+            .ok_or_else(|| {
+                invalid(
+                    namespace,
+                    format!("unknown process provider '{}'", run.provider),
+                )
+            })?;
+    }
+    Ok(())
+}
+
+fn validate_calls(
+    namespace: &str,
+    calls: &BTreeMap<String, ModuleCall>,
+) -> Result<(), ModuleError> {
+    for (name, call) in calls {
+        validate_name(name, "module")?;
+        let child = format!("{namespace}/{name}");
+        for port in call.inputs.keys().chain(call.outputs.keys()) {
+            validate_name(port, "port")?;
+        }
+        for input in call.inputs.values() {
+            if input.from.is_none() {
+                return Err(invalid(&child, "caller inputs require from"));
+            }
+        }
+        for output in call.outputs.values() {
+            if output.from.is_some() {
+                return Err(invalid(
+                    &child,
+                    "caller output contracts cannot contain from",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_definition(namespace: &str, manifest: &ModuleManifest) -> Result<(), ModuleError> {
+    if manifest.version != CONTRACT_VERSION {
+        return Err(invalid(
+            namespace,
+            format!("unsupported module version {}", manifest.version),
         ));
     }
     if manifest.run.is_some() && !manifest.modules.is_empty() {
@@ -821,8 +937,9 @@ fn validate_manifest(
             "module requires run or nonempty modules",
         ));
     }
-    validate_ports(namespace, &manifest.inputs)?;
-    validate_ports(namespace, &manifest.outputs)?;
+    validate_calls(namespace, &manifest.modules)?;
+    validate_port_names(&manifest.inputs)?;
+    validate_port_names(&manifest.outputs)?;
     for port in manifest.inputs.values() {
         validate_contract(namespace, &port.contract(), true)?;
         if port.from.is_some() {
@@ -833,16 +950,7 @@ fn validate_manifest(
         }
     }
     if let Some(run) = &manifest.run {
-        run.validate(namespace)?;
-        providers
-            .get(&run.provider)
-            .filter(|provider| provider.kind == ProviderKind::Process)
-            .ok_or_else(|| {
-                invalid(
-                    namespace,
-                    format!("unknown process provider '{}'", run.provider),
-                )
-            })?;
+        run.validate_names(namespace)?;
         validate_executable_outputs(namespace, manifest)?;
     } else {
         for port in manifest.inputs.values() {
@@ -857,7 +965,7 @@ fn validate_manifest(
             if port.from.is_none() {
                 return Err(invalid(namespace, "composite outputs require from"));
             }
-            validate_connection(namespace, port)?;
+            PortConnection::try_from(port.clone())?;
         }
     }
     let (mut delegated_inputs, mut delegated_outputs) = (BTreeSet::new(), BTreeSet::new());
@@ -913,8 +1021,8 @@ impl Instance {
     fn executable(
         &self,
         namespace: &str,
-        edges: &BTreeMap<PortAddress, Vec<PortAddress>>,
-        terminals: &BTreeMap<PortAddress, (String, EndpointContract)>,
+        resolved: &BTreeMap<PortAddress, Vec<ResolvedRoute>>,
+        connections: &mut Vec<ResolvedConnection>,
     ) -> Result<Option<ExecutableModule>, ModuleError> {
         let Some(run) = &self.manifest.run else {
             return Ok(None);
@@ -926,7 +1034,7 @@ impl Instance {
                 input: true,
                 name: name.clone(),
             };
-            let endpoints = resolve_endpoint(&address, edges, terminals)?;
+            let endpoints = &resolved[&address];
             let contract = port.contract();
             if contract.kind == PortKind::Rpc && endpoints.len() != 1 {
                 return Err(invalid(
@@ -935,21 +1043,26 @@ impl Instance {
                 ));
             }
             let mut sources = Vec::new();
-            for (source, output) in endpoints {
-                check_contract(&address.to_string(), &contract, &output)?;
-                if contract.replay == Replay::Last && output.retention != Retention::Last {
+            for route in endpoints {
+                if contract.replay == Replay::Last && route.contract.retention != Retention::Last {
                     return Err(invalid(
                         address.to_string(),
                         "replay last requires retained output",
                     ));
                 }
-                if sources.contains(&source) {
+                if sources.contains(&route.source.namespace) {
                     return Err(invalid(
                         address.to_string(),
                         "multiple aliases resolve to the same publisher",
                     ));
                 }
-                sources.push(source);
+                sources.push(route.source.namespace.clone());
+                connections.push(ResolvedConnection {
+                    source: route.source.clone(),
+                    destination: address.clone(),
+                    via: route.via.clone(),
+                    contract: route.contract.clone(),
+                });
             }
             inputs.insert(name.clone(), InputBinding { sources, contract });
         }
@@ -1028,7 +1141,7 @@ impl Instance {
     }
 }
 
-fn check_type(port: &str, expected: &PortSpec, actual: &PortSpec) -> Result<(), ModuleError> {
+fn check_type(port: &str, expected: &PortSpec, actual: &PortConnection) -> Result<(), ModuleError> {
     if actual.type_name.is_empty() || expected.type_name == actual.type_name {
         Ok(())
     } else {
@@ -1043,34 +1156,39 @@ fn check_type(port: &str, expected: &PortSpec, actual: &PortSpec) -> Result<(), 
 fn resolve_endpoint(
     address: &PortAddress,
     edges: &BTreeMap<PortAddress, Vec<PortAddress>>,
-    terminals: &BTreeMap<PortAddress, (String, EndpointContract)>,
-) -> Result<Vec<(String, EndpointContract)>, ModuleError> {
-    fn walk(
-        address: &PortAddress,
-        edges: &BTreeMap<PortAddress, Vec<PortAddress>>,
-        terminals: &BTreeMap<PortAddress, (String, EndpointContract)>,
-        visited: &mut BTreeSet<PortAddress>,
-        found: &mut Vec<(String, EndpointContract)>,
-    ) -> Result<(), ModuleError> {
-        if let Some(endpoint) = terminals.get(address) {
-            found.push(endpoint.clone());
-            return Ok(());
-        }
-        if !visited.insert(address.clone()) {
+    terminals: &BTreeMap<PortAddress, EndpointContract>,
+    active: &mut BTreeSet<PortAddress>,
+    resolved: &mut BTreeMap<PortAddress, Vec<ResolvedRoute>>,
+) -> Result<Vec<ResolvedRoute>, ModuleError> {
+    if let Some(routes) = resolved.get(address) {
+        return Ok(routes.clone());
+    }
+    let mut routes = Vec::new();
+    if let Some(contract) = terminals.get(address) {
+        routes.push(ResolvedRoute {
+            source: address.clone(),
+            via: Vec::new(),
+            contract: contract.clone(),
+        });
+    } else {
+        if !active.insert(address.clone()) {
             return Err(ModuleError::Cycle(address.to_string()));
         }
         let sources = edges
             .get(address)
             .ok_or_else(|| invalid(address.to_string(), "port has no executable publisher"))?;
         for source in sources {
-            walk(source, edges, terminals, visited, found)?;
+            for mut route in resolve_endpoint(source, edges, terminals, active, resolved)? {
+                if source != &route.source {
+                    route.via.insert(0, source.clone());
+                }
+                routes.push(route);
+            }
         }
-        visited.remove(address);
-        Ok(())
+        active.remove(address);
     }
-    let mut found = Vec::new();
-    walk(address, edges, terminals, &mut BTreeSet::new(), &mut found)?;
-    Ok(found)
+    resolved.insert(address.clone(), routes.clone());
+    Ok(routes)
 }
 
 fn validate_connection(namespace: &str, port: &PortSpec) -> Result<(), ModuleError> {
@@ -1094,56 +1212,9 @@ pub(crate) fn validate_contract(
     contract: &EndpointContract,
     input: bool,
 ) -> Result<(), ModuleError> {
-    if contract.type_name.is_empty() {
-        return Err(invalid(
-            namespace,
-            "executable endpoints and public inputs require type",
-        ));
-    }
-    match contract.kind {
-        PortKind::Stream => {
-            if contract.response.is_some() {
-                return Err(invalid(
-                    namespace,
-                    "stream endpoints cannot declare response",
-                ));
-            }
-        }
-        PortKind::Rpc => {
-            let response = contract
-                .response
-                .as_deref()
-                .ok_or_else(|| invalid(namespace, "RPC endpoints require response"))?;
-            if response.is_empty()
-                || !response.split('.').all(|part| {
-                    !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                })
-            {
-                return Err(invalid(namespace, "invalid RPC response type"));
-            }
-            if contract.retention != Retention::Volatile
-                || contract.replay != Replay::Live
-                || contract.buffer != ReceiveBuffer::Fifo
-                || contract.qos != QosProfile::Reliable
-            {
-                return Err(invalid(
-                    namespace,
-                    "stream policy does not apply to RPC endpoints",
-                ));
-            }
-        }
-    }
-    if matches!(contract.buffer, ReceiveBuffer::Latest(0)) {
-        return Err(invalid(namespace, "latest receive depth must be positive"));
-    }
-    if input && (contract.retention != Retention::Volatile || contract.qos != QosProfile::Reliable)
-    {
-        return Err(invalid(namespace, "qos and retention belong to outputs"));
-    }
-    if !input && (contract.replay != Replay::Live || contract.buffer != ReceiveBuffer::Fifo) {
-        return Err(invalid(namespace, "replay and buffer belong to inputs"));
-    }
-    Ok(())
+    contract
+        .validate(input)
+        .map_err(|error| invalid(namespace, error.to_string()))
 }
 
 fn check_contract(

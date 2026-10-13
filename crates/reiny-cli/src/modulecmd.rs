@@ -71,10 +71,30 @@ pub(crate) fn plan(path: &Path, update: bool, json: bool) -> Result<()> {
             };
             println!("  {}: {} — {preparation}", node.namespace, node.run.bin);
             for (port, input) in &node.bindings.inputs {
+                let routes = plan
+                    .connections
+                    .iter()
+                    .filter(|route| {
+                        route.destination.namespace == node.namespace
+                            && route.destination.name == *port
+                    })
+                    .map(|route| {
+                        let via = route
+                            .via
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>();
+                        if via.is_empty() {
+                            route.source.to_string()
+                        } else {
+                            format!("{} via {}", route.source, via.join(" <- "))
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 println!(
                     "    in.{port}: {} <- {}",
                     input.contract.type_name,
-                    input.sources.join(", ")
+                    routes.join(", ")
                 );
             }
             for (port, output) in &node.bindings.outputs {
@@ -107,20 +127,17 @@ fn print_flow(plan: &DeploymentPlan) {
         .map(|(index, node)| (node.namespace.clone(), index))
         .collect();
     let mut connections: BTreeMap<(String, String, Option<String>), Vec<usize>> = BTreeMap::new();
-    for (index, node) in plan.nodes.iter().enumerate() {
-        for input in node.bindings.inputs.values() {
-            for source in &input.sources {
-                let subscribers = connections
-                    .entry((
-                        source.clone(),
-                        input.contract.type_name.clone(),
-                        input.contract.response.clone(),
-                    ))
-                    .or_default();
-                if !subscribers.contains(&index) {
-                    subscribers.push(index);
-                }
-            }
+    for route in &plan.connections {
+        let index = indices[&route.destination.namespace];
+        let subscribers = connections
+            .entry((
+                route.source.namespace.clone(),
+                route.contract.type_name.clone(),
+                route.contract.response.clone(),
+            ))
+            .or_default();
+        if !subscribers.contains(&index) {
+            subscribers.push(index);
         }
     }
     let edges: Vec<_> = connections

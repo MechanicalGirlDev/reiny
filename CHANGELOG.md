@@ -7,6 +7,23 @@ All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
 `reiny-launch`, `reiny-cli`, `reiny-ffi`).
 Versions are kept in lockstep via `[workspace.package].version`.
 
+### Changed
+
+- Runtime definition checks share the launcher's validation and parse deployment
+  roots once. Explicit `check main.yaml` and `check schema.yaml` keep runtime
+  and catalog checking separate; reusable app definitions are checked too.
+- Resolved named connections and alias paths are shared by runtime binding
+  construction and plan rendering instead of repeatedly traversing aliases.
+- Concrete endpoint policy validation is shared by core, SDK, CLI and launcher.
+- Compression uses prepared app configuration trees and structural binding
+  equality while retaining bundle reload and content verification.
+
+### Breaking Rust API
+
+- `ModuleCall.inputs` and `outputs` use `PortConnection` instead of `PortSpec`.
+  YAML version 2 and existing explicit default policy fields remain supported.
+- `DeploymentPlan` includes `connections`; Rust struct literals must supply it.
+
 ## 0.10.1 - 2026-10-13
 
 - Synchronize all nine independent example lockfiles with the workspace release

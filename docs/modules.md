@@ -80,6 +80,10 @@ modules:
   be omitted; if supplied, it must match the app. Every declared child output
   is visible by default, so callers need not repeat `out`. Calls cannot
   redefine endpoint policies.
+- Invocation ports are connections and optional type assertions, not endpoint
+  definitions. Previously serialized default policy fields remain accepted,
+  but nondefault policies are rejected during parsing. Rust `ModuleCall` input
+  and output maps use `PortConnection`; app definitions use `PortSpec`.
 - Call `config` paths are relative to the caller; default `run.config` paths
   are relative to the app. Call `config_assets` and `args` replace their app
   lists, including with `[]`; omission retains the app defaults.
@@ -339,6 +343,21 @@ publication and RPC server with a wired verification task.
 | `reiny new` / `init` / `add` | Scaffold a leaf module, or add a local schema dependency. |
 | `reiny check [path]` | Validate composition or describe the schema without compiling. |
 | `reiny build [--release]` | Prepare declared build artifacts without starting processes. |
+
+`reiny check main.yaml` checks only the runtime definition. Deployment roots
+are fully resolved; reusable app definitions are checked without requiring
+their caller's providers, sources, or executable files. Instance-dependent
+checks still run when the deployment is resolved. `reiny check schema.yaml`
+checks only the type catalog. Directory checks retain nearest-manifest
+discovery and describe an available ancestor catalog after checking runtime
+definitions.
+
+`reiny plan --json` includes resolved `connections`, with named executable
+`source` and `destination` addresses, intermediate alias addresses in `via`,
+and the source endpoint's concrete `contract`. `via` runs from destination
+toward source, excluding both endpoints. The human-readable plan uses the
+same graph to show named sources and alias paths. These records describe the
+existing wiring; they do not create additional communication grants.
 
 `apply` and `run` share `--bin-dir`, `--log-level` and `--ready-timeout`
 (seconds, default 30). A bare `reiny <path>` or `reiny --config <path>` is

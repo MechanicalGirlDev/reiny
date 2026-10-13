@@ -15,22 +15,11 @@ pub(crate) fn check(path: Option<&Path>) -> Result<()> {
         None => std::env::current_dir()?,
     };
 
+    let explicit_manifest = dir.is_file();
     let manifest = nearest_manifest(&dir)?;
     let schema_dir = manifest.parent().context("manifest has no directory")?;
     if manifest.file_name().is_some_and(|name| name == "main.yaml") {
-        let text = std::fs::read_to_string(&manifest)
-            .with_context(|| format!("reading {}", manifest.display()))?;
-        let module: reiny_launch::ModuleManifest = serde_yaml::from_str(&text)
-            .with_context(|| format!("parsing {}", manifest.display()))?;
-        if !matches!(module.version, 1 | 2) {
-            bail!(
-                "{}: unsupported module version {}",
-                manifest.display(),
-                module.version
-            );
-        }
-        if module.deployment.is_some() {
-            let plan = reiny_launch::DeploymentPlan::load(&manifest, false)?;
+        if let Some(plan) = reiny_launch::check_manifest(&manifest)? {
             println!(
                 "deployment: {} ({} executable modules, {} resources)",
                 plan.deployment,
@@ -38,9 +27,10 @@ pub(crate) fn check(path: Option<&Path>) -> Result<()> {
                 plan.resources.len()
             );
         }
-        if !schema_dir
-            .ancestors()
-            .any(|dir| dir.join("schema.yaml").is_file())
+        if explicit_manifest
+            || !schema_dir
+                .ancestors()
+                .any(|dir| dir.join("schema.yaml").is_file())
         {
             return Ok(());
         }

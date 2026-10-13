@@ -18,7 +18,8 @@ pub use deployment::{
 };
 pub use modules::{
     ArtifactResource, DeploymentPlan, ExecutableModule, FailurePolicy, ModuleCall, ModuleError,
-    ModuleManifest, ModuleSource, PortSources, PortSpec, ProviderKind, ProviderSpec, ResourceSpec,
-    RestartPolicy, RunKind, RunSpec,
+    ModuleManifest, ModuleSource, PortAddress, PortConnection, PortSources, PortSpec, ProviderKind,
+    ProviderSpec, ResolvedConnection, ResourceSpec, RestartPolicy, RunKind, RunSpec,
+    check_manifest,
 };
 pub use prepared::{PreparedDeployment, PreparedModule};

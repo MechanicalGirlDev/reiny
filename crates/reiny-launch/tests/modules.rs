@@ -3,7 +3,7 @@
 #![allow(clippy::expect_used)]
 
 use reiny_core::bindings::{QosProfile, ReceiveBuffer, Replay, Retention};
-use reiny_launch::{DeploymentPlan, ModuleError};
+use reiny_launch::{DeploymentPlan, ModuleError, PortAddress};
 
 fn write(dir: &std::path::Path, name: &str, text: &str) {
     let path = dir.join(name);
@@ -17,6 +17,14 @@ const PRODUCER: &str =
 const CONSUMER: &str =
     "version: 2\nrun: {provider: process, bin: consumer}\nin:\n  state: {type: test.State}\n";
 
+fn address(namespace: &str, input: bool, name: &str) -> PortAddress {
+    PortAddress {
+        namespace: namespace.to_string(),
+        input,
+        name: name.to_string(),
+    }
+}
+
 #[test]
 fn sibling_connection_resolves_exact_namespace_when_types_match() {
     // Given two same-type publishers, only one is explicitly connected.
@@ -25,12 +33,16 @@ fn sibling_connection_resolves_exact_namespace_when_types_match() {
         fixture.path(),
         "main.yaml",
         &format!(
-            "{PROVIDER}modules:\n  a:\n    source: ./a\n    out: {{state: {{type: test.State}}}}\n  b:\n    source: ./b\n    out: {{state: {{type: test.State}}}}\n  c:\n    source: ./c\n    in: {{state: {{type: test.State, from: a.state}}}}\n"
+            "{PROVIDER}modules:\n  a:\n    source: ./a\n    out: {{state: {{type: test.State}}}}\n  b:\n    source: ./b\n    out: {{state: {{type: test.State}}}}\n  c:\n    source: ./c\n    in: {{first: {{from: b.state}}, second: {{from: a.state}}}}\n"
         ),
     );
     write(fixture.path(), "a/main.yaml", PRODUCER);
     write(fixture.path(), "b/main.yaml", PRODUCER);
-    write(fixture.path(), "c/main.yaml", CONSUMER);
+    write(
+        fixture.path(),
+        "c/main.yaml",
+        "version: 2\nrun: {provider: process, bin: consumer}\nin:\n  second: {type: test.State}\n  first: {type: test.State}\n",
+    );
     // When the deployment is planned.
     let plan = DeploymentPlan::load(fixture.path(), false).expect("valid plan");
     // Then the input is bound to a, never a wildcard or b.
@@ -39,7 +51,30 @@ fn sibling_connection_resolves_exact_namespace_when_types_match() {
         .iter()
         .find(|node| node.namespace == "test/c")
         .expect("consumer");
-    assert_eq!(consumer.bindings.inputs["state"].sources, vec!["test/a"]);
+    assert_eq!(consumer.bindings.inputs["first"].sources, vec!["test/b"]);
+    assert_eq!(consumer.bindings.inputs["second"].sources, vec!["test/a"]);
+    assert_eq!(plan.connections.len(), 2);
+    assert_eq!(
+        plan.connections[0].source,
+        address("test/b", false, "state")
+    );
+    assert_eq!(
+        plan.connections[0].destination,
+        address("test/c", true, "first")
+    );
+    assert_eq!(
+        plan.connections[1].source,
+        address("test/a", false, "state")
+    );
+    assert_eq!(
+        plan.connections[1].destination,
+        address("test/c", true, "second")
+    );
+    assert!(
+        plan.connections
+            .iter()
+            .all(|connection| connection.via.is_empty())
+    );
     assert_eq!(plan.nodes.len(), 3);
 }
 
@@ -74,6 +109,100 @@ fn parent_forwarding_resolves_original_publisher_without_relay() {
         plan.nodes[1].bindings.inputs["state"].sources,
         vec!["test/branch/producer"]
     );
+    assert_eq!(plan.connections.len(), 1);
+    let connection = &plan.connections[0];
+    assert_eq!(
+        connection.source,
+        address("test/branch/producer", false, "state")
+    );
+    assert_eq!(
+        connection.destination,
+        address("test/c/consumer", true, "state")
+    );
+    assert_eq!(
+        connection.via,
+        [
+            address("test/c", true, "state"),
+            address("test/branch", false, "state"),
+        ]
+    );
+    assert_eq!(
+        connection.contract,
+        plan.nodes[0].bindings.outputs["state"].contract
+    );
+    let json = serde_json::to_value(&plan).expect("serialized plan");
+    assert_eq!(
+        json["connections"][0]["source"]["namespace"],
+        "test/branch/producer"
+    );
+    assert_eq!(json["connections"][0]["destination"]["input"], true);
+    assert_eq!(json["connections"][0]["via"][1]["name"], "state");
+}
+
+#[test]
+fn fan_in_preserves_declared_order_through_cached_aliases() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    write(
+        fixture.path(),
+        "main.yaml",
+        &format!(
+            "{PROVIDER}modules:\n  branch: {{source: branch}}\n  c: {{source: c, in: {{state: {{from: [branch.second, branch.first]}}}}}}\n"
+        ),
+    );
+    write(
+        fixture.path(),
+        "branch/main.yaml",
+        "version: 2\nmodules:\n  a: {source: producer}\n  b: {source: producer}\nout:\n  first: {from: a.state}\n  second: {from: b.state}\n",
+    );
+    write(fixture.path(), "branch/producer/main.yaml", PRODUCER);
+    write(fixture.path(), "c/main.yaml", CONSUMER);
+    let plan = DeploymentPlan::load(fixture.path(), false).expect("fan-in");
+    assert_eq!(
+        plan.nodes[2].bindings.inputs["state"].sources,
+        ["test/branch/b", "test/branch/a"]
+    );
+    assert_eq!(plan.connections.len(), 2);
+    for (connection, (publisher, alias)) in plan
+        .connections
+        .iter()
+        .zip([("test/branch/b", "second"), ("test/branch/a", "first")])
+    {
+        assert_eq!(connection.source, address(publisher, false, "state"));
+        assert_eq!(connection.destination, address("test/c", true, "state"));
+        assert_eq!(connection.via, [address("test/branch", false, alias)]);
+    }
+
+    // Different aliases must not conceal a repeated concrete publisher.
+    write(
+        fixture.path(),
+        "branch/main.yaml",
+        "version: 2\nmodules:\n  a: {source: producer}\nout:\n  first: {from: a.state}\n  second: {from: a.state}\n",
+    );
+    assert!(matches!(
+        DeploymentPlan::load(fixture.path(), false),
+        Err(ModuleError::Invalid { message, .. })
+            if message == "multiple aliases resolve to the same publisher"
+    ));
+}
+
+#[test]
+fn unused_export_still_checks_its_declared_contract() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    write(
+        fixture.path(),
+        "main.yaml",
+        &format!("{PROVIDER}modules:\n  branch: {{source: branch}}\n"),
+    );
+    write(
+        fixture.path(),
+        "branch/main.yaml",
+        "version: 2\nmodules:\n  a: {source: producer}\nout:\n  unused: {type: test.Other, from: a.state}\n",
+    );
+    write(fixture.path(), "branch/producer/main.yaml", PRODUCER);
+    assert!(matches!(
+        DeploymentPlan::load(fixture.path(), false),
+        Err(ModuleError::TypeMismatch { port, .. }) if port == "test/branch.out.unused"
+    ));
 }
 
 #[test]
@@ -606,6 +735,14 @@ fn rpc_alias_preserves_request_and_response_without_caller_redeclarations() {
     let input = &plan.nodes[0].bindings.inputs["command"];
     assert_eq!(input.sources, ["test/service/server"]);
     assert_eq!(input.contract.response.as_deref(), Some("test.Response"));
+    assert_eq!(
+        plan.connections[0].contract,
+        plan.nodes[1].bindings.outputs["command"].contract
+    );
+    assert_eq!(
+        plan.connections[0].source,
+        address("test/service/server", false, "command")
+    );
 }
 
 #[test]
@@ -621,8 +758,83 @@ fn caller_cannot_change_app_owned_receive_policy() {
     );
     write(fixture.path(), "a/main.yaml", PRODUCER);
     write(fixture.path(), "c/main.yaml", CONSUMER);
-    // When the app contract is loaded.
+    // When the caller connection is parsed.
     let result = DeploymentPlan::load(fixture.path(), false);
-    // Then the deployment cannot silently replace FIFO with dropping behavior.
-    assert!(matches!(result, Err(ModuleError::Invalid { .. })));
+    // Then app-owned policy cannot enter the invocation representation.
+    assert!(matches!(result, Err(ModuleError::Yaml { .. })));
+}
+
+#[test]
+fn reusable_definition_is_checked_without_caller_bindings_or_executable_files() {
+    // Given an app requiring a caller's input, provider slot and selected config.
+    let fixture = tempfile::tempdir().expect("fixture");
+    write(
+        fixture.path(),
+        "main.yaml",
+        "version: 2\nrun: {provider: external, bin: missing, config_assets: [model.bin]}\nin: {state: {type: test.State}}\n",
+    );
+    // When the definition alone is checked.
+    let checked = reiny_launch::check_manifest(fixture.path()).expect("definition");
+    // Then no executable preparation or deployment bindings are required.
+    assert!(checked.is_none());
+    assert!(!fixture.path().join(".reiny").exists());
+}
+
+#[test]
+fn malformed_reusable_definitions_are_rejected_without_a_deployment() {
+    // Given definitions that previously bypassed the deployment-only CLI checks.
+    for definition in [
+        "version: 1\nrun: {provider: process, bin: app}\n",
+        "version: 2\n",
+        "version: 2\nrun: {provider: process, bin: app}\nmodules: {child: {source: child}}\n",
+        "version: 2\nbuild: {type: cargo}\n",
+        "version: 2\nrun: {provider: process, bin: app}\nin: {request: {kind: rpc, type: test.Request}}\n",
+        "version: 2\nrun: {provider: process, bin: app}\nowned_children: {worker: {inputs: [missing]}}\n",
+    ] {
+        let fixture = tempfile::tempdir().expect("fixture");
+        write(fixture.path(), "main.yaml", definition);
+        // When its runtime definition is checked.
+        let checked = reiny_launch::check_manifest(fixture.path());
+        // Then invalid structure, policies or delegation cannot pass.
+        assert!(matches!(checked, Err(ModuleError::Invalid { .. })));
+    }
+}
+
+#[test]
+fn explicit_caller_defaults_preserve_app_owned_endpoint_policies() {
+    // Given an old-style invocation that explicitly serializes default policies.
+    let fixture = tempfile::tempdir().expect("fixture");
+    write(
+        fixture.path(),
+        "main.yaml",
+        &format!(
+            "{PROVIDER}modules:\n  a: {{source: a}}\n  c:\n    source: c\n    in:\n      state: {{type: test.State, from: a.state, kind: stream, response: null, qos: reliable, retention: volatile, replay: live, buffer: fifo}}\n"
+        ),
+    );
+    write(
+        fixture.path(),
+        "a/main.yaml",
+        "version: 2\nrun: {provider: process, bin: producer}\nout: {state: {type: test.State, qos: sensor, retention: last}}\n",
+    );
+    write(
+        fixture.path(),
+        "c/main.yaml",
+        "version: 2\nrun: {provider: process, bin: consumer}\nin: {state: {type: test.State, replay: last, buffer: {latest: 3}}}\n",
+    );
+    // When the invocation is parsed and resolved.
+    let plan = DeploymentPlan::load(fixture.path(), false).expect("compatible defaults");
+    // Then only wiring is taken from the invocation; policies remain app-owned.
+    assert_eq!(
+        plan.nodes[1].bindings.inputs["state"].contract.buffer,
+        ReceiveBuffer::Latest(3)
+    );
+    assert_eq!(
+        plan.nodes[1].bindings.inputs["state"].contract.replay,
+        Replay::Last
+    );
+    assert_eq!(
+        plan.nodes[0].bindings.outputs["state"].contract.qos,
+        QosProfile::Sensor
+    );
+    assert_eq!(plan.nodes[1].bindings.inputs["state"].sources, ["test/a"]);
 }

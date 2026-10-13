@@ -261,7 +261,11 @@ pub fn validate_namespace(value: &str) -> Result<(), BindingError> {
 }
 
 impl EndpointContract {
-    fn validate(&self, input: bool) -> Result<(), BindingError> {
+    /// Validate a concrete endpoint's type, operation and direction-owned policies.
+    ///
+    /// Forwarded aliases and optional caller type assertions must be resolved before
+    /// using this validator; an empty type is not a concrete endpoint.
+    pub fn validate(&self, input: bool) -> Result<(), BindingError> {
         require(type_name(&self.type_name), "invalid endpoint type")?;
         require(
             self.buffer != ReceiveBuffer::Latest(0),

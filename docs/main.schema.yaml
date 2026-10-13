@@ -60,13 +60,40 @@ $defs:
             properties:
               latest: { type: integer, minimum: 1 }
       from:
-        description: "<sibling>.<port> or in.<port>; lists are explicit stream fan-in."
-        oneOf:
-          - { type: string }
-          - { type: array, minItems: 1, uniqueItems: true, items: { type: string } }
+        $ref: "#/$defs/sources"
+  sources:
+    description: "<sibling>.<port> or in.<port>; lists are explicit stream fan-in."
+    oneOf:
+      - { type: string }
+      - { type: array, minItems: 1, uniqueItems: true, items: { type: string } }
   ports:
     type: object
     additionalProperties: { $ref: "#/$defs/port" }
+  connection:
+    type: object
+    additionalProperties: false
+    description: "Invocation wiring and optional type assertions; policies stay app-owned."
+    properties:
+      type: { type: string }
+      from: { $ref: "#/$defs/sources" }
+      kind: { const: stream }
+      response: { type: "null" }
+      qos: { const: reliable }
+      retention: { const: volatile }
+      replay: { const: live }
+      buffer: { const: fifo }
+  connections:
+    type: object
+    additionalProperties:
+      allOf:
+        - { $ref: "#/$defs/connection" }
+        - { required: [from] }
+  assertions:
+    type: object
+    additionalProperties:
+      allOf:
+        - { $ref: "#/$defs/connection" }
+        - { not: { required: [from] } }
   gitSource:
     type: object
     additionalProperties: false
@@ -87,8 +114,8 @@ $defs:
       providers:
         type: object
         additionalProperties: { type: string }
-      in: { $ref: "#/$defs/ports" }
-      out: { $ref: "#/$defs/ports" }
+      in: { $ref: "#/$defs/connections" }
+      out: { $ref: "#/$defs/assertions" }
       config: { type: string, description: "Caller-relative replacement for a leaf's run.config." }
       config_assets: { type: array, items: { type: string }, description: "Replace a leaf's assets, including with an empty list. Relative to the selected config's parent, not the caller. Omission retains app assets; nonempty assets require a selected config. Absolute paths are rejected." }
       args: { type: array, items: { type: string }, description: "Replace a leaf's args, including with an empty list." }
