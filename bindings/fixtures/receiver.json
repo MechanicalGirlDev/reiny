@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "namespace": "receiver",
+  "endpoint_namespace": "receiver",
+  "inputs": {
+    "in": {
+      "contract": {
+        "type": "Binary"
+      },
+      "sources": [
+        "sender"
+      ]
+    }
+  },
+  "outputs": {}
+}

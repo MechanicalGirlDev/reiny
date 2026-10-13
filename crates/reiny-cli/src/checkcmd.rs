@@ -16,30 +16,35 @@ pub(crate) fn check(path: Option<&Path>) -> Result<()> {
     };
 
     let manifest = nearest_manifest(&dir)?;
-    let text = std::fs::read_to_string(&manifest)
-        .with_context(|| format!("reading {}", manifest.display()))?;
-    let module: reiny_launch::ModuleManifest =
-        serde_yaml::from_str(&text).with_context(|| format!("parsing {}", manifest.display()))?;
-    if !matches!(module.version, 1 | 2) {
-        bail!(
-            "{}: unsupported module version {}",
-            manifest.display(),
-            module.version
-        );
+    let schema_dir = manifest.parent().context("manifest has no directory")?;
+    if manifest.file_name().is_some_and(|name| name == "main.yaml") {
+        let text = std::fs::read_to_string(&manifest)
+            .with_context(|| format!("reading {}", manifest.display()))?;
+        let module: reiny_launch::ModuleManifest = serde_yaml::from_str(&text)
+            .with_context(|| format!("parsing {}", manifest.display()))?;
+        if !matches!(module.version, 1 | 2) {
+            bail!(
+                "{}: unsupported module version {}",
+                manifest.display(),
+                module.version
+            );
+        }
+        if module.deployment.is_some() {
+            let plan = reiny_launch::DeploymentPlan::load(&manifest, false)?;
+            println!(
+                "deployment: {} ({} executable modules, {} resources)",
+                plan.deployment,
+                plan.nodes.len(),
+                plan.resources.len()
+            );
+        }
+        if !schema_dir
+            .ancestors()
+            .any(|dir| dir.join("schema.yaml").is_file())
+        {
+            return Ok(());
+        }
     }
-    if module.deployment.is_some() {
-        let plan = reiny_launch::DeploymentPlan::load(&manifest, false)?;
-        println!(
-            "deployment: {} ({} executable modules, {} resources)",
-            plan.deployment,
-            plan.nodes.len(),
-            plan.resources.len(),
-        );
-    }
-    if module.schema.is_none() && module.deployment.is_some() {
-        return Ok(());
-    }
-    let schema_dir = manifest.parent().context("main.yaml has no directory")?;
     let resolution = reiny_build::describe(schema_dir)?;
 
     println!("reiny check — {}", resolution.manifest_path().display());
@@ -119,10 +124,13 @@ fn nearest_manifest(path: &Path) -> Result<PathBuf> {
     let path =
         std::fs::canonicalize(path).with_context(|| format!("resolving {}", path.display()))?;
     let start = if path.is_file() {
-        if path.file_name().is_some_and(|name| name == "main.yaml") {
+        if path
+            .file_name()
+            .is_some_and(|name| name == "main.yaml" || name == "schema.yaml")
+        {
             return Ok(path);
         }
-        bail!("expected main.yaml or a module directory");
+        bail!("expected main.yaml, schema.yaml or a module directory");
     } else {
         path.as_path()
     };
@@ -131,8 +139,12 @@ fn nearest_manifest(path: &Path) -> Result<PathBuf> {
         if manifest.is_file() {
             return Ok(manifest);
         }
+        let catalog = dir.join("schema.yaml");
+        if catalog.is_file() {
+            return Ok(catalog);
+        }
     }
-    bail!("no main.yaml found above {}", path.display())
+    bail!("no main.yaml or schema.yaml found above {}", path.display())
 }
 
 /// Make a proto path relative to the module directory, for readability.

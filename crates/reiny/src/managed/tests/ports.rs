@@ -115,11 +115,8 @@ async fn named_ports_fail_without_bindings_instead_of_using_wildcards() {
     let mut standalone = RuntimeOptions::new(RECEIVER);
     standalone.engine = Some(Arc::new(Local::new()));
     standalone.module_report_path = None;
-    let cloudy = Cloudy::open(standalone).await.expect("standalone");
-
-    // When named ports are requested, then both directions reject the absent mapping.
-    assert!(cloudy.input::<Probe>("incoming").is_err());
-    assert!(cloudy.output::<Probe>("outgoing").is_err());
+    // When the context opens, then the absent contract is rejected before any port exists.
+    assert!(Cloudy::open(standalone).await.is_err());
 }
 
 #[tokio::test]

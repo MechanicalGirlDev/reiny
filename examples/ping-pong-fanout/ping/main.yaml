@@ -20,18 +20,3 @@ build:
   features: []
   default_features: true
   locked: true
-schema:
-  project:
-    name: "ping"
-    version: "0.1.0"
-    description: "ping module"
-    authors: ["nop <noplab90@gmail.com>"]
-    license: "MIT"
-  publications:
-    Ping:
-      proto: "proto/ping.proto"
-      message: "ping.Ping"
-  dependencies:
-    pong:
-      version: "0.1"
-      path: "../pong"

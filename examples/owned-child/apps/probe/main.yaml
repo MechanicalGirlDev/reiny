@@ -1,0 +1,14 @@
+version: 2
+run:
+  kind: task
+  provider: process
+  bin: probe
+build:
+  type: cargo
+  manifest: ../../Cargo.toml
+  package: owned_child_example
+  profile: dev
+  locked: true
+in:
+  state: {type: owned.State, replay: last}
+  adder: {kind: rpc, type: owned.Add, response: owned.Sum}

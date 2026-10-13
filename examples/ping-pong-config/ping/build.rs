@@ -1,4 +1,4 @@
-//! Compile the nearest ancestor main.yaml build-time schema.
+//! Compile the nearest ancestor schema.yaml build-time catalog.
 fn main() {
-    reiny_build::compile().expect("reiny codegen from main.yaml schema");
+    reiny_build::compile().expect("reiny codegen from schema.yaml");
 }

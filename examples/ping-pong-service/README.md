@@ -1,17 +1,16 @@
 # ping-pong-service
 
 Typed SDK request/response services remain supported inside namespaced modules.
-The root `schema.internals` defines Add and Sum; `schema.services.Adder` maps
+The root `schema.yaml` catalog defines Add and Sum under `schema.internals`; `schema.services.Adder` maps
 the request alias to the response alias and generates `impl reiny::Service for Add`.
 The calc app declares an `adder` RPC output with request `calc.Add` and response
 `calc.Sum`; asker declares the matching RPC input. The project wires that input
 explicitly to `calc.adder`.
 
 Calc opens its named RPC server before readiness and returns Sum or an
-overflow error. Asker uses a two-second caller timeout and retries once per second.
+overflow error. Asker uses the named caller timeout and sends a request once per second.
 The named caller resolves the wired calc source rather than guessing
-a process ID. Service errors distinguish `NoReply`, `Timeout`, and
-`Remote`; `servers::<Add>()` and `watch_servers::<Add>()` expose presence.
+a process ID. Service errors distinguish `NoReply`, `Timeout`, and `Remote`.
 
 ## Run
 

@@ -12,10 +12,12 @@
 //!
 //! ```ignore
 //! // On the MCU (#![no_std], with alloc)
-//! let mut link = Link::<_, 8>::new("motor-board", [0u8; 512], [0u8; 512])?;
-//! link.publishes::<MotorState>()?;
-//! link.subscribes::<MotorCommand>()?;
-//! link.serves::<Calibrate>()?;
+//! // build.rs calls reiny_build::compile_ports("ports.yaml") after compile().
+//! include!(concat!(env!("OUT_DIR"), "/reiny_ports.rs"));
+//! let mut link = Link::<_, 8>::new("motor-board", PORTS, [0u8; 512], [0u8; 512])?;
+//! link.publishes::<MotorState>("state")?;
+//! link.subscribes::<MotorCommand>("command")?;
+//! link.serves::<Calibrate>("calibrate")?;
 //!
 //! loop {
 //!     link.feed(&uart_rx_bytes());                         // whatever arrived, as it arrived
@@ -23,14 +25,14 @@
 //!         match ev {
 //!             Event::Data(f) => if let Some(cmd) = link.decode::<MotorCommand>(&f) { apply(cmd) },
 //!             Event::Request(f) => if let Some(req) = link.decode::<Calibrate>(&f) {
-//!                 link.reply::<Calibrate>(f.seq, &calibrate(req))?;
+//!                 link.reply::<Calibrate>("calibrate", f.seq, &calibrate(req))?;
 //!             },
 //!             Event::Connected(_) => { /* re-send latched types here */ }
 //!             _ => {}
 //!         }
 //!     }
 //!     link.tick(millis());
-//!     link.send(&MotorState { .. })?;
+//!     link.send("state", &MotorState { .. })?;
 //!     while let n @ 1.. = link.drain(&mut out) { uart_tx(&out[..n]); }
 //! }
 //! ```
@@ -42,9 +44,9 @@
 //!
 //! ```ignore
 //! // On the host
-//! let mut link = HostLink::host("pc")?;
-//! link.subscribes::<MotorState>()?;
-//! link.publishes::<MotorCommand>()?;
+//! let mut link = HostLink::host("pc", PORTS)?;
+//! link.subscribes::<MotorState>("state")?;
+//! link.publishes::<MotorCommand>("command")?;
 //! let mut host = Host::spawn(link, transport::serial::open("/dev/ttyACM0", 921_600)?);
 //! // let mut host = Host::spawn(link, transport::Udp::bind("0.0.0.0:7000").await?.with_peer(mcu));
 //! while let Some(ev) = host.recv().await {
@@ -63,7 +65,7 @@ mod link;
 pub mod wire;
 
 pub use link::{Error, Event, Frame, ID_MAX, Link, LinkConfig, RemoteType, Stats};
-pub use reiny_core::{Descriptor, Service, Topic};
+pub use reiny_core::{Descriptor, PortDirection, PortType, Service, StaticPort, Topic};
 
 #[cfg(feature = "engine")]
 mod engine;

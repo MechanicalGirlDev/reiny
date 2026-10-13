@@ -8,24 +8,26 @@ from reiny_ffi import FfiError, LocalBus, Session
 
 
 def main() -> None:
-    """Verify bytes, provenance, filtering, presence, and shutdown."""
+    """Verify bytes, provenance, routing, readiness, and shutdown."""
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
     bus = LocalBus()
-    sender = bus.connect("python-sender", "smoke")
-    receiver = bus.connect("python-receiver", "smoke")
-    subscription = receiver.subscriber("Ping", "python-sender")
-    publisher = sender.publisher("Ping", (1 << 64) - 1)
+    sender = bus.connect("sender", "smoke", str(fixtures / "sender.json"))
+    receiver = bus.connect("receiver", "smoke", str(fixtures / "receiver.json"))
+    subscription = receiver.subscriber("in", "Binary", 42)
+    publisher = sender.publisher("out", "Binary", 42)
+    sender.ready()
+    receiver.ready()
     payload = bytes([0x0A, 0x04, 0, 1, 255, 0])  # Ping { bytes data = 1; }
 
     publisher.send(payload)
     message = subscription.receive(1000)
     assert message is not None
     assert message.payload == payload
-    assert message.source == "python-sender"
-    assert message.schema == (1 << 64) - 1
-    assert receiver.publishers("Ping", 1000) == ["python-sender"]
+    assert message.source == "sender"
+    assert message.schema == 42
 
     try:
-        sender.publisher("invalid/type", None)
+        sender.publisher("out", "invalid/type", 42)
     except FfiError.Failure:
         pass
     else:
@@ -46,14 +48,15 @@ def main() -> None:
                 },
                 output,
             )
-        network = Session.open("python-network", "smoke", str(config))
-        network_subscriber = network.subscriber("Ping", None)
-        network_publisher = network.publisher("Ping", None)
+        network = Session.open("network", "smoke", str(config), str(fixtures / "network.json"))
+        network_subscriber = network.subscriber("in", "Binary", 42)
+        network_publisher = network.publisher("out", "Binary", 42)
+        network.ready()
         network_publisher.send(payload)
         network_message = network_subscriber.receive(1000)
         assert network_message is not None
         assert network_message.payload == payload
-        assert network_message.source == "python-network"
+        assert network_message.source == "network"
         network.shutdown()
     print("Python UniFFI smoke passed")
 

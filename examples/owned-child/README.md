@@ -10,11 +10,11 @@ From this independent workspace:
 ```sh
 cargo build --bins
 reiny apply main.yaml --detach
-cargo run --bin probe -- --domain owned-child-example
 reiny stop main.yaml
 ```
 
-The standalone probe must print `OWNED_CHILD_QA_OK` after receiving state 42
+The root composition wires a finite probe task to the host state and RPC outputs.
+The probe must print `OWNED_CHILD_QA_OK` after receiving state 42
 from `owned-child-example/host` and an RPC result of 43 from that same source.
-No parent/child process uses an undeclared standalone bus. The host waits for
+No process uses an undeclared communication endpoint. The host waits for
 child reaping during shutdown; stop acknowledgement alone is not completion.

@@ -6,13 +6,13 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
-description = "reiny build helper: reads main.yaml schemas, compiles protos, and generates types and topics"
+description = "reiny build helper: reads schema.yaml schemas, compiles protos, and generates types and topics"
 keywords = ["reiny", "build", "protobuf", "codegen", "prost"]
 categories = ["development-tools::build-utils"]
 
 [features]
 # Build scripts use proto compilation by default.
-# Without default features, main.yaml schema resolution and introspection remain
+# Without default features, schema.yaml schema resolution and introspection remain
 # available without pulling in prost-build or protoc.
 default = ["compile"]
 # Descriptor decoding and fingerprints do not require protoc.

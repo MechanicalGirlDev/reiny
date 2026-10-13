@@ -36,7 +36,7 @@ const QUERY_CAPACITY: usize = 256;
 // server
 // ---------------------------------------------------------------------------
 
-/// A typed server. Obtained from [`Cloudy::serve`].
+/// A typed server obtained from [`Cloudy::provides`].
 ///
 /// Dropping it drops the liveliness token too, and [`Cloudy::watch_servers`] reports a `Left`.
 pub struct Server<S> {
@@ -176,7 +176,7 @@ impl<S: Service> Request<S> {
 
 /// The builder [`Cloudy::caller`] returns. With nothing set it is [`Cloudy::call`].
 #[must_use = "a builder does nothing until .build()"]
-pub struct CallerBuilder<'a, S> {
+pub(crate) struct CallerBuilder<'a, S> {
     cloudy: &'a Cloudy,
     to: Option<String>,
     timeout: Duration,
@@ -195,19 +195,21 @@ impl<'a, S> CallerBuilder<'a, S> {
 
     /// Fire only at one launch id's server. Unset, it fires at every server in the domain and
     /// **takes the first reply** — with two or more servers around, pick here.
-    pub fn to(mut self, id: impl Into<String>) -> Self {
+    pub(crate) fn to(mut self, id: impl Into<String>) -> Self {
         self.to = Some(id.into());
         self
     }
 
     /// The limit on waiting for a reply (default 10 s, zenoh's own). Past it, [`CallError::Timeout`].
-    pub fn timeout(mut self, timeout: Duration) -> Self {
+    #[cfg(any(test, feature = "conformance"))]
+    pub(crate) fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
     /// Build a standalone caller. Managed code must use [`Cloudy::uses`].
-    pub fn build(self) -> Result<Caller<S>>
+    #[cfg(any(test, feature = "conformance"))]
+    pub(crate) fn build(self) -> Result<Caller<S>>
     where
         S: Service,
     {
@@ -232,7 +234,7 @@ impl<'a, S> CallerBuilder<'a, S> {
     }
 }
 
-/// A typed client, built by [`Cloudy::caller`]. It borrows no `Cloudy`, so it can live in a struct.
+/// A typed client opened through [`Cloudy::uses`]. It borrows no `Cloudy`, so it can live in a struct.
 pub struct Caller<S> {
     engine: Arc<dyn Engine>,
     key: Key,

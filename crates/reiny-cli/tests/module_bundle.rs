@@ -45,7 +45,6 @@ out:
   echo: {type: demo.Echo, from: arm.echo}
 resources:
   calibration: {type: artifact.file, provider: files, source: assets/calibration.bin}
-schema: {types: {unused: test.proto}}
 ",
     )?;
     write(
@@ -155,7 +154,7 @@ fn bundle_preserves_invocations_and_bindings_when_sources_are_relocated() -> Res
             .as_ref(),
         Some(&PortSources::One("in.tick".into()))
     );
-    assert!(root_manifest.build.is_none() && root_manifest.schema.is_none());
+    assert!(root_manifest.build.is_none());
     assert!(
         actual
             .nodes
@@ -354,7 +353,6 @@ modules:
 version: 2
 run: {provider: process, bin: worker}
 build: {type: cargo, profile: dev, locked: false}
-schema: {types: {unused: test.proto}}
 ",
         )?;
         write(
@@ -383,7 +381,7 @@ schema: {types: {unused: test.proto}}
         assert!(result.status.success());
         assert_eq!(String::from_utf8(result.stdout)?.trim(), expected);
         let parsed = manifest(&node.module_dir)?;
-        assert!(parsed.build.is_none() && parsed.schema.is_none());
+        assert!(parsed.build.is_none());
     }
     Ok(())
 }

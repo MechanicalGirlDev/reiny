@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "namespace": "receiver",
+  "endpoint_namespace": "receiver",
+  "inputs": {
+    "all": {
+      "contract": {
+        "type": "Binary"
+      },
+      "sources": [
+        "sender",
+        "other"
+      ]
+    },
+    "filtered": {
+      "contract": {
+        "type": "Binary"
+      },
+      "sources": [
+        "sender"
+      ]
+    }
+  },
+  "outputs": {}
+}

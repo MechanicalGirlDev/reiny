@@ -3,7 +3,7 @@
 Two modules exchange Ping and Pong in a cycle. Ping sends the first message and sends
 the next whenever a Pong arrives; Pong replies with the same sequence number.
 
-Each leaf owns its `schema.project`, `schema.publications`, and relative
+Each leaf owns a `schema.yaml` with `schema.project`, `schema.publications`, and relative
 `schema.dependencies`. Schema references may be cyclic: codegen reads only the
 dependency public catalog, without recursively resolving its dependencies. Runtime
 wiring is separate and uses `ping.ping` and `pong.pong`; no mutual startup dependency

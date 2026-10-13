@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "namespace": "network",
+  "endpoint_namespace": "network",
+  "inputs": {
+    "in": {
+      "contract": {
+        "type": "Binary"
+      },
+      "sources": [
+        "network"
+      ]
+    }
+  },
+  "outputs": {
+    "out": {
+      "contract": {
+        "type": "Binary"
+      }
+    }
+  }
+}

@@ -23,7 +23,7 @@
 use core::fmt;
 
 use prost::Message;
-use reiny_core::{Service, Topic};
+use reiny_core::{PortDirection, PortType, Service, StaticPort, Topic};
 
 use crate::wire::{self, DELIMITER, HEADER, HelloEntry, Kind, OVERHEAD, flags};
 
@@ -169,6 +169,14 @@ pub enum Error {
     Started,
     /// `send` of a type that was never passed to `publishes`.
     NotDeclared,
+    /// The named port is absent from the generated table.
+    UnknownPort,
+    /// The named port does not permit this direction.
+    WrongDirection,
+    /// The Rust type does not match the named port.
+    WrongType,
+    /// The static table contains duplicate or invalid port contracts.
+    InvalidPorts,
     /// The peer does not serve that request type (which includes not being connected).
     NoPeerService,
     /// The frame does not fit `FRAME`.
@@ -189,7 +197,11 @@ impl fmt::Display for Error {
             }
             Self::SchemaMismatch => f.write_str("schema fingerprint mismatch"),
             Self::Started => f.write_str("types must be declared before the link starts"),
-            Self::NotDeclared => f.write_str("type not declared with publishes()"),
+            Self::NotDeclared => f.write_str("port not declared"),
+            Self::UnknownPort => f.write_str("port absent from the static table"),
+            Self::WrongDirection => f.write_str("port direction mismatch"),
+            Self::WrongType => f.write_str("port type mismatch"),
+            Self::InvalidPorts => f.write_str("invalid static port table"),
             Self::NoPeerService => f.write_str("peer does not serve this request type"),
             Self::TooLarge => f.write_str("frame does not fit FRAME"),
             Self::Full => f.write_str("tx buffer full"),
@@ -213,6 +225,8 @@ pub struct Link<B, const N: usize, const FRAME: usize = 256> {
     id: IdBuf,
     peer: Option<IdBuf>,
     local: [Option<LocalType>; N],
+    ports: &'static [StaticPort],
+    declared: [Option<&'static StaticPort>; N],
     remote: [Option<RemoteType>; N],
     tx: B,
     tx_len: usize,
@@ -248,11 +262,41 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
 
     /// Build one from an id and the two buffers. Finish declaring types ([`Link::publishes`] and
     /// friends) before starting any I/O.
-    pub fn new(id: &str, tx: B, rx: B) -> Result<Self, Error> {
+    ///
+    /// The generated static port table is mandatory:
+    ///
+    /// ```compile_fail,E0061
+    /// let link = reiny_link::Link::<_, 8>::new("board", [0u8; 512], [0u8; 512]);
+    /// ```
+    ///
+    /// Application code cannot enable the internal bridge adapter:
+    ///
+    /// ```compile_fail,E0624
+    /// let link = reiny_link::Link::<_, 8>::new("board", &[], [0u8; 512], [0u8; 512])
+    ///     .unwrap().into_bridge();
+    /// ```
+    pub fn new(id: &str, ports: &'static [StaticPort], tx: B, rx: B) -> Result<Self, Error> {
+        for (index, port) in ports.iter().enumerate() {
+            let service = matches!(
+                port.direction,
+                PortDirection::Service | PortDirection::Client
+            );
+            if port.name.is_empty()
+                || port.ty.is_empty()
+                || service != port.response.is_some()
+                || ports[..index]
+                    .iter()
+                    .any(|other| other.name == port.name && other.direction == port.direction)
+            {
+                return Err(Error::InvalidPorts);
+            }
+        }
         Ok(Self {
             id: IdBuf::new(id)?,
             peer: None,
             local: [None; N],
+            ports,
+            declared: [None; N],
             remote: [None; N],
             tx,
             tx_len: 0,
@@ -290,7 +334,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     /// fingerprints — it carries the fingerprints from the peer's Hello straight across to the far
     /// side (zenoh's attachment).
     #[must_use]
-    pub fn as_bridge(mut self) -> Self {
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn into_bridge(mut self) -> Self {
         self.bridge = true;
         self
     }
@@ -312,37 +357,157 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     // -----------------------------------------------------------------------
 
     /// Publish the type `T`.
-    pub fn publishes<T: Topic>(&mut self) -> Result<(), Error> {
-        self.declare::<T>(flags::PUB)
+    ///
+    /// A type-only declaration cannot bypass the named table:
+    ///
+    /// ```compile_fail,E0061
+    /// struct State;
+    /// impl reiny_link::Topic for State {
+    ///     const TYPE: &'static str = "State";
+    ///     const SCHEMA: u64 = 1;
+    ///     const DESCRIPTOR: Option<reiny_link::Descriptor> = None;
+    /// }
+    /// let mut link = reiny_link::Link::<_, 8>::new("board", &[], [0u8; 512], [0u8; 512])
+    ///     .unwrap();
+    /// link.publishes::<State>();
+    /// ```
+    pub fn publishes<T: Topic>(&mut self, name: &str) -> Result<(), Error> {
+        self.declare::<T>(name, PortDirection::Output, flags::PUB, None)
     }
 
     /// Publish the type `T` latched — a promise to re-send the most recent value on every
     /// `Connected`. The re-sending itself is the caller's job (`Link` holds no values).
-    pub fn publishes_latched<T: Topic>(&mut self) -> Result<(), Error> {
-        self.declare::<T>(flags::PUB | flags::LATCHED)
+    pub fn publishes_latched<T: Topic>(&mut self, name: &str) -> Result<(), Error> {
+        self.declare::<T>(
+            name,
+            PortDirection::Output,
+            flags::PUB | flags::LATCHED,
+            None,
+        )
     }
 
     /// Subscribe to the type `T`.
-    pub fn subscribes<T: Topic>(&mut self) -> Result<(), Error> {
-        self.declare::<T>(flags::SUB)
+    pub fn subscribes<T: Topic>(&mut self, name: &str) -> Result<(), Error> {
+        self.declare::<T>(name, PortDirection::Input, flags::SUB, None)
     }
 
     /// Serve the request type `S`.
-    pub fn serves<S: Service>(&mut self) -> Result<(), Error> {
-        self.declare::<S>(flags::SERVE)
+    pub fn serves<S: Service>(&mut self, name: &str) -> Result<(), Error> {
+        self.declare_rpc::<S>(name, PortDirection::Service, flags::SERVE)
     }
 
-    /// Declare that we call the request type `S`. [`Link::request`] needs no declaration, but when
-    /// the peer is a bridge (to zenoh) this is what tells it the type's name, and only then can the
-    /// call reach the service on the far side.
-    pub fn calls<S: Service>(&mut self) -> Result<(), Error> {
-        self.declare::<S>(flags::CALLS)
+    /// Declare the named client port for request type `S`.
+    pub fn calls<S: Service>(&mut self, name: &str) -> Result<(), Error> {
+        self.declare_rpc::<S>(name, PortDirection::Client, flags::CALLS)
     }
 
-    fn declare<T: Topic>(&mut self, flag: u8) -> Result<(), Error> {
+    fn declare_rpc<S: Service>(
+        &mut self,
+        name: &str,
+        direction: PortDirection,
+        flag: u8,
+    ) -> Result<(), Error> {
+        let local = self.local;
+        let declared = self.declared;
+        let result = self
+            .declare::<S>(
+                name,
+                direction,
+                flag,
+                Some(PortType {
+                    ty: S::Response::TYPE,
+                    schema: S::Response::SCHEMA,
+                }),
+            )
+            .and_then(|()| {
+                // A response entry advertises schema metadata, never a communication permission.
+                self.declare_type::<S::Response>(0)
+            });
+        if result.is_err() {
+            self.local = local;
+            self.declared = declared;
+        }
+        result
+    }
+
+    fn port<T: Topic>(
+        &self,
+        name: &str,
+        direction: PortDirection,
+        response: Option<PortType>,
+    ) -> Result<&'static StaticPort, Error> {
+        let port = self
+            .ports
+            .iter()
+            .find(|port| port.name == name && port.direction == direction)
+            .ok_or_else(|| {
+                if self.ports.iter().any(|port| port.name == name) {
+                    Error::WrongDirection
+                } else {
+                    Error::UnknownPort
+                }
+            })?;
+        if port.ty != T::TYPE || port.response.map(|ty| ty.ty) != response.map(|ty| ty.ty) {
+            return Err(Error::WrongType);
+        }
+        if port.schema != T::SCHEMA
+            || port.response.map(|ty| ty.schema) != response.map(|ty| ty.schema)
+        {
+            return Err(Error::SchemaMismatch);
+        }
+        Ok(port)
+    }
+
+    pub(crate) fn check_port<T: Topic>(
+        &self,
+        name: &str,
+        direction: PortDirection,
+        response: Option<PortType>,
+    ) -> Result<(), Error> {
+        let port = self.port::<T>(name, direction, response)?;
+        if !self
+            .declared
+            .iter()
+            .flatten()
+            .any(|declared| core::ptr::eq(*declared, port))
+        {
+            return Err(Error::NotDeclared);
+        }
+        Ok(())
+    }
+
+    fn declare<T: Topic>(
+        &mut self,
+        name: &str,
+        direction: PortDirection,
+        flag: u8,
+        response: Option<PortType>,
+    ) -> Result<(), Error> {
         if self.started {
             return Err(Error::Started);
         }
+        let port = self.port::<T>(name, direction, response)?;
+        let already_declared = self
+            .declared
+            .iter()
+            .flatten()
+            .any(|declared| core::ptr::eq(*declared, port));
+        if !already_declared && self.declared.iter().all(Option::is_some) {
+            return Err(Error::TableFull);
+        }
+        self.declare_type::<T>(flag)?;
+        if !already_declared {
+            let free = self
+                .declared
+                .iter_mut()
+                .find(|slot| slot.is_none())
+                .ok_or(Error::TableFull)?;
+            *free = Some(port);
+        }
+        Ok(())
+    }
+
+    fn declare_type<T: Topic>(&mut self, flag: u8) -> Result<(), Error> {
         let hash = wire::type_hash(T::TYPE);
         for slot in self.local.iter_mut().flatten() {
             if slot.hash == hash {
@@ -389,6 +554,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     /// short only when the receive buffer holds a frame nobody has taken yet, so run [`Link::next`]
     /// and hand over the rest afterwards.
     pub fn feed(&mut self, bytes: &[u8]) -> usize {
+        self.ensure_started();
         self.rx_compact();
         let mut rest = bytes;
         while !rest.is_empty() {
@@ -501,6 +667,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     /// something a `for` loop drives. Only the name matches.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<Event> {
+        self.ensure_started();
         self.rx_compact();
         loop {
             let end = self.rx.as_ref()[..self.rx_len]
@@ -564,7 +731,9 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
                 }
                 if !self.connected
                     || (!self.peer_bridge
-                        && self.remote_type(frame.hash).is_none_or(|t| t.mismatch))
+                        && self
+                            .remote_type(frame.hash)
+                            .is_none_or(|t| t.mismatch || t.flags & flags::PUB == 0))
                 {
                     self.stats.dropped_schema = self.stats.dropped_schema.wrapping_add(1);
                     return None;
@@ -572,7 +741,12 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
                 Some(Event::Data(frame))
             }
             Kind::Request => {
-                if !self.connected || self.remote_type(frame.hash).is_some_and(|t| t.mismatch) {
+                if !self.connected
+                    || (!self.peer_bridge
+                        && self
+                            .remote_type(frame.hash)
+                            .is_none_or(|t| t.mismatch || t.flags & flags::CALLS == 0))
+                {
                     self.stats.dropped_schema = self.stats.dropped_schema.wrapping_add(1);
                     let _ = self.emit_error(frame.hash, frame.seq, "schema fingerprint mismatch");
                     return None;
@@ -589,8 +763,22 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
                     None
                 }
             }
-            Kind::Reply => self.connected.then_some(Event::Reply(frame)),
-            Kind::Error => self.connected.then_some(Event::Error(frame)),
+            Kind::Reply | Kind::Error => {
+                if !self.connected
+                    || (!self.bridge
+                        && self
+                            .local_type(frame.hash)
+                            .is_none_or(|ty| ty.flags & flags::CALLS == 0))
+                {
+                    self.stats.dropped_unwanted = self.stats.dropped_unwanted.wrapping_add(1);
+                    return None;
+                }
+                Some(if frame.kind == Kind::Reply {
+                    Event::Reply(frame)
+                } else {
+                    Event::Error(frame)
+                })
+            }
         }
     }
 
@@ -613,7 +801,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
             for e in hello.entries() {
                 let mismatch = self
                     .local_type(e.hash)
-                    .is_some_and(|t| t.schema != e.schema);
+                    .is_some_and(|t| t.schema != e.schema || t.name != e.name);
                 if count < N {
                     remote[count] = Some(RemoteType {
                         hash: e.hash,
@@ -649,7 +837,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
 
     /// Send the type `T`. If the peer does not subscribe to `T` nothing reaches the wire and this
     /// returns `Ok(false)`.
-    pub fn send<T: Topic + Message>(&mut self, msg: &T) -> Result<bool, Error> {
+    pub fn send<T: Topic + Message>(&mut self, name: &str, msg: &T) -> Result<bool, Error> {
+        self.check_port::<T>(name, PortDirection::Output, None)?;
         let hash = wire::type_hash(T::TYPE);
         self.check_publishes(hash)?;
         if self.local_type(hash).is_some_and(|t| t.schema != T::SCHEMA) {
@@ -665,7 +854,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     /// The pre-encoded form of [`Link::send`]: send by type hash and prost bytes (the door through
     /// which a bridge passes on what it took off zenoh). Unless we are a bridge, the type still has
     /// to have been passed to `publishes`.
-    pub fn send_raw(&mut self, hash: u32, payload: &[u8]) -> Result<bool, Error> {
+    #[cfg(any(feature = "engine", test))]
+    pub(crate) fn send_raw(&mut self, hash: u32, payload: &[u8]) -> Result<bool, Error> {
         self.check_publishes(hash)?;
         if !self.peer_subscribes_hash(hash) {
             return Ok(false);
@@ -676,7 +866,15 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
 
     /// Send the request type `S` and return the correlation id (`seq`). The response comes back as
     /// [`Event::Reply`] / [`Event::Error`].
-    pub fn request<S: Service>(&mut self, req: &S) -> Result<u8, Error> {
+    pub fn request<S: Service>(&mut self, name: &str, req: &S) -> Result<u8, Error> {
+        self.check_port::<S>(
+            name,
+            PortDirection::Client,
+            Some(PortType {
+                ty: S::Response::TYPE,
+                schema: S::Response::SCHEMA,
+            }),
+        )?;
         let hash = wire::type_hash(S::TYPE);
         if !self.peer_serves_hash(hash) {
             return Err(Error::NoPeerService);
@@ -692,7 +890,15 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     }
 
     /// The pre-encoded form of [`Link::request`].
-    pub fn request_raw(&mut self, hash: u32, payload: &[u8]) -> Result<u8, Error> {
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn request_raw(&mut self, hash: u32, payload: &[u8]) -> Result<u8, Error> {
+        if !self.bridge
+            && self
+                .local_type(hash)
+                .is_none_or(|ty| ty.flags & flags::CALLS == 0)
+        {
+            return Err(Error::NotDeclared);
+        }
         if !self.peer_serves_hash(hash) {
             return Err(Error::NoPeerService);
         }
@@ -701,13 +907,27 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     }
 
     /// Answer an [`Event::Request`]. `seq` is the request frame's.
-    pub fn reply<S: Service>(&mut self, seq: u8, resp: &S::Response) -> Result<(), Error> {
+    pub fn reply<S: Service>(
+        &mut self,
+        name: &str,
+        seq: u8,
+        resp: &S::Response,
+    ) -> Result<(), Error> {
+        self.check_port::<S>(
+            name,
+            PortDirection::Service,
+            Some(PortType {
+                ty: S::Response::TYPE,
+                schema: S::Response::SCHEMA,
+            }),
+        )?;
         let len = self.encode_payload(resp)?;
         self.emit_reply(wire::type_hash(S::TYPE), seq, S::Response::SCHEMA, len)
     }
 
     /// The pre-encoded form of [`Link::reply`]. `hash` is the *request* type's.
-    pub fn reply_raw(
+    #[cfg(any(feature = "engine", test))]
+    pub(crate) fn reply_raw(
         &mut self,
         seq: u8,
         hash: u32,
@@ -719,12 +939,26 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     }
 
     /// Answer an [`Event::Request`] with an error.
-    pub fn reply_err<S: Service>(&mut self, seq: u8, message: &str) -> Result<(), Error> {
+    pub fn reply_err<S: Service>(
+        &mut self,
+        name: &str,
+        seq: u8,
+        message: &str,
+    ) -> Result<(), Error> {
+        self.check_port::<S>(
+            name,
+            PortDirection::Service,
+            Some(PortType {
+                ty: S::Response::TYPE,
+                schema: S::Response::SCHEMA,
+            }),
+        )?;
         self.emit_error(wire::type_hash(S::TYPE), seq, message)
     }
 
     /// The type-hash form of [`Link::reply_err`].
-    pub fn reply_err_raw(&mut self, seq: u8, hash: u32, message: &str) -> Result<(), Error> {
+    #[cfg(feature = "engine")]
+    pub(crate) fn reply_err_raw(&mut self, seq: u8, hash: u32, message: &str) -> Result<(), Error> {
         self.emit_error(hash, seq, message)
     }
 
@@ -782,6 +1016,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     }
 
     /// Copy pre-encoded bytes into `scratch[HEADER..]` and return the payload length.
+    #[cfg(any(feature = "std", test))]
     fn copy_payload(&mut self, payload: &[u8]) -> Result<usize, Error> {
         if payload.len() > FRAME.saturating_sub(OVERHEAD) {
             return Err(Error::TooLarge);
@@ -879,6 +1114,18 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         &self.rx.as_ref()[HEADER..HEADER + usize::from(frame.len)]
     }
 
+    #[cfg(feature = "std")]
+    pub(crate) fn frame_schema(&self, frame: &Frame) -> Option<u64> {
+        if !self.is_fresh(frame) {
+            return None;
+        }
+        if self.peer_bridge {
+            self.local_type(frame.hash).map(|ty| ty.schema)
+        } else {
+            self.remote_type(frame.hash).map(|ty| ty.schema)
+        }
+    }
+
     /// Decode a Data / Request frame as the type `T`. `None` if the type hash differs, if it does
     /// not decode, or if the handle is stale.
     #[must_use]
@@ -912,6 +1159,16 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
             || frame.kind != Kind::Reply
             || frame.hash != wire::type_hash(S::TYPE)
         {
+            return None;
+        }
+        let request_schema = if self.bridge {
+            self.remote_type(frame.hash).map(|ty| ty.schema)
+        } else {
+            self.local_type(frame.hash)
+                .filter(|ty| ty.flags & flags::CALLS != 0)
+                .map(|ty| ty.schema)
+        };
+        if request_schema != Some(S::SCHEMA) {
             return None;
         }
         let payload = self.payload(frame);
@@ -1077,10 +1334,60 @@ mod tests {
         type Response = Sum;
     }
 
+    const fn fixture<T: Topic>(
+        name: &'static str,
+        direction: PortDirection,
+        response: Option<PortType>,
+    ) -> StaticPort {
+        StaticPort {
+            name,
+            direction,
+            ty: T::TYPE,
+            schema: T::SCHEMA,
+            response,
+        }
+    }
+
+    const PORTS: &[StaticPort] = &[
+        fixture::<Pos>("position", PortDirection::Input, None),
+        fixture::<Pos>("position", PortDirection::Output, None),
+        fixture::<Pos>("position_copy", PortDirection::Output, None),
+        fixture::<PosV2>("position_v2", PortDirection::Input, None),
+        fixture::<PosV2>("position_v2", PortDirection::Output, None),
+        fixture::<Cmd>("command", PortDirection::Input, None),
+        fixture::<Cmd>("command", PortDirection::Output, None),
+        fixture::<Other>("other", PortDirection::Input, None),
+        fixture::<Other>("other", PortDirection::Output, None),
+        fixture::<Add>(
+            "addition",
+            PortDirection::Service,
+            Some(PortType {
+                ty: Sum::TYPE,
+                schema: Sum::SCHEMA,
+            }),
+        ),
+        fixture::<Add>(
+            "addition",
+            PortDirection::Client,
+            Some(PortType {
+                ty: Sum::TYPE,
+                schema: Sum::SCHEMA,
+            }),
+        ),
+        fixture::<AddV2>(
+            "addition_v2",
+            PortDirection::Client,
+            Some(PortType {
+                ty: Sum::TYPE,
+                schema: Sum::SCHEMA,
+            }),
+        ),
+    ];
+
     type L = Link<[u8; 1024], 8>;
 
     fn link(id: &str) -> L {
-        L::new(id, [0; 1024], [0; 1024]).unwrap()
+        L::new(id, PORTS, [0; 1024], [0; 1024]).unwrap()
     }
 
     /// Pour each side's output into the other (stream-like: one byte at a time). True if anything
@@ -1124,11 +1431,11 @@ mod tests {
     fn handshake_exchanges_ids_and_types() {
         let mut a = link("host");
         let mut b = link("mcu");
-        a.subscribes::<Pos>().unwrap();
-        a.publishes::<Cmd>().unwrap();
-        b.publishes_latched::<Pos>().unwrap();
-        b.subscribes::<Cmd>().unwrap();
-        b.serves::<Add>().unwrap();
+        a.subscribes::<Pos>("position").unwrap();
+        a.publishes::<Cmd>("command").unwrap();
+        b.publishes_latched::<Pos>("position").unwrap();
+        b.subscribes::<Cmd>("command").unwrap();
+        b.serves::<Add>("addition").unwrap();
         connect(&mut a, &mut b);
 
         assert_eq!(a.peer_id(), Some("mcu"));
@@ -1145,7 +1452,7 @@ mod tests {
         assert_eq!(pos.schema, 0xaa);
         assert!(!pos.mismatch);
         // Declarations cannot be added after the Hello.
-        assert_eq!(a.subscribes::<Cmd>(), Err(Error::Started));
+        assert_eq!(a.subscribes::<Cmd>("command"), Err(Error::Started));
     }
 
     /// `calls` is the only reason a request type's *name* ever reaches a bridge, which is what lets
@@ -1155,7 +1462,7 @@ mod tests {
     fn calls_announces_the_request_type_without_serving_it() {
         let mut a = link("a");
         let mut b = link("b");
-        a.calls::<Add>().unwrap();
+        a.calls::<Add>("addition").unwrap();
         connect(&mut a, &mut b);
 
         let add = b
@@ -1167,17 +1474,63 @@ mod tests {
     }
 
     #[test]
+    fn rpc_responses_are_advertised_without_data_permissions() {
+        // Given a named client port whose response is not a stream port.
+        let mut caller = link("caller");
+        let mut peer = link("peer");
+        caller.calls::<Add>("addition").unwrap();
+
+        // When its Hello reaches the peer.
+        connect(&mut caller, &mut peer);
+
+        // Then tools can learn the response stamp without granting publication or subscription.
+        let response = peer
+            .peer_types()
+            .find(|ty| ty.hash == wire::type_hash(Sum::TYPE))
+            .expect("response metadata");
+        assert_eq!(response.schema, Sum::SCHEMA);
+        assert_eq!(response.flags, 0);
+        assert!(!peer.peer_subscribes::<Sum>());
+        assert_eq!(
+            caller.send("addition", &Sum::default()),
+            Err(Error::WrongDirection)
+        );
+    }
+
+    #[test]
+    fn failed_rpc_metadata_registration_leaves_no_partial_permission() {
+        // Given room for the request but not its response metadata.
+        let mut tiny = Link::<_, 1>::new("tiny", PORTS, [0u8; 1024], [0u8; 1024]).unwrap();
+
+        // When the named RPC declaration exceeds that capacity.
+        assert_eq!(tiny.calls::<Add>("addition"), Err(Error::TableFull));
+
+        // Then neither the request grant nor a consumed type slot survives the failure.
+        assert_eq!(
+            tiny.request("addition", &Add::default()),
+            Err(Error::NotDeclared)
+        );
+        assert!(tiny.local_type(wire::type_hash(Add::TYPE)).is_none());
+        tiny.publishes::<Pos>("position")
+            .expect("capacity was restored");
+    }
+
+    #[test]
     fn data_flows_only_to_subscribers() {
         let mut a = link("a");
         let mut b = link("b");
-        a.publishes::<Pos>().unwrap();
-        a.publishes::<Cmd>().unwrap();
-        b.subscribes::<Pos>().unwrap();
+        a.publishes::<Pos>("position").unwrap();
+        a.publishes::<Cmd>("command").unwrap();
+        b.subscribes::<Pos>("position").unwrap();
         connect(&mut a, &mut b);
 
-        assert_eq!(a.send(&Cmd { v: 1 }), Ok(false), "peer does not subscribe");
-        assert_eq!(a.send(&Pos { x: 42 }), Ok(true));
-        assert_eq!(b.send(&Pos { x: 1 }), Err(Error::NotDeclared));
+        assert_eq!(
+            a.send("command", &Cmd { v: 1 }),
+            Ok(false),
+            "peer does not subscribe"
+        );
+        assert_eq!(a.send("position", &Pos { x: 42 }), Ok(true));
+        assert_eq!(b.send("position", &Pos { x: 1 }), Err(Error::NotDeclared));
         while pump(&mut a, &mut b) {}
         let Some(Event::Data(f)) = b.next() else {
             panic!("expected data")
@@ -1196,14 +1549,14 @@ mod tests {
     fn stale_handles_decode_to_none() {
         let mut a = link("a");
         let mut b = link("b");
-        a.publishes::<Pos>().unwrap();
-        a.publishes::<Cmd>().unwrap();
-        b.subscribes::<Pos>().unwrap();
-        b.subscribes::<Cmd>().unwrap();
+        a.publishes::<Pos>("position").unwrap();
+        a.publishes::<Cmd>("command").unwrap();
+        b.subscribes::<Pos>("position").unwrap();
+        b.subscribes::<Cmd>("command").unwrap();
         connect(&mut a, &mut b);
 
-        a.send(&Pos { x: 42 }).unwrap();
-        a.send(&Cmd { v: 1 }).unwrap();
+        a.send("position", &Pos { x: 42 }).unwrap();
+        a.send("command", &Cmd { v: 1 }).unwrap();
         while pump(&mut a, &mut b) {}
         let Some(Event::Data(first)) = b.next() else {
             panic!("expected data")
@@ -1219,17 +1572,23 @@ mod tests {
     fn request_reply_roundtrip_and_error() {
         let mut a = link("a");
         let mut b = link("b");
-        b.serves::<Add>().unwrap();
+        a.calls::<Add>("addition").unwrap();
+        b.serves::<Add>("addition").unwrap();
+        b.calls::<Add>("addition").unwrap();
         connect(&mut a, &mut b);
 
-        assert_eq!(b.request(&Add { a: 1, b: 2 }), Err(Error::NoPeerService));
-        let seq = a.request(&Add { a: 1, b: 2 }).unwrap();
+        assert_eq!(
+            b.request("addition", &Add { a: 1, b: 2 }),
+            Err(Error::NoPeerService)
+        );
+        let seq = a.request("addition", &Add { a: 1, b: 2 }).unwrap();
         while pump(&mut a, &mut b) {}
         let Some(Event::Request(req)) = b.next() else {
             panic!("expected request")
         };
         let add = b.decode::<Add>(&req).unwrap();
-        b.reply::<Add>(req.seq, &Sum { s: add.a + add.b }).unwrap();
+        b.reply::<Add>("addition", req.seq, &Sum { s: add.a + add.b })
+            .unwrap();
         while pump(&mut a, &mut b) {}
         let Some(Event::Reply(rep)) = a.next() else {
             panic!("expected reply")
@@ -1237,17 +1596,22 @@ mod tests {
         assert_eq!(rep.seq, seq);
         assert_eq!(a.decode_reply::<Add>(&rep), Some(Sum { s: 3 }));
         assert_eq!(
+            a.decode_reply::<AddV2>(&rep),
+            None,
+            "wrong request contract"
+        );
+        assert_eq!(
             a.decode::<Sum>(&rep),
             None,
             "reply carries the request hash"
         );
 
-        let seq = a.request(&Add { a: 0, b: 0 }).unwrap();
+        let seq = a.request("addition", &Add { a: 0, b: 0 }).unwrap();
         while pump(&mut a, &mut b) {}
         let Some(Event::Request(req)) = b.next() else {
             panic!("expected request")
         };
-        b.reply_err::<Add>(req.seq, "busy").unwrap();
+        b.reply_err::<Add>("addition", req.seq, "busy").unwrap();
         while pump(&mut a, &mut b) {}
         let Some(Event::Error(err)) = a.next() else {
             panic!("expected error")
@@ -1261,9 +1625,10 @@ mod tests {
         for schema in [None, Some(Sum::SCHEMA ^ 1)] {
             let mut a = link("a");
             let mut b = link("b");
-            b.serves::<Add>().unwrap();
+            a.calls::<Add>("addition").unwrap();
+            b.serves::<Add>("addition").unwrap();
             connect(&mut a, &mut b);
-            a.request(&Add { a: 1, b: 2 }).unwrap();
+            a.request("addition", &Add { a: 1, b: 2 }).unwrap();
             while pump(&mut a, &mut b) {}
             let Some(Event::Request(req)) = b.next() else {
                 panic!("expected request")
@@ -1290,13 +1655,14 @@ mod tests {
     fn request_seq_advances_and_wraps() {
         let mut a = link("a");
         let mut b = link("b");
-        b.serves::<Add>().unwrap();
+        a.calls::<Add>("addition").unwrap();
+        b.serves::<Add>("addition").unwrap();
         connect(&mut a, &mut b);
 
         let mut sink = [0u8; 4096];
         let mut previous = None;
         for i in 0..300u32 {
-            let seq = a.request(&Add { a: 1, b: 1 }).unwrap();
+            let seq = a.request("addition", &Add { a: 1, b: 1 }).unwrap();
             if let Some(p) = previous {
                 assert_eq!(seq, u8::wrapping_add(p, 1), "at request {i}");
             }
@@ -1311,12 +1677,13 @@ mod tests {
         let mut b = link("b");
         // b does not serve Add. Rather than fake a's table, send the frame directly: this recreates
         // the situation where the peer's table is stale (right after a restart).
-        b.serves::<Add>().unwrap();
+        a.calls::<Add>("addition").unwrap();
+        b.serves::<Add>("addition").unwrap();
         connect(&mut a, &mut b);
-        let seq = a.request(&Add { a: 1, b: 1 }).unwrap();
+        let seq = a.request("addition", &Add { a: 1, b: 1 }).unwrap();
         // Swap b for an instance that does not serve Add.
         let mut b2 = link("b");
-        b2.subscribes::<Cmd>().unwrap();
+        b2.subscribes::<Cmd>("command").unwrap();
         b2.tick(0);
         // b2 needs next() to run before it queues the error response.
         loop {
@@ -1343,11 +1710,11 @@ mod tests {
     fn schema_mismatch_drops_data_once_connected() {
         let mut a = link("a");
         let mut b = link("b");
-        a.publishes::<PosV2>().unwrap(); // same name, different fingerprint
-        b.subscribes::<Pos>().unwrap();
+        a.publishes::<PosV2>("position_v2").unwrap(); // same name, different fingerprint
+        b.subscribes::<Pos>("position").unwrap();
         connect(&mut a, &mut b);
         assert!(b.peer_types().any(|t| t.mismatch));
-        assert_eq!(a.send(&PosV2 { x: 1 }), Ok(false));
+        assert_eq!(a.send("position_v2", &PosV2 { x: 1 }), Ok(false));
         // A peer ignoring negotiation must still not deliver incompatible bytes.
         let len = a.encode_payload(&PosV2 { x: 1 }).unwrap();
         a.emit_data(wire::type_hash(Pos::TYPE), len).unwrap();
@@ -1359,14 +1726,18 @@ mod tests {
     #[test]
     fn typed_send_and_call_cannot_use_another_fingerprint_for_the_same_name() {
         let mut sender = link("sender");
-        sender.publishes::<Pos>().unwrap();
+        sender.publishes::<Pos>("position").unwrap();
+        sender.calls::<Add>("addition").unwrap();
         let mut receiver = link("receiver");
-        receiver.subscribes::<Pos>().unwrap();
-        receiver.serves::<Add>().unwrap();
+        receiver.subscribes::<Pos>("position").unwrap();
+        receiver.serves::<Add>("addition").unwrap();
         connect(&mut sender, &mut receiver);
-        assert_eq!(sender.send(&PosV2 { x: 1 }), Err(Error::SchemaMismatch));
         assert_eq!(
-            sender.request(&AddV2 { a: 1, b: 2 }),
+            sender.send("position", &PosV2 { x: 1 }),
+            Err(Error::SchemaMismatch)
+        );
+        assert_eq!(
+            sender.request("addition", &AddV2 { a: 1, b: 2 }),
             Err(Error::SchemaMismatch)
         );
     }
@@ -1374,9 +1745,9 @@ mod tests {
     #[test]
     fn request_fingerprint_mismatch_is_replied_to_without_dispatching() {
         let mut caller = link("caller");
-        caller.calls::<AddV2>().unwrap();
+        caller.calls::<AddV2>("addition_v2").unwrap();
         let mut server = link("server");
-        server.serves::<Add>().unwrap();
+        server.serves::<Add>("addition").unwrap();
         connect(&mut caller, &mut server);
         settle(&mut caller, &mut server);
         let len = caller.encode_payload(&AddV2 { a: 1, b: 2 }).unwrap();
@@ -1399,12 +1770,12 @@ mod tests {
     fn missing_fingerprint_rejects_hello_and_data() {
         for (bridge, restart) in [(false, false), (true, false), (false, true), (true, true)] {
             let mut legacy = link("old");
-            legacy.publishes::<Pos>().unwrap();
+            legacy.publishes::<Pos>("position").unwrap();
             let mut receiver = link("new");
             if bridge {
-                receiver = receiver.as_bridge();
+                receiver = receiver.into_bridge();
             } else {
-                receiver.subscribes::<Pos>().unwrap();
+                receiver.subscribes::<Pos>("position").unwrap();
             }
             if restart {
                 connect(&mut legacy, &mut receiver);
@@ -1519,12 +1890,12 @@ mod tests {
     fn peer_restart_reconnects_and_reannounces() {
         let mut a = link("a");
         let mut b = link("b");
-        b.publishes_latched::<Pos>().unwrap();
-        a.subscribes::<Pos>().unwrap();
+        b.publishes_latched::<Pos>("position").unwrap();
+        a.subscribes::<Pos>("position").unwrap();
         connect(&mut a, &mut b);
         // b restarts: the new Link sends a Hello with no ack → a sees Connected again.
         let mut b2 = link("b");
-        b2.publishes::<Pos>().unwrap();
+        b2.publishes::<Pos>("position").unwrap();
         b2.tick(0);
         while pump(&mut a, &mut b2) {}
         let Some(Event::Connected(f)) = a.next() else {
@@ -1542,10 +1913,10 @@ mod tests {
     fn garbage_and_split_frames_resync() {
         let mut a = link("a");
         let mut b = link("b");
-        a.publishes::<Pos>().unwrap();
-        b.subscribes::<Pos>().unwrap();
+        a.publishes::<Pos>("position").unwrap();
+        b.subscribes::<Pos>("position").unwrap();
         connect(&mut a, &mut b);
-        a.send(&Pos { x: 7 }).unwrap();
+        a.send("position", &Pos { x: 7 }).unwrap();
         let mut buf = [0u8; 256];
         let n = a.drain(&mut buf);
         // Garbage in front, a split in the middle, a broken frame behind.
@@ -1566,15 +1937,15 @@ mod tests {
     fn oversized_input_is_dropped_and_resyncs() {
         let mut a = link("a");
         let mut b = link("b");
-        a.publishes::<Pos>().unwrap();
-        b.subscribes::<Pos>().unwrap();
+        a.publishes::<Pos>("position").unwrap();
+        b.subscribes::<Pos>("position").unwrap();
         connect(&mut a, &mut b);
         // 1500 bytes with no delimiter (longer than the 1024-byte receive buffer).
         let junk = [0x11u8; 1500];
         assert_eq!(b.feed(&junk), 1500);
         assert_eq!(b.stats().rx_overflow, 1);
         b.feed(&[0x00]);
-        a.send(&Pos { x: 9 }).unwrap();
+        a.send("position", &Pos { x: 9 }).unwrap();
         while pump(&mut a, &mut b) {}
         let Some(Event::Data(f)) = b.next() else {
             panic!("expected data after overflow")
@@ -1589,9 +1960,9 @@ mod tests {
     fn feed_reports_backpressure_instead_of_dropping() {
         let mut a = link("a");
         // A deliberately tiny receiver: 64 bytes of rx.
-        let mut b = Link::<[u8; 64], 4>::new("b", [0; 64], [0; 64]).unwrap();
-        a.publishes::<Pos>().unwrap();
-        b.subscribes::<Pos>().unwrap();
+        let mut b = Link::<[u8; 64], 4>::new("b", PORTS, [0; 64], [0; 64]).unwrap();
+        a.publishes::<Pos>("position").unwrap();
+        b.subscribes::<Pos>("position").unwrap();
 
         // Hand-rolled handshake: the shared `pump` helper only works between two links of the same
         // type, and this receiver is deliberately a different one.
@@ -1612,7 +1983,7 @@ mod tests {
         // short.
         let mut short = false;
         for _ in 0..32 {
-            assert_eq!(a.send(&Pos { x: 1 }), Ok(true));
+            assert_eq!(a.send("position", &Pos { x: 1 }), Ok(true));
             let n = a.drain(&mut buf);
             if b.feed(&buf[..n]) < n {
                 short = true;
@@ -1631,13 +2002,13 @@ mod tests {
     fn drain_frame_emits_one_frame_at_a_time() {
         let mut a = link("a");
         let mut b = link("b");
-        a.publishes::<Pos>().unwrap();
-        b.subscribes::<Pos>().unwrap();
+        a.publishes::<Pos>("position").unwrap();
+        b.subscribes::<Pos>("position").unwrap();
         connect(&mut a, &mut b);
         settle(&mut a, &mut b);
 
-        a.send(&Pos { x: 1 }).unwrap();
-        a.send(&Pos { x: 2 }).unwrap();
+        a.send("position", &Pos { x: 1 }).unwrap();
+        a.send("position", &Pos { x: 2 }).unwrap();
         let mut out = [0u8; 256];
         let first = a.drain_frame(&mut out).expect("first frame");
         assert_eq!(out[first - 1], DELIMITER);
@@ -1650,7 +2021,7 @@ mod tests {
         assert_eq!(b.decode::<Pos>(&f), Some(Pos { x: 1 }));
 
         // A too-small `out` drops that frame and counts it, and the next one still comes through.
-        a.send(&Pos { x: 3 }).unwrap();
+        a.send("position", &Pos { x: 3 }).unwrap();
         let mut tiny = [0u8; 2];
         assert_eq!(a.drain_frame(&mut tiny), None);
         assert!(a.stats().tx_full >= 1);
@@ -1665,17 +2036,19 @@ mod tests {
 
     #[test]
     fn tx_full_and_too_large_are_reported() {
-        let mut small = Link::<[u8; 64], 2, 32>::new("s", [0; 64], [0; 64]).unwrap();
-        small.publishes::<Cmd>().unwrap();
+        // Cmd, Add and its response metadata each occupy a type slot.
+        let mut small = Link::<[u8; 64], 3, 32>::new("s", PORTS, [0; 64], [0; 64]).unwrap();
+        small.publishes::<Cmd>("command").unwrap();
+        small.serves::<Add>("addition").unwrap();
         let mut sink = [0u8; 64];
         let _ = small.drain(&mut sink); // flush the Hello
         // With no peer, send is Ok(false). The emit path is exercised through request instead.
-        assert_eq!(small.send(&Cmd { v: 1 }), Ok(false));
-        assert_eq!(small.reply_err::<Add>(0, "x"), Ok(()));
+        assert_eq!(small.send("command", &Cmd { v: 1 }), Ok(false));
+        assert_eq!(small.reply_err::<Add>("addition", 0, "x"), Ok(()));
         // Packing ~10-byte frames into a 64-byte tx fills it.
         let mut full = false;
         for _ in 0..16 {
-            match small.reply_err::<Add>(0, "xxxxxxxxxx") {
+            match small.reply_err::<Add>("addition", 0, "xxxxxxxxxx") {
                 Ok(()) => {}
                 Err(Error::Full) => {
                     full = true;
@@ -1688,23 +2061,27 @@ mod tests {
         assert!(small.stats().tx_full >= 1);
         // A 40-byte payload does not fit FRAME = 32.
         let long = "y".repeat(40);
-        assert_eq!(small.reply_err::<Add>(0, &long), Err(Error::Full));
+        assert_eq!(
+            small.reply_err::<Add>("addition", 0, &long),
+            Err(Error::Full)
+        );
     }
 
     #[test]
     fn bridge_mirrors_the_peer_without_declaring_anything() {
         let mut mcu = link("mcu");
-        mcu.publishes_latched::<Pos>().unwrap();
-        mcu.subscribes::<Cmd>().unwrap();
-        mcu.serves::<Add>().unwrap();
-        let mut bridge = link("bridge").as_bridge();
+        mcu.publishes_latched::<Pos>("position").unwrap();
+        mcu.subscribes::<Cmd>("command").unwrap();
+        mcu.serves::<Add>("addition").unwrap();
+        mcu.calls::<Add>("addition").unwrap();
+        let mut bridge = link("bridge").into_bridge();
         connect(&mut mcu, &mut bridge);
         assert!(mcu.peer_is_bridge() && !bridge.peer_is_bridge());
         // The bridge takes / sends / serves anything.
         assert!(mcu.peer_subscribes::<Pos>() && mcu.peer_serves::<Add>());
         assert!(bridge.peer_subscribes::<Cmd>() && !bridge.peer_subscribes::<Pos>());
 
-        assert_eq!(mcu.send(&Pos { x: 5 }), Ok(true));
+        assert_eq!(mcu.send("position", &Pos { x: 5 }), Ok(true));
         while pump(&mut mcu, &mut bridge) {}
         let Some(Event::Data(f)) = bridge.next() else {
             panic!("bridge should receive undeclared data")
@@ -1728,7 +2105,7 @@ mod tests {
         let Some(Event::Request(r)) = mcu.next() else {
             panic!("mcu should receive request")
         };
-        mcu.reply::<Add>(r.seq, &Sum { s: 5 }).unwrap();
+        mcu.reply::<Add>("addition", r.seq, &Sum { s: 5 }).unwrap();
         while pump(&mut mcu, &mut bridge) {}
         let Some(Event::Reply(rep)) = bridge.next() else {
             panic!("bridge should receive reply")
@@ -1737,7 +2114,7 @@ mod tests {
         assert_eq!(bridge.decode_reply::<Add>(&rep), Some(Sum { s: 5 }));
 
         // mcu → bridge service call: a bridge accepts requests for types it does not serve.
-        let seq = mcu.request(&Add { a: 1, b: 1 }).unwrap();
+        let seq = mcu.request("addition", &Add { a: 1, b: 1 }).unwrap();
         while pump(&mut mcu, &mut bridge) {}
         let Some(Event::Request(r)) = bridge.next() else {
             panic!("bridge should receive any request")
@@ -1760,11 +2137,11 @@ mod tests {
     #[test]
     fn bridge_does_not_enforce_fingerprints() {
         let mut mcu = link("mcu");
-        mcu.publishes::<PosV2>().unwrap(); // SCHEMA = 0xbb
-        let mut bridge = link("bridge").as_bridge();
+        mcu.publishes::<PosV2>("position_v2").unwrap(); // SCHEMA = 0xbb
+        let mut bridge = link("bridge").into_bridge();
         connect(&mut mcu, &mut bridge);
 
-        assert_eq!(mcu.send(&PosV2 { x: 8 }), Ok(true));
+        assert_eq!(mcu.send("position_v2", &PosV2 { x: 8 }), Ok(true));
         while pump(&mut mcu, &mut bridge) {}
         let Some(Event::Data(f)) = bridge.next() else {
             panic!("a bridge must not drop on fingerprints")
@@ -1785,12 +2162,12 @@ mod tests {
     /// into a state where it thinks the peer never declared the type.
     #[test]
     fn peer_table_overflow_is_counted() {
-        let mut small = Link::<[u8; 1024], 1>::new("small", [0; 1024], [0; 1024]).unwrap();
+        let mut small = Link::<[u8; 1024], 1>::new("small", PORTS, [0; 1024], [0; 1024]).unwrap();
         let mut big = link("big");
-        big.publishes::<Pos>().unwrap();
-        big.publishes::<Cmd>().unwrap();
-        big.serves::<Add>().unwrap();
-        small.subscribes::<Pos>().unwrap();
+        big.publishes::<Pos>("position").unwrap();
+        big.publishes::<Cmd>("command").unwrap();
+        big.serves::<Add>("addition").unwrap();
+        small.subscribes::<Pos>("position").unwrap();
 
         small.tick(0);
         big.tick(0);
@@ -1832,20 +2209,123 @@ mod tests {
 
     #[test]
     fn declaration_errors() {
-        let mut l = Link::<[u8; 256], 1>::new("l", [0; 256], [0; 256]).unwrap();
-        l.publishes::<Pos>().unwrap();
-        l.subscribes::<Pos>().unwrap(); // the same type with another flag folds into one slot
-        assert_eq!(l.subscribes::<Cmd>(), Err(Error::TableFull));
-        assert!(L::new(&"x".repeat(ID_MAX + 1), [0; 1024], [0; 1024]).is_err());
-        let mut l = Link::<[u8; 256], 2>::new("l", [0; 256], [0; 256]).unwrap();
-        l.publishes::<Pos>().unwrap();
+        let mut l = Link::<[u8; 256], 2>::new("l", PORTS, [0; 256], [0; 256]).unwrap();
+        l.publishes::<Pos>("position").unwrap();
+        l.subscribes::<Pos>("position").unwrap(); // two ports for the same type share one wire entry
+        assert_eq!(l.subscribes::<Cmd>("command"), Err(Error::TableFull));
+        assert!(L::new(&"x".repeat(ID_MAX + 1), PORTS, [0; 1024], [0; 1024]).is_err());
+        let mut l = Link::<[u8; 256], 3>::new("l", PORTS, [0; 256], [0; 256]).unwrap();
+        l.publishes::<Pos>("position").unwrap();
         assert_eq!(
-            l.subscribes::<Alias>(),
+            l.subscribes::<Alias>("position"),
             Ok(()),
             "same name, same hash: fine"
         );
-        assert_eq!(l.subscribes::<Other>(), Ok(()));
-        assert_eq!(l.subscribes::<PosV2>(), Err(Error::SchemaMismatch));
+        assert_eq!(l.subscribes::<Other>("other"), Ok(()));
+        assert_eq!(
+            l.subscribes::<PosV2>("position"),
+            Err(Error::SchemaMismatch)
+        );
+    }
+
+    #[test]
+    fn static_ports_refuse_undeclared_names_directions_types_and_schemas() {
+        let mut empty = L::new("empty", &[], [0; 1024], [0; 1024]).unwrap();
+        assert_eq!(empty.publishes::<Pos>("position"), Err(Error::UnknownPort));
+        assert_eq!(
+            empty.send("position", &Pos { x: 1 }),
+            Err(Error::UnknownPort)
+        );
+
+        let mut l = link("checked");
+        assert_eq!(l.publishes::<Pos>("missing"), Err(Error::UnknownPort));
+        assert_eq!(
+            l.subscribes::<Pos>("position_copy"),
+            Err(Error::WrongDirection)
+        );
+        assert_eq!(l.publishes::<Cmd>("position"), Err(Error::WrongType));
+        assert_eq!(l.publishes::<PosV2>("position"), Err(Error::SchemaMismatch));
+        assert_eq!(l.send("position", &Pos { x: 1 }), Err(Error::NotDeclared));
+        assert_eq!(
+            l.request("addition", &Add { a: 1, b: 2 }),
+            Err(Error::NotDeclared)
+        );
+        assert_eq!(
+            l.reply::<Add>("addition", 0, &Sum { s: 3 }),
+            Err(Error::NotDeclared)
+        );
+        assert_eq!(
+            l.reply_err::<Add>("addition", 0, "error"),
+            Err(Error::NotDeclared)
+        );
+        l.publishes::<Pos>("position").unwrap();
+        assert_eq!(
+            l.send("position_copy", &Pos { x: 1 }),
+            Err(Error::NotDeclared)
+        );
+        assert_eq!(l.send("position", &Cmd { v: 1 }), Err(Error::WrongType));
+        assert_eq!(
+            l.send("position", &PosV2 { x: 1 }),
+            Err(Error::SchemaMismatch)
+        );
+        assert_eq!(
+            l.request("position", &Add { a: 1, b: 2 }),
+            Err(Error::WrongDirection)
+        );
+        assert_eq!(
+            l.reply::<Add>("position", 0, &Sum { s: 3 }),
+            Err(Error::WrongDirection)
+        );
+        assert_eq!(l.tx_pending(), 0, "refused operations cannot emit frames");
+    }
+
+    #[test]
+    fn service_response_contract_is_checked_before_declaration() {
+        const WRONG_RESPONSE: &[StaticPort] = &[StaticPort {
+            name: "addition",
+            direction: PortDirection::Service,
+            ty: Add::TYPE,
+            schema: Add::SCHEMA,
+            response: Some(PortType {
+                ty: Pos::TYPE,
+                schema: Pos::SCHEMA,
+            }),
+        }];
+        const WRONG_SCHEMA: &[StaticPort] = &[StaticPort {
+            name: "addition",
+            direction: PortDirection::Client,
+            ty: Add::TYPE,
+            schema: Add::SCHEMA,
+            response: Some(PortType {
+                ty: Sum::TYPE,
+                schema: Sum::SCHEMA + 1,
+            }),
+        }];
+        let mut server = L::new("server", WRONG_RESPONSE, [0; 1024], [0; 1024]).unwrap();
+        assert_eq!(server.serves::<Add>("addition"), Err(Error::WrongType));
+        let mut client = L::new("client", WRONG_SCHEMA, [0; 1024], [0; 1024]).unwrap();
+        assert_eq!(client.calls::<Add>("addition"), Err(Error::SchemaMismatch));
+    }
+
+    #[test]
+    fn invalid_static_tables_are_refused_and_feed_closes_declarations() {
+        const DUPLICATE: &[StaticPort] = &[
+            fixture::<Pos>("position", PortDirection::Output, None),
+            fixture::<Pos>("position", PortDirection::Output, None),
+        ];
+        const MISSING_RESPONSE: &[StaticPort] =
+            &[fixture::<Add>("addition", PortDirection::Client, None)];
+        assert_eq!(
+            L::new("duplicate", DUPLICATE, [0; 1024], [0; 1024]).err(),
+            Some(Error::InvalidPorts)
+        );
+        assert_eq!(
+            L::new("missing", MISSING_RESPONSE, [0; 1024], [0; 1024]).err(),
+            Some(Error::InvalidPorts)
+        );
+        let mut l = link("started");
+        l.feed(&[]);
+        assert_eq!(l.publishes::<Pos>("position"), Err(Error::Started));
     }
 
     /// Two different names hashing alike is the one failure a 32-bit type hash can produce, and it
@@ -1866,16 +2346,19 @@ mod tests {
             const SCHEMA: u64 = 2;
             const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
         }
+        const COLLISIONS: &[StaticPort] = &[
+            fixture::<Costarring>("costarring", PortDirection::Output, None),
+            fixture::<Liquid>("liquid", PortDirection::Input, None),
+        ];
         assert_eq!(
             wire::type_hash(Costarring::TYPE),
             wire::type_hash(Liquid::TYPE),
             "the fixture is only meaningful if these actually collide"
         );
-
-        let mut l = Link::<[u8; 256], 4>::new("l", [0; 256], [0; 256]).unwrap();
-        l.publishes::<Costarring>().unwrap();
+        let mut l = Link::<[u8; 256], 4>::new("l", COLLISIONS, [0; 256], [0; 256]).unwrap();
+        l.publishes::<Costarring>("costarring").unwrap();
         assert_eq!(
-            l.subscribes::<Liquid>(),
+            l.subscribes::<Liquid>("liquid"),
             Err(Error::HashCollision {
                 existing: "costarring",
                 new: "liquid",
@@ -1888,10 +2371,10 @@ mod tests {
     #[test]
     fn id_length_boundary() {
         let exact = "x".repeat(ID_MAX);
-        let l = L::new(&exact, [0; 1024], [0; 1024]).unwrap();
+        let l = L::new(&exact, PORTS, [0; 1024], [0; 1024]).unwrap();
         assert_eq!(l.id(), exact);
         assert_eq!(
-            L::new(&"x".repeat(ID_MAX + 1), [0; 1024], [0; 1024])
+            L::new(&"x".repeat(ID_MAX + 1), PORTS, [0; 1024], [0; 1024])
                 .err()
                 .unwrap(),
             Error::IdTooLong
@@ -1903,14 +2386,18 @@ mod tests {
     #[test]
     fn nothing_is_routable_before_the_handshake() {
         let mut a = link("a");
-        a.publishes::<Pos>().unwrap();
-        a.serves::<Add>().unwrap();
+        a.publishes::<Pos>("position").unwrap();
+        a.serves::<Add>("addition").unwrap();
+        a.calls::<Add>("addition").unwrap();
         assert!(!a.is_connected());
         assert_eq!(a.peer_id(), None);
         assert!(!a.peer_subscribes::<Pos>());
         assert!(!a.peer_serves::<Add>());
         assert!(!a.peer_is_bridge());
-        assert_eq!(a.send(&Pos { x: 1 }), Ok(false));
-        assert_eq!(a.request(&Add { a: 1, b: 1 }), Err(Error::NoPeerService));
+        assert_eq!(a.send("position", &Pos { x: 1 }), Ok(false));
+        assert_eq!(
+            a.request("addition", &Add { a: 1, b: 1 }),
+            Err(Error::NoPeerService)
+        );
     }
 }

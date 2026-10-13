@@ -197,8 +197,12 @@ async fn raw_access_is_rejected_before_any_transport_declaration() {
             .build()
             .is_err()
     );
-    assert!(cloudy.engine().is_err());
-    assert!(cloudy.with_engine(Arc::new(Local::new())).await.is_err());
+    let second = cloudy
+        .with_engine(Arc::new(Local::new()))
+        .await
+        .expect("bound second engine");
+    assert!(second.input::<Probe>("undefined").is_err());
+    assert!(second.output::<Probe>("undefined").is_err());
     #[cfg(feature = "zenoh")]
     assert!(cloudy.session().is_none());
     {
@@ -222,11 +226,8 @@ async fn managed_engine_cannot_be_reopened_standalone_or_used_by_old_builders() 
     standalone.domain = DOMAIN.into();
     standalone.module_report_path = None;
     standalone.engine = Some(bus.clone());
-    let standalone = Cloudy::open(standalone).await.expect("initial standalone");
-    let builder = standalone.publisher::<Probe>();
+    assert!(Cloudy::open(standalone).await.is_err());
     let managed = consumer(bus.clone()).await;
-    assert!(builder.build().is_err());
-    assert!(standalone.engine().is_err());
     let mut reopening = RuntimeOptions::new("escape");
     reopening.domain = DOMAIN.into();
     reopening.engine = Some(bus.clone());

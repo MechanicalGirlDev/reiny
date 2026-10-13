@@ -10,10 +10,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
+use reiny::bindings::PortKind;
 use reiny::zenoh::Wait;
 use reiny::zenoh::query::ConsolidationMode;
 
-use crate::bus::{BusArgs, KEY_ROOT, KeyParts, SERVICE_CHUNK, alive_keys, collect_schemas_all};
+use crate::bus::{
+    BusArgs, KEY_ROOT, KeyParts, SERVICE_CHUNK, alive_keys, attachment_u64, collect_schemas_all,
+    input_keys, ready_inputs, stream_report, topic_type, verify_fingerprint,
+};
 use crate::codec::Codec;
 
 #[derive(Args)]
@@ -35,11 +39,12 @@ enum ServiceCommand {
 
 #[derive(Args)]
 struct CallArgs {
-    /// The request type's name (the key's type segment, e.g. `CalibrationCommand`).
+    /// The declared uses endpoint name.
+    #[arg(value_name = "USES")]
     ty: String,
     /// The request as JSON (the proto3 JSON mapping; `{}` when omitted).
     json: Option<String>,
-    /// Fire at this launch id's server (default: any server in the domain, first reply wins).
+    /// Require this server identity (it must match the uses endpoint's wired source).
     #[arg(long)]
     to: Option<String>,
     /// How many seconds to wait for the reply.
@@ -118,12 +123,24 @@ fn list(bus: &BusArgs) -> Result<()> {
 }
 
 fn call(args: &CallArgs) -> Result<()> {
-    let (session, domain) = args.bus.open()?;
-    let to = args.to.as_deref().unwrap_or("**");
-    let key = format!("{KEY_ROOT}/{domain}/{to}/{}", args.ty);
+    let bindings = args.bus.bindings()?;
+    anyhow::ensure!(
+        bindings.inputs.len() == 1 && bindings.outputs.is_empty(),
+        "service call requires a contract containing only its named uses endpoint"
+    );
+    let domain = args.bus.runtime_options("reiny-cli").domain;
+    let (contract, keys) = input_keys(
+        &bindings,
+        &domain,
+        &args.ty,
+        PortKind::Rpc,
+        args.to.as_deref(),
+    )?;
+    let key = &keys[0];
+    let (session, _) = args.bus.open()?;
 
     // The request / response descriptors come from the `@schema` the server announces.
-    let schemas = collect_schemas_all(&session, &key);
+    let schemas = collect_schemas_all(&session, key);
     let named = schemas.values().next().with_context(|| {
         format!(
             "no server of `{}` describes its schema on the bus (is one running in domain {domain}, \
@@ -131,23 +148,37 @@ fn call(args: &CallArgs) -> Result<()> {
             args.ty
         )
     })?;
-    let (request, response) = split_schemas(&args.ty, named);
+    let (request, response) = split_schemas(topic_type(&contract), named);
     let (req_fqn, req_set) =
         request.with_context(|| format!("@schema of `{}` lacks the request message", args.ty))?;
     let (resp_fqn, resp_set) =
         response.with_context(|| format!("@schema of `{}` lacks the response message", args.ty))?;
+    anyhow::ensure!(
+        *req_fqn == contract.type_name && Some(resp_fqn.as_str()) == contract.response.as_deref(),
+        "service descriptor types do not match the declared uses contract"
+    );
     let req_codec = Codec::from_file_set(req_set, req_fqn)?;
     let resp_codec = Codec::from_file_set(resp_set, resp_fqn)?;
+    let mut report = stream_report(&contract, req_codec.fingerprint);
+    report.response = Some(reiny::bindings::ResponseReport {
+        type_name: resp_fqn.clone(),
+        schema: resp_codec.fingerprint,
+    });
+    let _ready = ready_inputs(
+        &session,
+        &domain,
+        &bindings,
+        BTreeMap::from([(args.ty.clone(), report)]),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )?;
 
     let payload = req_codec.encode_json(args.json.as_deref().unwrap_or("{}"))?;
-    let mut get = session
-        .get(&key)
+    let get = session
+        .get(key)
         .payload(payload)
+        .attachment(req_codec.fingerprint.to_le_bytes().to_vec())
         .timeout(Duration::from_secs_f64(args.timeout))
         .consolidation(ConsolidationMode::None);
-    if let Some(fp) = req_codec.fingerprint {
-        get = get.attachment(fp.to_le_bytes().to_vec());
-    }
     let replies = get.wait().map_err(anyhow::Error::msg).context("get")?;
     let Ok(reply) = replies.recv() else {
         bail!(
@@ -157,7 +188,14 @@ fn call(args: &CallArgs) -> Result<()> {
     };
     match reply.result() {
         Ok(sample) => {
-            println!("{}", resp_codec.decode_json(&sample.payload().to_bytes())?);
+            println!(
+                "{}",
+                decode_reply(
+                    &resp_codec,
+                    &sample.payload().to_bytes(),
+                    attachment_u64(sample)
+                )?
+            );
             Ok(())
         }
         Err(e) => bail!(
@@ -167,10 +205,23 @@ fn call(args: &CallArgs) -> Result<()> {
     }
 }
 
+fn decode_reply(codec: &Codec, payload: &[u8], fingerprint: Option<u64>) -> Result<String> {
+    verify_fingerprint(codec.fingerprint, fingerprint)?;
+    codec.decode_json(payload)
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)] // tests may fail by panicking
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_reply_requires_the_response_schema_stamp() {
+        let codec = Codec::from_file_set(&crate::codec::tests::probe_set(), "e2e.Probe").unwrap();
+        assert!(decode_reply(&codec, &[], None).is_err());
+        assert!(decode_reply(&codec, &[], Some(codec.fingerprint ^ 1)).is_err());
+        assert!(decode_reply(&codec, &[], Some(codec.fingerprint)).is_ok());
+    }
 
     fn named(fqns: &[&str]) -> Vec<Named> {
         fqns.iter().map(|f| ((*f).to_string(), vec![])).collect()

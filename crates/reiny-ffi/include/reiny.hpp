@@ -100,36 +100,22 @@ class Session : public Handle {
 public:
     using Handle::Handle;
     static Session open(const std::string& id, const std::string& domain,
-                        const std::optional<std::string>& config = std::nullopt) {
+                        const std::optional<std::string>& config, const std::string& module_bindings_path) {
         reiny_handle out = 0;
-        check(reiny_session_open(id.c_str(), domain.c_str(), config ? config->c_str() : nullptr, &out));
+        check(reiny_session_open(id.c_str(), domain.c_str(), config ? config->c_str() : nullptr, module_bindings_path.c_str(), &out));
         return Session(out);
     }
-    Publisher publisher(const std::string& topic, std::optional<uint64_t> schema = std::nullopt) const {
+    Publisher publisher(const std::string& name, const std::string& type_name, uint64_t schema) const {
         reiny_handle out = 0;
-        check(reiny_session_publisher(get(), topic.c_str(), schema.has_value(), schema.value_or(0), &out));
+        check(reiny_session_publisher(get(), name.c_str(), type_name.c_str(), schema, &out));
         return Publisher(out);
     }
-    Subscription subscriber(const std::string& topic,
-                            const std::optional<std::string>& source = std::nullopt) const {
+    Subscription subscriber(const std::string& name, const std::string& type_name, uint64_t schema) const {
         reiny_handle out = 0;
-        check(reiny_session_subscriber(get(), topic.c_str(), source ? source->c_str() : nullptr, &out));
+        check(reiny_session_subscriber(get(), name.c_str(), type_name.c_str(), schema, &out));
         return Subscription(out);
     }
-    std::vector<std::string> publishers(const std::string& topic, uint64_t timeout_ms) const {
-        reiny_handle out = 0;
-        check(reiny_session_publishers(get(), topic.c_str(), timeout_ms, &out));
-        Handle list(out);
-        size_t size = 0;
-        check(reiny_list_len(list.get(), &size));
-        std::vector<std::string> values;
-        for (size_t index = 0; index < size; ++index) {
-            reiny_handle item = 0;
-            check(reiny_list_get(list.get(), index, &item));
-            values.push_back(Buffer(item).text());
-        }
-        return values;
-    }
+    void ready() const { check(reiny_session_ready(get())); }
     void shutdown() const { check(reiny_session_shutdown(get())); }
 };
 
@@ -140,9 +126,9 @@ public:
         check(reiny_local_bus_new(&out));
         Handle::operator=(Handle(out));
     }
-    Session connect(const std::string& id, const std::string& domain) const {
+    Session connect(const std::string& id, const std::string& domain, const std::string& module_bindings_path) const {
         reiny_handle out = 0;
-        check(reiny_local_bus_connect(get(), id.c_str(), domain.c_str(), &out));
+        check(reiny_local_bus_connect(get(), id.c_str(), domain.c_str(), module_bindings_path.c_str(), &out));
         return Session(out);
     }
 };

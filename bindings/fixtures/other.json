@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "namespace": "other",
+  "endpoint_namespace": "other",
+  "inputs": {},
+  "outputs": {
+    "out": {
+      "contract": {
+        "type": "Binary"
+      }
+    }
+  }
+}

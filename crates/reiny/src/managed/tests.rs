@@ -22,6 +22,7 @@ use crate::{Cloudy, Descriptor, Qos, RuntimeOptions, Topic};
 
 mod bridge;
 mod delegation;
+mod dynamic;
 mod lifecycle;
 mod policy;
 mod ports;

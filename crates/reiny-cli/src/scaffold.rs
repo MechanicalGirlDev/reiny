@@ -1,4 +1,4 @@
-//! Create executable modules and add local schema dependencies in `main.yaml`.
+//! Create executable modules and add local schema dependencies in `schema.yaml`.
 
 use std::path::{Path, PathBuf};
 
@@ -40,6 +40,7 @@ fn scaffold(dir: &Path, publish: Option<&str>, name: Option<&str>) -> Result<()>
         &dir.join("main.yaml"),
         &main_yaml(&proj, bin, publish, dir.join("Cargo.lock").is_file())?,
     )?;
+    write_if_absent(&dir.join("schema.yaml"), &schema_yaml(&proj, publish)?)?;
     write_if_absent(&dir.join("build.rs"), BUILD_RS)?;
     if let Some(ty) = publish {
         std::fs::create_dir_all(dir.join("proto"))?;
@@ -60,8 +61,8 @@ pub(crate) fn add(dep_path: &Path) -> Result<()> {
 }
 
 fn add_in(dir: &Path, dep_path: &Path) -> Result<()> {
-    let manifest = dir.join("main.yaml");
-    let dep_manifest = dir.join(dep_path).join("main.yaml");
+    let manifest = dir.join("schema.yaml");
+    let dep_manifest = dir.join(dep_path).join("schema.yaml");
     let dependency: DepManifest = serde_yaml::from_str(
         &std::fs::read_to_string(&dep_manifest)
             .with_context(|| format!("reading {}", dep_manifest.display()))?,
@@ -95,7 +96,7 @@ fn add_in(dir: &Path, dep_path: &Path) -> Result<()> {
 fn insert_dependency(doc: &mut Value, name: &str, version: &str, path: &str) -> Result<bool> {
     let root = doc
         .as_mapping_mut()
-        .context("main.yaml must be a mapping")?;
+        .context("schema.yaml must be a mapping")?;
     let schema = root
         .entry(Value::from("schema"))
         .or_insert_with(|| Value::Mapping(Mapping::new()))
@@ -182,7 +183,7 @@ fn insert_dep(doc: &mut toml::Table, section: &str, name: &str, value: toml::Val
     Ok(())
 }
 
-const BUILD_RS: &str = "//! main.yaml schema code generation.\nfn main() {\n    reiny_build::compile().expect(\"reiny schema code generation\");\n}\n";
+const BUILD_RS: &str = "//! schema.yaml code generation.\nfn main() {\n    reiny_build::compile().expect(\"reiny schema code generation\");\n}\n";
 
 fn main_yaml(proj: &str, bin: &str, publish: Option<&str>, locked: bool) -> Result<String> {
     let mut doc = Mapping::from_iter([
@@ -209,20 +210,9 @@ fn main_yaml(proj: &str, bin: &str, publish: Option<&str>, locked: bool) -> Resu
     {
         build.insert(Value::from("locked"), Value::from(locked));
     }
-    let mut publications = Mapping::new();
     if let Some(ty) = publish {
         let lower = ty.to_lowercase();
         let message = format!("{lower}.{ty}");
-        publications.insert(
-            Value::from(ty),
-            Value::Mapping(Mapping::from_iter([
-                (
-                    Value::from("proto"),
-                    Value::from(format!("proto/{lower}.proto")),
-                ),
-                (Value::from("message"), Value::from(message.clone())),
-            ])),
-        );
         doc.insert(
             Value::from("out"),
             Value::Mapping(Mapping::from_iter([(
@@ -232,6 +222,25 @@ fn main_yaml(proj: &str, bin: &str, publish: Option<&str>, locked: bool) -> Resu
                     Value::from(message),
                 )])),
             )])),
+        );
+    }
+    Ok(serde_yaml::to_string(&doc)?)
+}
+
+fn schema_yaml(proj: &str, publish: Option<&str>) -> Result<String> {
+    let mut doc = Mapping::from_iter([(Value::from("version"), Value::from(2))]);
+    let mut publications = Mapping::new();
+    if let Some(ty) = publish {
+        let lower = ty.to_lowercase();
+        publications.insert(
+            Value::from(ty),
+            Value::Mapping(Mapping::from_iter([
+                (
+                    Value::from("proto"),
+                    Value::from(format!("proto/{lower}.proto")),
+                ),
+                (Value::from("message"), Value::from(format!("{lower}.{ty}"))),
+            ])),
         );
     }
     doc.insert(
@@ -406,7 +415,9 @@ mod tests {
         assert_eq!(module.outputs["ping"].type_name, "ping.Ping");
         assert!(!module.build.unwrap().locked);
         assert_eq!(module.run.unwrap().bin, "demo");
-        let schema = module.schema.unwrap();
+        let catalog: Value =
+            serde_yaml::from_str(&schema_yaml("demo", Some("Ping")).unwrap()).unwrap();
+        let schema = &catalog["schema"];
         assert_eq!(schema["publications"]["Ping"]["message"], "ping.Ping");
     }
 

@@ -10,8 +10,12 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use clap::Args;
+use reiny::bindings::{
+    CONTRACT_VERSION, EndpointContract, ModuleBindings, ModuleReport, PortKind, PortReport,
+    QosProfile, ReceiveBuffer, Replay, Retention,
+};
 use reiny::zenoh::{self, Wait};
 use reiny::{RuntimeOptions, ZenohSource};
 
@@ -25,26 +29,70 @@ pub(crate) const LAUNCH_CHUNK: &str = "@launch";
 /// The fabric arguments, spelled as a launch spells them. Shared by every subcommand.
 #[derive(Args, Clone)]
 pub(crate) struct BusArgs {
+    /// Runtime identity supplied by the deployment owner.
+    #[arg(long = "id", alias = "name", global = true)]
+    pub(crate) runtime_id: Option<String>,
+    /// Application configuration supplied by the deployment owner.
+    #[arg(long, global = true)]
+    pub(crate) config: Option<PathBuf>,
+    /// Prepared named endpoint contract resolved from main.yaml.
+    #[arg(long, global = true)]
+    pub(crate) module_bindings: Option<PathBuf>,
     /// The logical namespace (default: `--domain` > `REINY_DOMAIN` > "default").
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub(crate) domain: Option<String>,
     /// A zenoh configuration file (JSON5 / JSON / YAML).
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub(crate) zenoh_config: Option<PathBuf>,
     /// An endpoint to connect to (repeatable, e.g. `tcp/127.0.0.1:7447`).
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub(crate) connect: Vec<String>,
     /// zenoh's mode (`peer` / `client` / `router`).
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub(crate) zenoh_mode: Option<String>,
 }
 
 impl BusArgs {
+    pub(crate) fn context(
+        &self,
+        session: zenoh::Session,
+        bindings: ModuleBindings,
+    ) -> Result<(tokio::runtime::Runtime, std::sync::Arc<reiny::Cloudy>)> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        let mut options = self.runtime_options(&bindings.namespace);
+        options.module_bindings = Some(bindings);
+        options.engine = Some(std::sync::Arc::new(reiny::engine::Zenoh::from_session(
+            session,
+        )));
+        let cloudy = runtime.block_on(reiny::Cloudy::open(options))?;
+        Ok((runtime, std::sync::Arc::new(cloudy)))
+    }
+
+    /// Data commands never open a session before validating their complete prepared contract.
+    pub(crate) fn bindings(&self) -> Result<ModuleBindings> {
+        let path = self.module_bindings.as_ref().context(
+            "data operations require --module-bindings (a prepared main.yaml endpoint contract)",
+        )?;
+        let bindings: ModuleBindings = serde_json::from_slice(
+            &std::fs::read(path).with_context(|| format!("reading {}", path.display()))?,
+        )
+        .with_context(|| format!("parsing {}", path.display()))?;
+        validate_bindings(&bindings, &self.runtime_options("reiny-cli").domain)?;
+        ensure!(
+            self.runtime_id
+                .as_deref()
+                .is_none_or(|id| id == bindings.namespace),
+            "--id must match the bindings namespace"
+        );
+        Ok(bindings)
+    }
+
     /// Map the fabric arguments onto the same `RuntimeOptions` a launch uses (so the defaults,
     /// `REINY_DOMAIN` and the json5-ification of `--connect` all take a launch's path). tracing is off:
     pub(crate) fn runtime_options(&self, id: &str) -> RuntimeOptions {
         let mut opts = RuntimeOptions::new(id);
         opts.install_tracing = false;
+        opts.config_path.clone_from(&self.config);
         if let Some(d) = &self.domain {
             opts.domain.clone_from(d);
         }
@@ -77,6 +125,370 @@ impl BusArgs {
             .map_err(anyhow::Error::msg)
             .context("opening zenoh session")?;
         Ok((session, opts.domain))
+    }
+}
+
+/// Direct dynamic inputs/callers report only ports actually validated and opened by this command.
+pub(crate) fn ready_inputs(
+    session: &zenoh::Session,
+    domain: &str,
+    bindings: &ModuleBindings,
+    inputs: BTreeMap<String, PortReport>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(
+    zenoh::liveliness::LivelinessToken,
+    zenoh::query::Queryable<()>,
+)> {
+    ensure!(
+        bindings.outputs.is_empty() && inputs.len() == bindings.inputs.len(),
+        "CLI command must implement every endpoint in its prepared contract"
+    );
+    for (name, report) in &inputs {
+        ensure!(
+            bindings
+                .inputs
+                .get(name)
+                .is_some_and(|input| input.contract == report.contract),
+            "runtime report differs from endpoint contract"
+        );
+    }
+    let report = ModuleReport {
+        version: CONTRACT_VERSION,
+        namespace: bindings.namespace.clone(),
+        inputs,
+        outputs: BTreeMap::new(),
+    };
+    if let Some(path) = std::env::var_os("REINY_MODULE_REPORT") {
+        let path = PathBuf::from(path);
+        ensure!(
+            path.is_absolute(),
+            "REINY_MODULE_REPORT requires an absolute path"
+        );
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::write(&temporary, serde_json::to_vec(&report)?)?;
+        std::fs::rename(temporary, path)?;
+    }
+    let stop_key = format!(
+        "{KEY_ROOT}/{domain}/{}/{}",
+        bindings.namespace,
+        reiny::engine::STOP_CHUNK
+    );
+    let reply_key = stop_key.clone();
+    let control = session
+        .declare_queryable(stop_key)
+        .callback(move |query| {
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = query.reply(reply_key.clone(), b"ack".to_vec()).wait();
+        })
+        .wait()
+        .map_err(anyhow::Error::msg)?;
+    let token = session
+        .liveliness()
+        .declare_token(format!(
+            "{KEY_ROOT}/{domain}/{}/{}",
+            bindings.namespace,
+            reiny::engine::READY_CHUNK,
+        ))
+        .wait()
+        .map_err(anyhow::Error::msg)?;
+    Ok((token, control))
+}
+
+pub(crate) fn stream_report(contract: &EndpointContract, schema: u64) -> PortReport {
+    PortReport {
+        type_name: contract.type_name.clone(),
+        schema,
+        contract: contract.clone(),
+        response: None,
+    }
+}
+
+fn segment(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains(['/', '*', '?', '#', '$', '@'])
+        && !value.contains(char::is_whitespace)
+}
+
+fn namespace(value: &str) -> bool {
+    value
+        .split('/')
+        .all(|part| segment(part) && !matches!(part, "." | ".."))
+}
+
+fn type_name(value: &str) -> bool {
+    value.split('.').all(|part| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    })
+}
+
+pub(crate) fn validate_bindings(bindings: &ModuleBindings, domain: &str) -> Result<()> {
+    ensure!(segment(domain), "data domain must be one exact key segment");
+    ensure!(
+        bindings.version == CONTRACT_VERSION,
+        "unsupported module bindings version"
+    );
+    ensure!(
+        namespace(&bindings.namespace) && namespace(&bindings.endpoint_namespace),
+        "invalid module bindings identity"
+    );
+    ensure!(
+        (bindings.namespace == bindings.endpoint_namespace
+            || bindings
+                .namespace
+                .strip_prefix(&format!("{}/owned/", bindings.endpoint_namespace))
+                .is_some_and(|child| !child.is_empty() && !child.contains('/')))
+            && bindings.children.is_empty(),
+        "CLI bindings must identify their own namespace or a declared owned child without child delegations"
+    );
+    let mut addresses = BTreeMap::new();
+    let mut output_types = std::collections::BTreeSet::new();
+    for (name, contract, sources, input) in bindings
+        .inputs
+        .iter()
+        .map(|(name, port)| (name, &port.contract, port.sources.as_slice(), true))
+        .chain(
+            bindings
+                .outputs
+                .iter()
+                .map(|(name, port)| (name, &port.contract, &[][..], false)),
+        )
+    {
+        validate_endpoint_contract(name, contract, sources.len(), input)?;
+        ensure!(
+            !input || !sources.is_empty(),
+            "input endpoint {name} requires exact sources"
+        );
+        ensure!(
+            sources.iter().all(|source| namespace(source)),
+            "endpoint {name} has a wildcard or invalid source"
+        );
+        let unique: std::collections::BTreeSet<_> = sources.iter().collect();
+        ensure!(
+            unique.len() == sources.len(),
+            "endpoint {name} has duplicate sources"
+        );
+        if !input {
+            ensure!(
+                output_types.insert(&contract.type_name),
+                "duplicate output type in module bindings"
+            );
+        }
+        let sources = if input {
+            sources
+        } else {
+            std::slice::from_ref(&bindings.endpoint_namespace)
+        };
+        for source in sources {
+            let address = (source, topic_type(contract), contract.kind == PortKind::Rpc);
+            if let Some(previous) = addresses.insert(address, &contract.type_name) {
+                ensure!(
+                    previous == &contract.type_name,
+                    "endpoint types collide on one wire address"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_endpoint_contract(
+    name: &str,
+    contract: &EndpointContract,
+    source_count: usize,
+    input: bool,
+) -> Result<()> {
+    ensure!(segment(name), "invalid endpoint name {name:?}");
+    ensure!(
+        type_name(&contract.type_name),
+        "invalid type for endpoint {name}"
+    );
+    ensure!(
+        !matches!(contract.buffer, ReceiveBuffer::Latest(0)),
+        "zero buffer for endpoint {name}"
+    );
+    ensure!(
+        !input
+            || (contract.retention == Retention::Volatile && contract.qos == QosProfile::Reliable),
+        "qos and retention belong to outputs"
+    );
+    ensure!(
+        input || (contract.replay == Replay::Live && contract.buffer == ReceiveBuffer::Fifo),
+        "replay and buffer belong to inputs"
+    );
+    match contract.kind {
+        PortKind::Stream => ensure!(
+            contract.response.is_none(),
+            "stream endpoint {name} has a response"
+        ),
+        PortKind::Rpc => {
+            ensure!(
+                contract.response.as_deref().is_some_and(type_name),
+                "RPC endpoint {name} requires a valid response type"
+            );
+            ensure!(
+                !input || source_count == 1,
+                "uses endpoint {name} requires exactly one source"
+            );
+            ensure!(
+                contract.retention == Retention::Volatile
+                    && contract.replay == Replay::Live
+                    && contract.buffer == ReceiveBuffer::Fifo
+                    && contract.qos == QosProfile::Reliable,
+                "stream policy does not apply to RPC endpoints"
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn topic_type(contract: &EndpointContract) -> &str {
+    contract
+        .type_name
+        .rsplit('.')
+        .next()
+        .unwrap_or(&contract.type_name)
+}
+
+pub(crate) fn contract_schema(
+    session: &zenoh::Session,
+    key: &str,
+    contract: &EndpointContract,
+) -> Result<(String, Vec<u8>)> {
+    let (fqn, set) = collect_schemas(session, key)
+        .remove(key)
+        .with_context(|| format!("no descriptor for declared endpoint {key}"))?;
+    ensure!(
+        fqn == contract.type_name,
+        "descriptor type differs from endpoint contract for {key}"
+    );
+    Ok((fqn, set))
+}
+
+pub(crate) fn schema_fingerprint(set: &[u8], fqn: &str) -> Result<u64> {
+    reiny_build::message_fingerprint(set, fqn)?
+        .with_context(|| format!("descriptor set lacks the schema fingerprint for {fqn}"))
+}
+
+pub(crate) fn verify_fingerprint(expected: u64, received: Option<u64>) -> Result<()> {
+    ensure!(
+        received == Some(expected),
+        "missing or mismatched schema fingerprint"
+    );
+    Ok(())
+}
+
+pub(crate) fn input_policy(contract: &EndpointContract, snapshot: bool) -> Result<()> {
+    ensure!(
+        contract.buffer == ReceiveBuffer::Fifo,
+        "CLI input requires fifo buffering; latest buffering is unsupported"
+    );
+    ensure!(
+        snapshot || contract.replay == Replay::Live,
+        "CLI input replay:last is unsupported for this operation"
+    );
+    Ok(())
+}
+
+pub(crate) fn input_keys(
+    bindings: &ModuleBindings,
+    domain: &str,
+    name: &str,
+    kind: PortKind,
+    source: Option<&str>,
+) -> Result<(EndpointContract, Vec<String>)> {
+    let port = bindings
+        .inputs
+        .get(name)
+        .with_context(|| format!("undeclared input/uses endpoint {name:?}"))?;
+    ensure!(
+        port.contract.kind == kind,
+        "wrong operation kind for input endpoint {name}"
+    );
+    ensure!(
+        source.is_none_or(|s| port.sources.iter().any(|declared| declared == s)),
+        "source is not declared for endpoint {name}"
+    );
+    let keys = port
+        .sources
+        .iter()
+        .filter(|s| source.is_none_or(|wanted| wanted == s.as_str()))
+        .map(|source| {
+            let key = reiny::engine::Key::topic(domain, Some(source), topic_type(&port.contract));
+            key.validate()?;
+            Ok(key.to_string())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((port.contract.clone(), keys))
+}
+
+pub(crate) fn output_key(
+    bindings: &ModuleBindings,
+    domain: &str,
+    name: &str,
+    kind: PortKind,
+    source: Option<&str>,
+) -> Result<(EndpointContract, String)> {
+    let port = bindings
+        .outputs
+        .get(name)
+        .with_context(|| format!("undeclared output/provides endpoint {name:?}"))?;
+    ensure!(
+        port.contract.kind == kind,
+        "wrong operation kind for output endpoint {name}"
+    );
+    ensure!(
+        source.is_none_or(|s| s == bindings.endpoint_namespace),
+        "--as must match the contract endpoint namespace"
+    );
+    let key = reiny::engine::Key::topic(
+        domain,
+        Some(&bindings.endpoint_namespace),
+        topic_type(&port.contract),
+    );
+    key.validate()?;
+    Ok((port.contract.clone(), key.to_string()))
+}
+
+/// One receive queue fed only by exact declared source keys, never a domain wildcard.
+pub(crate) struct BoundSubscription {
+    receiver: std::sync::mpsc::Receiver<zenoh::sample::Sample>,
+    _subscribers: Vec<zenoh::pubsub::Subscriber<()>>,
+}
+
+impl BoundSubscription {
+    pub(crate) fn open(session: &zenoh::Session, keys: &[String]) -> Result<Self> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(256);
+        let mut subscribers = Vec::new();
+        for key in keys {
+            let sender = sender.clone();
+            subscribers.push(
+                session
+                    .declare_subscriber(key.clone())
+                    .callback(move |sample| {
+                        let _ = sender.send(sample);
+                    })
+                    .wait()
+                    .map_err(anyhow::Error::msg)?,
+            );
+        }
+        Ok(Self {
+            receiver,
+            _subscribers: subscribers,
+        })
+    }
+
+    pub(crate) fn recv_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<zenoh::sample::Sample>, std::sync::mpsc::RecvTimeoutError> {
+        match self.receiver.recv_timeout(timeout) {
+            Ok(sample) => Ok(Some(sample)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -214,6 +626,113 @@ pub(crate) fn collect_schemas_all(
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_samples_require_the_exact_descriptor_fingerprint() {
+        assert!(verify_fingerprint(42, None).is_err());
+        assert!(verify_fingerprint(42, Some(41)).is_err());
+        verify_fingerprint(42, Some(42)).unwrap();
+        assert!(schema_fingerprint(b"not a descriptor", "test.Probe").is_err());
+    }
+
+    #[test]
+    fn unsupported_input_policies_are_refused_explicitly() {
+        let mut contract = EndpointContract {
+            type_name: "test.Probe".into(),
+            ..Default::default()
+        };
+        input_policy(&contract, false).unwrap();
+        contract.buffer = ReceiveBuffer::Latest(1);
+        assert!(input_policy(&contract, true).is_err());
+        contract.buffer = ReceiveBuffer::Fifo;
+        contract.replay = Replay::Last;
+        assert!(input_policy(&contract, false).is_err());
+        input_policy(&contract, true).unwrap();
+    }
+
+    fn bindings() -> ModuleBindings {
+        serde_yaml::from_str(
+            "version: 2\nnamespace: tools/cli\nendpoint_namespace: tools/cli\ninputs:\n  state:\n    contract: {type: robot.State}\n    sources: [robot/control, robot/simulation]\n  calibrate:\n    contract: {type: robot.Calibrate, kind: rpc, response: robot.Result}\n    sources: [robot/control]\noutputs:\n  command:\n    contract: {type: robot.Command}\n",
+        ).unwrap()
+    }
+
+    #[test]
+    fn named_endpoints_resolve_only_exact_declared_addresses() {
+        let bindings = bindings();
+        validate_bindings(&bindings, "lab").unwrap();
+        let (contract, keys) =
+            input_keys(&bindings, "lab", "state", PortKind::Stream, None).unwrap();
+        assert_eq!(contract.type_name, "robot.State");
+        assert_eq!(
+            keys,
+            [
+                "reiny/lab/robot/control/State",
+                "reiny/lab/robot/simulation/State"
+            ]
+        );
+        let (_, key) = output_key(&bindings, "lab", "command", PortKind::Stream, None).unwrap();
+        assert_eq!(key, "reiny/lab/tools/cli/Command");
+        assert!(input_keys(&bindings, "lab", "State", PortKind::Stream, None).is_err());
+        assert!(input_keys(&bindings, "lab", "state", PortKind::Stream, Some("**")).is_err());
+        assert!(input_keys(&bindings, "lab", "calibrate", PortKind::Stream, None).is_err());
+        assert!(output_key(&bindings, "lab", "state", PortKind::Stream, None).is_err());
+        assert!(output_key(&bindings, "lab", "command", PortKind::Stream, Some("other")).is_err());
+    }
+
+    #[test]
+    fn owned_cli_children_keep_the_declared_host_endpoint_address() {
+        let mut bindings = bindings();
+        bindings.namespace = "tools/cli/owned/inspector".into();
+        validate_bindings(&bindings, "lab").unwrap();
+        let (_, key) = output_key(&bindings, "lab", "command", PortKind::Stream, None).unwrap();
+        assert_eq!(key, "reiny/lab/tools/cli/Command");
+    }
+
+    #[test]
+    fn invalid_contracts_are_refused_before_transport_operations() {
+        for change in 0..10 {
+            let mut bindings = bindings();
+            match change {
+                0 => bindings.version = 1,
+                1 => bindings.endpoint_namespace = "other".into(),
+                2 => bindings.inputs.get_mut("state").unwrap().sources = vec!["**".into()],
+                3 => bindings.inputs.get_mut("state").unwrap().sources.clear(),
+                4 => bindings
+                    .inputs
+                    .get_mut("calibrate")
+                    .unwrap()
+                    .sources
+                    .push("other".into()),
+                5 => {
+                    bindings
+                        .outputs
+                        .get_mut("command")
+                        .unwrap()
+                        .contract
+                        .type_name = "*".into();
+                }
+                6 => bindings.inputs.get_mut("state").unwrap().contract.retention = Retention::Last,
+                7 => {
+                    bindings
+                        .inputs
+                        .get_mut("calibrate")
+                        .unwrap()
+                        .contract
+                        .response = None;
+                }
+                8 => bindings.namespace = "tools/../cli".into(),
+                _ => {
+                    let duplicate = bindings.outputs["command"].clone();
+                    bindings.outputs.insert("duplicate".into(), duplicate);
+                }
+            }
+            assert!(
+                validate_bindings(&bindings, "lab").is_err(),
+                "mutation {change}"
+            );
+        }
+        assert!(validate_bindings(&bindings(), "*").is_err());
+    }
 
     #[test]
     fn key_parts_parse_hierarchical_sources_without_side_chunks() {

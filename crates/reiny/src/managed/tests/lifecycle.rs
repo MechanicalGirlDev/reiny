@@ -1,6 +1,35 @@
 use super::*;
 
 #[tokio::test]
+async fn input_readiness_replays_only_bound_source_modules() {
+    // Given two ready publishers but only one configured source.
+    let bus = Arc::new(Local::new());
+    let source = producer(bus.clone(), SENDER).await;
+    let output = source.output::<Probe>("outgoing").expect("source output");
+    source.ready().expect("source ready");
+    let foreign = producer(bus.clone(), "foreign").await;
+    let _foreign_output = foreign.output::<Probe>("outgoing").expect("foreign output");
+    foreign.ready().expect("foreign ready");
+    let receiver = consumer(bus).await;
+    assert!(receiver.watch_input_ready("undefined").is_err());
+
+    // When an input's readiness watch is registered after its source became ready.
+    let mut ready = receiver.watch_input_ready("incoming").expect("bound watch");
+
+    // Then history and later departure retain exactly the configured namespace.
+    let key = Key::topic(DOMAIN, Some(SENDER), "@ready");
+    assert_eq!(
+        timeout(PATIENCE, ready.recv()).await.expect("history"),
+        Some(Presence::Joined(key.clone()))
+    );
+    drop(output);
+    assert_eq!(
+        timeout(PATIENCE, ready.recv()).await.expect("departure"),
+        Some(Presence::Left(key))
+    );
+}
+
+#[tokio::test]
 async fn readiness_requires_every_declared_port_to_have_a_live_handle() {
     // Given a declared input that has not been opened.
     let bus = Arc::new(Local::new());

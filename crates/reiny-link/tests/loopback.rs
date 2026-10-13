@@ -7,7 +7,9 @@
 use std::time::Duration;
 
 use reiny_link::transport::{Stream, Transport, Udp};
-use reiny_link::{CallError, Host, HostEvent, HostLink, Service, Topic, wire};
+use reiny_link::{
+    CallError, Host, HostEvent, HostLink, PortDirection, PortType, Service, StaticPort, Topic, wire,
+};
 use tokio::time::timeout;
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -47,20 +49,59 @@ impl Service for Add {
     type Response = Sum;
 }
 
+const PORTS: &[StaticPort] = &[
+    StaticPort {
+        name: "state",
+        direction: PortDirection::Output,
+        ty: State::TYPE,
+        schema: State::SCHEMA,
+        response: None,
+    },
+    StaticPort {
+        name: "state",
+        direction: PortDirection::Input,
+        ty: State::TYPE,
+        schema: State::SCHEMA,
+        response: None,
+    },
+    StaticPort {
+        name: "addition",
+        direction: PortDirection::Service,
+        ty: Add::TYPE,
+        schema: Add::SCHEMA,
+        response: Some(PortType {
+            ty: Sum::TYPE,
+            schema: Sum::SCHEMA,
+        }),
+    },
+    StaticPort {
+        name: "addition",
+        direction: PortDirection::Client,
+        ty: Add::TYPE,
+        schema: Add::SCHEMA,
+        response: Some(PortType {
+            ty: Sum::TYPE,
+            schema: Sum::SCHEMA,
+        }),
+    },
+];
+
 const WAIT: Duration = Duration::from_secs(5);
 
 /// Playing the MCU: publishes `State`, serves `Add`.
 fn mcu_link() -> HostLink {
-    let mut l = HostLink::host("mcu").unwrap();
-    l.publishes::<State>().unwrap();
-    l.serves::<Add>().unwrap();
+    let mut l = HostLink::host("mcu", PORTS).unwrap();
+    l.publishes::<State>("state").unwrap();
+    l.serves::<Add>("addition").unwrap();
+    l.calls::<Add>("addition").unwrap();
     l
 }
 
 /// Playing the PC: subscribes to `State`, calls `Add`.
 fn pc_link() -> HostLink {
-    let mut l = HostLink::host("pc").unwrap();
-    l.subscribes::<State>().unwrap();
+    let mut l = HostLink::host("pc", PORTS).unwrap();
+    l.subscribes::<State>("state").unwrap();
+    l.calls::<Add>("addition").unwrap();
     l
 }
 
@@ -98,7 +139,7 @@ async fn exercise<A: Transport + 'static, B: Transport + 'static>(mcu_t: A, pc_t
 
     // Data: MCU → PC.
     for seq in 1..=3u32 {
-        assert_eq!(mcu.send(&State { seq }), Ok(true));
+        assert_eq!(mcu.send("state", &State { seq }), Ok(true));
     }
     for seq in 1..=3u32 {
         let ev = timeout(WAIT, pc.recv()).await.unwrap().unwrap();
@@ -106,7 +147,7 @@ async fn exercise<A: Transport + 'static, B: Transport + 'static>(mcu_t: A, pc_t
     }
     // The PC does not publish State, and the MCU does not subscribe to it.
     assert_eq!(
-        pc.send(&State { seq: 9 }),
+        pc.send("state", &State { seq: 9 }),
         Err(reiny_link::Error::NotDeclared)
     );
 
@@ -124,17 +165,21 @@ async fn exercise<A: Transport + 'static, B: Transport + 'static>(mcu_t: A, pc_t
             if let HostEvent::Request { seq, .. } = &ev {
                 let add = ev.decode::<Add>().unwrap();
                 if add.b < 0 {
-                    mcu.reply_err::<Add>(*seq, "negative").unwrap();
+                    mcu.reply_err::<Add>("addition", *seq, "negative").unwrap();
                 } else {
-                    mcu.reply::<Add>(*seq, &Sum { s: add.a + add.b }).unwrap();
+                    mcu.reply::<Add>("addition", *seq, &Sum { s: add.a + add.b })
+                        .unwrap();
                 }
             }
         }
     };
     let client = async {
-        let sum = pc.call(&Add { a: 2, b: 3 }, WAIT).await.unwrap();
+        let sum = pc
+            .call("addition", &Add { a: 2, b: 3 }, WAIT)
+            .await
+            .unwrap();
         assert_eq!(sum, Sum { s: 5 });
-        match pc.call(&Add { a: 1, b: -1 }, WAIT).await {
+        match pc.call("addition", &Add { a: 1, b: -1 }, WAIT).await {
             Err(CallError::Remote(m)) => assert_eq!(m, "negative"),
             other => panic!("expected Remote, got {other:?}"),
         }
@@ -142,7 +187,7 @@ async fn exercise<A: Transport + 'static, B: Transport + 'static>(mcu_t: A, pc_t
     };
     tokio::join!(server, client);
     // The MCU cannot call Add (the PC does not serve it).
-    match mcu.call(&Add { a: 0, b: 0 }, WAIT).await {
+    match mcu.call("addition", &Add { a: 0, b: 0 }, WAIT).await {
         Err(CallError::NoPeerService) => {}
         other => panic!("expected NoPeerService, got {other:?}"),
     }
@@ -175,7 +220,7 @@ async fn call_times_out_when_the_peer_never_replies() {
 
     let started = std::time::Instant::now();
     match pc
-        .call(&Add { a: 1, b: 2 }, Duration::from_millis(300))
+        .call("addition", &Add { a: 1, b: 2 }, Duration::from_millis(300))
         .await
     {
         Err(CallError::Timeout) => {}
@@ -220,7 +265,7 @@ async fn silence_disconnects_the_host() {
     assert_eq!(pc.peer(), None);
     // Nothing is routable at a peer that is gone.
     match pc
-        .call(&Add { a: 1, b: 1 }, Duration::from_millis(200))
+        .call("addition", &Add { a: 1, b: 1 }, Duration::from_millis(200))
         .await
     {
         Err(CallError::NoPeerService) => {}
@@ -252,7 +297,7 @@ async fn udp_ignores_datagrams_from_other_addresses() {
     }
 
     // Real traffic still arrives, and the link never counted a bad frame.
-    assert_eq!(mcu.send(&State { seq: 42 }), Ok(true));
+    assert_eq!(mcu.send("state", &State { seq: 42 }), Ok(true));
     let ev = timeout(WAIT, pc.recv()).await.unwrap().unwrap();
     assert_eq!(ev.decode::<State>(), Some(State { seq: 42 }), "{ev:?}");
     let stats = pc.link().lock().unwrap().stats();
@@ -266,7 +311,7 @@ async fn stream_eof_closes_host() {
     drop(b);
     // A stream whose peer is gone hits EOF → the driver ends and recv returns None.
     assert_eq!(timeout(WAIT, host.recv()).await.unwrap(), None);
-    match host.call(&Add { a: 0, b: 0 }, WAIT).await {
+    match host.call("addition", &Add { a: 0, b: 0 }, WAIT).await {
         Err(CallError::NoPeerService) => {}
         other => panic!("expected NoPeerService, got {other:?}"),
     }

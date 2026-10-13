@@ -2,9 +2,8 @@
 //! `ros2 topic` / `ros2 node`.
 //!
 //! The way to look at the bus without bringing up a GUI. `list` / `node` only fire liveliness
-//! (presence); `hz` / `bw` take one raw subscription (the same one `reiny bag record` takes) and
-//! aggregate it **per source** — a `*` mixes several publishers together, so the rows are kept apart
-//! rather than summed. The clock is the receiver's `Instant` (zenoh's timestamping is off by default, so nothing depends on it).
+//! (presence); `hz` / `bw` subscribe only to the declared input's exact sources and aggregate them
+//! per source. The clock is the receiver's `Instant` (zenoh's timestamping is off by default).
 //!
 //! `list` counts three roles, one liveliness query each: publishers sit on the type's own key,
 //! subscribers on `…/@sub` and servers on `…/@service`. `echo` and `pub` are the two directions of
@@ -19,11 +18,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
-use reiny::zenoh::{self, Wait};
+use reiny::bindings::PortKind;
+use reiny::zenoh;
 
 use crate::bus::{
-    BusArgs, KEY_ROOT, KeyParts, LAUNCH_CHUNK, SERVICE_CHUNK, SUB_CHUNK, alive_keys,
-    attachment_u64, collect_schemas, key_source,
+    BoundSubscription, BusArgs, KEY_ROOT, KeyParts, LAUNCH_CHUNK, SERVICE_CHUNK, SUB_CHUNK,
+    alive_keys, attachment_u64, collect_schemas, contract_schema, input_keys, input_policy,
+    key_source, output_key, ready_inputs, schema_fingerprint, stream_report, topic_type,
+    verify_fingerprint,
 };
 use crate::codec::{Codec, hex};
 
@@ -53,13 +55,14 @@ enum TopicCommand {
 
 #[derive(Args)]
 struct PubArgs {
-    /// The type name (the key's type segment, e.g. `Command`).
+    /// The declared output endpoint name.
+    #[arg(value_name = "OUTPUT")]
     ty: String,
     /// The message as JSON (the proto3 JSON mapping; `{}` when omitted).
     json: Option<String>,
     /// The source id to announce (the key's `<id>` segment).
-    #[arg(long = "as", default_value = "reiny-cli")]
-    as_id: String,
+    #[arg(long = "as")]
+    as_id: Option<String>,
     /// Send this many times per second (by default it sends once and stops; without `--count`, until Ctrl+C).
     #[arg(long)]
     rate: Option<f64>,
@@ -72,7 +75,8 @@ struct PubArgs {
 
 #[derive(Args)]
 struct EchoArgs {
-    /// The type name (the key's type segment, e.g. `RobotState`).
+    /// The declared input endpoint name.
+    #[arg(value_name = "INPUT")]
     ty: String,
     /// Only what comes from this launch id.
     #[arg(long)]
@@ -98,9 +102,10 @@ struct ListArgs {
 
 #[derive(Args)]
 struct RateArgs {
-    /// The type name (the key's type segment, e.g. `RobotState`).
+    /// The declared input endpoint name.
+    #[arg(value_name = "INPUT")]
     ty: String,
-    /// Count only what comes from this launch id (default: every publisher, aggregated per source).
+    /// Count only this declared source (default: all wired sources, aggregated separately).
     #[arg(long)]
     from: Option<String>,
     /// The statistics window (in seconds).
@@ -123,30 +128,34 @@ pub(crate) fn run_topic(args: TopicArgs) -> Result<()> {
     }
 }
 
-/// `reiny topic pub <TYPE> [JSON]` — the publishing side of `reiny service call`.
+/// `reiny topic pub <OUTPUT> [JSON]` — publish through a declared output.
 ///
 /// The descriptor comes off the bus (`@schema`), and **a subscriber announces it too**, so a launch
 /// that only listens — the usual target during bring-up, when its real publisher is exactly the thing
 /// not running yet — can still be poked.
 fn publish(args: &PubArgs) -> Result<()> {
-    if args.as_id.is_empty()
-        || args.as_id.contains(['/', '*', '?', '#', '$', '@'])
-        || args.as_id.contains(char::is_whitespace)
-    {
-        bail!(
-            "--as '{}' must be a single key segment (no '/', '*', '?', '#', '$', '@' or whitespace)",
-            args.as_id
-        );
-    }
     if args.rate.is_some_and(|r| r <= 0.0) {
         bail!("--rate must be positive");
     }
-    let (session, domain) = args.bus.open()?;
+    let bindings = args.bus.bindings()?;
+    anyhow::ensure!(
+        bindings.inputs.is_empty() && bindings.outputs.len() == 1,
+        "topic pub requires a contract containing only its named output"
+    );
+    let domain = args.bus.runtime_options("reiny-cli").domain;
+    let (contract, key) = output_key(
+        &bindings,
+        &domain,
+        &args.ty,
+        PortKind::Stream,
+        args.as_id.as_deref(),
+    )?;
+    let (session, _) = args.bus.open()?;
 
-    let pattern = format!("{KEY_ROOT}/{domain}/**/{}", args.ty);
+    let pattern = format!("{KEY_ROOT}/{domain}/**/{}", topic_type(&contract));
     let (fqn, file_set) = collect_schemas(&session, &pattern)
         .into_values()
-        .next()
+        .find(|(fqn, _)| *fqn == contract.type_name)
         .with_context(|| {
             format!(
                 "nothing on the bus describes `{}` (is a launch that publishes or subscribes to it \
@@ -157,26 +166,19 @@ fn publish(args: &PubArgs) -> Result<()> {
     let codec = Codec::from_file_set(&file_set, &fqn)?;
     let payload = codec.encode_json(args.json.as_deref().unwrap_or("{}"))?;
 
-    // Our own key, not the one we read the schema from: `topic pub` speaks as itself. Two sources
-    // publishing one type is ordinary in reiny, so unlike `bag play` there is nothing to refuse here.
-    let key = format!("{KEY_ROOT}/{domain}/{}/{}", args.as_id, args.ty);
-    let publisher = session
-        .declare_publisher(key.clone())
-        // A one-shot CLI exits after put; do not leave its sample in a transport batch.
-        .express(true)
-        .wait()
-        .map_err(anyhow::Error::msg)
-        .with_context(|| format!("declaring publisher {key}"))?;
-    // reiny's invariant: a publisher always carries a liveliness token, so `topic list` / `node list`
-    // show this one for as long as it runs.
-    let _token = session
-        .liveliness()
-        .declare_token(key.clone())
-        .wait()
-        .map_err(anyhow::Error::msg)
-        .context("declaring liveliness token")?;
+    let (runtime, cloudy) = args.bus.context(session, bindings)?;
+    let publisher = cloudy.raw_output(&args.ty, &fqn, codec.fingerprint)?;
+    cloudy.ready()?;
 
     let stop = Arc::new(AtomicBool::new(false));
+    {
+        let cloudy = Arc::clone(&cloudy);
+        let stop = Arc::clone(&stop);
+        runtime.spawn(async move {
+            cloudy.shutdown().await;
+            stop.store(true, Ordering::SeqCst);
+        });
+    }
     {
         let stop = Arc::clone(&stop);
         ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst))
@@ -193,12 +195,8 @@ fn publish(args: &PubArgs) -> Result<()> {
     let mut sent = 0usize;
     let mut next = Instant::now();
     while !stop.load(Ordering::SeqCst) && (limit == 0 || sent < limit) {
-        let mut put = publisher.put(payload.clone());
-        if let Some(fp) = codec.fingerprint {
-            put = put.attachment(fp.to_le_bytes().to_vec());
-        }
-        put.wait()
-            .map_err(anyhow::Error::msg)
+        publisher
+            .send(payload.clone())
             .with_context(|| format!("publishing to {key}"))?;
         sent += 1;
         if limit != 0 && sent >= limit {
@@ -219,19 +217,46 @@ fn publish(args: &PubArgs) -> Result<()> {
 }
 
 fn echo(args: &EchoArgs) -> Result<()> {
-    let (session, domain) = args.bus.open()?;
-    let pattern = format!(
-        "{KEY_ROOT}/{domain}/{}/{}",
-        args.from.as_deref().unwrap_or("**"),
-        args.ty
+    let bindings = args.bus.bindings()?;
+    anyhow::ensure!(
+        bindings.inputs.len() == 1 && bindings.outputs.is_empty(),
+        "topic echo requires a contract containing only its named input"
     );
-    let subscriber = session
-        .declare_subscriber(&pattern)
-        .wait()
-        .map_err(anyhow::Error::msg)
-        .with_context(|| format!("declaring subscriber {pattern}"))?;
+    let domain = args.bus.runtime_options("reiny-cli").domain;
+    let (contract, keys) = input_keys(
+        &bindings,
+        &domain,
+        &args.ty,
+        PortKind::Stream,
+        args.from.as_deref(),
+    )?;
+    input_policy(&contract, false)?;
+    let (_, all_keys) = input_keys(&bindings, &domain, &args.ty, PortKind::Stream, None)?;
+    let (session, _) = args.bus.open()?;
+    let mut codecs = BTreeMap::new();
+    for key in &all_keys {
+        let (fqn, set) = contract_schema(&session, key, &contract)?;
+        codecs.insert(key.clone(), Codec::from_file_set(&set, &fqn)?);
+    }
+    let subscriber = BoundSubscription::open(&session, &all_keys)?;
 
     let stop = Arc::new(AtomicBool::new(false));
+    let expected = codecs
+        .values()
+        .next()
+        .context("input requires a source")?
+        .fingerprint;
+    anyhow::ensure!(
+        codecs.values().all(|codec| codec.fingerprint == expected),
+        "declared input sources disagree on schema fingerprint"
+    );
+    let _ready = ready_inputs(
+        &session,
+        &domain,
+        &bindings,
+        BTreeMap::from([(args.ty.clone(), stream_report(&contract, expected))]),
+        Arc::clone(&stop),
+    )?;
     {
         let stop = Arc::clone(&stop);
         ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst))
@@ -241,29 +266,6 @@ fn echo(args: &EchoArgs) -> Result<()> {
         .duration
         .map(|s| Instant::now() + Duration::from_secs_f64(s));
 
-    // key → decoder. A publisher that announces no descriptor is None (printed as hex, with one note about it).
-    // A publisher joining later fires `@schema` again on its first unseen key.
-    let mut codecs: BTreeMap<String, Option<Codec>> = BTreeMap::new();
-    let fetch = |key: &str, codecs: &mut BTreeMap<String, Option<Codec>>| {
-        if !args.raw && !codecs.contains_key(key) {
-            let found = collect_schemas(&session, key)
-                .remove(key)
-                .and_then(|(fqn, set)| match Codec::from_file_set(&set, &fqn) {
-                    Ok(c) => Some(c),
-                    Err(e) => {
-                        tracing::warn!(key, error = %e, "unusable @schema; showing hex");
-                        None
-                    }
-                });
-            if found.is_none() {
-                eprintln!(
-                    "{key}: publisher does not describe its type on the bus (no DESCRIPTOR); showing hex"
-                );
-            }
-            codecs.insert(key.to_string(), found);
-        }
-    };
-    let mut warned_fp: BTreeSet<String> = BTreeSet::new();
     let mut shown = 0usize;
     while !stop.load(Ordering::SeqCst) {
         if deadline.is_some_and(|d| Instant::now() >= d) {
@@ -278,30 +280,15 @@ fn echo(args: &EchoArgs) -> Result<()> {
                     continue;
                 }
                 let key = sample.key_expr().as_str().to_string();
+                if !keys.contains(&key) {
+                    continue;
+                }
                 let source = key_source(&key).to_string();
                 let payload = sample.payload().to_bytes();
-                fetch(&key, &mut codecs);
-                let text = match codecs.get(&key).and_then(Option::as_ref) {
-                    Some(codec) => {
-                        if let (Some(mine), Some(theirs)) =
-                            (codec.fingerprint, attachment_u64(&sample))
-                            && mine != theirs
-                            && warned_fp.insert(source.clone())
-                        {
-                            tracing::warn!(
-                                source,
-                                expected = format!("{mine:016x}"),
-                                received = format!("{theirs:016x}"),
-                                "schema fingerprint differs from the @schema descriptor; a typed subscriber would drop this"
-                            );
-                        }
-                        codec.decode_json(&payload).unwrap_or_else(|e| {
-                            tracing::warn!(source, error = %e, "undecodable payload; showing hex");
-                            hex(&payload)
-                        })
-                    }
-                    None => hex(&payload),
-                };
+                let codec = codecs
+                    .get(&key)
+                    .context("sample came from an undeclared source")?;
+                let text = echo_text(codec, &payload, attachment_u64(&sample), args.raw)?;
                 println!("{source}  {text}");
                 shown += 1;
             }
@@ -310,6 +297,15 @@ fn echo(args: &EchoArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn echo_text(codec: &Codec, payload: &[u8], fingerprint: Option<u64>, raw: bool) -> Result<String> {
+    verify_fingerprint(codec.fingerprint, fingerprint)?;
+    if raw {
+        Ok(hex(payload))
+    } else {
+        codec.decode_json(payload)
+    }
 }
 
 /// One `topic list` row: who publishes, who listens, who serves this type.
@@ -428,19 +424,47 @@ enum Mode {
 }
 
 fn rate(args: &RateArgs, mode: Mode) -> Result<()> {
-    let (session, domain) = args.bus.open()?;
-    let key = format!(
-        "{KEY_ROOT}/{domain}/{}/{}",
-        args.from.as_deref().unwrap_or("**"),
-        args.ty
+    let bindings = args.bus.bindings()?;
+    anyhow::ensure!(
+        bindings.inputs.len() == 1 && bindings.outputs.is_empty(),
+        "topic rate requires a contract containing only its named input"
     );
-    let subscriber = session
-        .declare_subscriber(&key)
-        .wait()
-        .map_err(anyhow::Error::msg)
-        .with_context(|| format!("declaring subscriber {key}"))?;
+    let domain = args.bus.runtime_options("reiny-cli").domain;
+    let (contract, keys) = input_keys(
+        &bindings,
+        &domain,
+        &args.ty,
+        PortKind::Stream,
+        args.from.as_deref(),
+    )?;
+    input_policy(&contract, false)?;
+    let (_, all_keys) = input_keys(&bindings, &domain, &args.ty, PortKind::Stream, None)?;
+    let (session, _) = args.bus.open()?;
+    let mut fingerprints = BTreeMap::new();
+    for key in &all_keys {
+        let (fqn, set) = contract_schema(&session, key, &contract)?;
+        fingerprints.insert(key.clone(), schema_fingerprint(&set, &fqn)?);
+    }
+    let subscriber = BoundSubscription::open(&session, &all_keys)?;
 
     let stop = Arc::new(AtomicBool::new(false));
+    let expected = *fingerprints
+        .values()
+        .next()
+        .context("input requires a source")?;
+    anyhow::ensure!(
+        fingerprints
+            .values()
+            .all(|fingerprint| *fingerprint == expected),
+        "declared input sources disagree on schema fingerprint"
+    );
+    let _ready = ready_inputs(
+        &session,
+        &domain,
+        &bindings,
+        BTreeMap::from([(args.ty.clone(), stream_report(&contract, expected))]),
+        Arc::clone(&stop),
+    )?;
     {
         let stop = Arc::clone(&stop);
         ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst))
@@ -453,7 +477,7 @@ fn rate(args: &RateArgs, mode: Mode) -> Result<()> {
 
     let mut series: BTreeMap<String, Series> = BTreeMap::new();
     let mut last_print = Instant::now();
-    tracing::info!(key = %key, "listening; Ctrl+C to stop");
+    tracing::info!(keys = ?keys, "listening; Ctrl+C to stop");
     while !stop.load(Ordering::SeqCst) {
         if deadline.is_some_and(|d| Instant::now() >= d) {
             break;
@@ -463,6 +487,13 @@ fn rate(args: &RateArgs, mode: Mode) -> Result<()> {
                 if sample.kind() != zenoh::sample::SampleKind::Put {
                     continue;
                 }
+                if !keys.iter().any(|key| key == sample.key_expr().as_str()) {
+                    continue;
+                }
+                let expected = fingerprints
+                    .get(sample.key_expr().as_str())
+                    .context("sample came from an undeclared source")?;
+                verify_fingerprint(*expected, attachment_u64(&sample))?;
                 let source = key_source(sample.key_expr().as_str()).to_string();
                 series.entry(source).or_default().push(
                     Instant::now(),
@@ -727,6 +758,16 @@ fn node_info(id: &str, bus: &BusArgs) -> Result<()> {
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::float_cmp)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_echo_does_not_bypass_schema_validation() {
+        let codec = Codec::from_file_set(&crate::codec::tests::probe_set(), "e2e.Probe").unwrap();
+        for raw in [false, true] {
+            assert!(echo_text(&codec, &[], None, raw).is_err());
+            assert!(echo_text(&codec, &[], Some(codec.fingerprint ^ 1), raw).is_err());
+            assert!(echo_text(&codec, &[], Some(codec.fingerprint), raw).is_ok());
+        }
+    }
 
     #[test]
     fn hz_stats_from_regular_intervals() {

@@ -1,0 +1,9 @@
+version: 2
+in:
+  receive: { type: fixture.State }
+out:
+  transmit: { type: fixture.State }
+uses:
+  calculate: { type: fixture.Request, response: fixture.Response }
+provides:
+  answer: { type: fixture.Request, response: fixture.Response }

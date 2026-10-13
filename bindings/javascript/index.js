@@ -21,11 +21,11 @@ export function loadLibrary(path = process.env.REINY_FFI_LIBRARY) {
     last_error: "const char *reiny_last_error(void)",
     release: "int32_t reiny_release(uint64_t handle)",
     local_bus_new: "int32_t reiny_local_bus_new(_Out_ uint64_t *out)",
-    local_bus_connect: "int32_t reiny_local_bus_connect(uint64_t bus, const char *id, const char *domain, _Out_ uint64_t *out)",
-    session_open: "int32_t reiny_session_open(const char *id, const char *domain, const char *config, _Out_ uint64_t *out)",
-    session_publisher: "int32_t reiny_session_publisher(uint64_t session, const char *topic, uint8_t has, uint64_t schema, _Out_ uint64_t *out)",
-    session_subscriber: "int32_t reiny_session_subscriber(uint64_t session, const char *topic, const char *source, _Out_ uint64_t *out)",
-    session_publishers: "int32_t reiny_session_publishers(uint64_t session, const char *topic, uint64_t timeout, _Out_ uint64_t *out)",
+    local_bus_connect: "int32_t reiny_local_bus_connect(uint64_t bus, const char *id, const char *domain, const char *module_bindings_path, _Out_ uint64_t *out)",
+    session_open: "int32_t reiny_session_open(const char *id, const char *domain, const char *config, const char *module_bindings_path, _Out_ uint64_t *out)",
+    session_publisher: "int32_t reiny_session_publisher(uint64_t session, const char *name, const char *type_name, uint64_t schema, _Out_ uint64_t *out)",
+    session_subscriber: "int32_t reiny_session_subscriber(uint64_t session, const char *name, const char *type_name, uint64_t schema, _Out_ uint64_t *out)",
+    session_ready: "int32_t reiny_session_ready(uint64_t session)",
     session_shutdown: "int32_t reiny_session_shutdown(uint64_t session)",
     publisher_send: "int32_t reiny_publisher_send(uint64_t publisher, const uint8_t *data, size_t size)",
     subscription_receive: "int32_t reiny_subscription_receive(uint64_t subscription, uint64_t timeout, _Out_ uint64_t *out)",
@@ -33,8 +33,6 @@ export function loadLibrary(path = process.env.REINY_FFI_LIBRARY) {
     message_source: "int32_t reiny_message_source(uint64_t message, _Out_ uint64_t *out)",
     message_schema: "int32_t reiny_message_schema(uint64_t message, _Out_ uint8_t *has, _Out_ uint64_t *value)",
     message_timestamp: "int32_t reiny_message_timestamp(uint64_t message, _Out_ uint8_t *has, _Out_ uint64_t *value)",
-    list_len: "int32_t reiny_list_len(uint64_t list, _Out_ size_t *out)",
-    list_get: "int32_t reiny_list_get(uint64_t list, size_t index, _Out_ uint64_t *out)",
     buffer_len: "int32_t reiny_buffer_len(uint64_t buffer, _Out_ size_t *out)",
     buffer_data: "int32_t reiny_buffer_data(uint64_t buffer, _Out_ const uint8_t **out)",
   };
@@ -111,33 +109,26 @@ export class LocalBus extends Resource {
   static new() {
     return new LocalBus(token, output("local_bus_new"));
   }
-  connect(id, domain = "default") {
-    return new Session(token, output("local_bus_connect", this.handle, text(id, "id"), text(domain, "domain")));
+  connect(id, domain, moduleBindingsPath) {
+    return new Session(token, output("local_bus_connect", this.handle, text(id, "id"), text(domain, "domain"), text(moduleBindingsPath, "moduleBindingsPath")));
   }
 }
 
 export class Session extends Resource {
-  static open(id, domain = "default", zenohConfig) {
+  static open(id, domain, zenohConfig, moduleBindingsPath) {
     return new Session(token, output("session_open", text(id, "id"), text(domain, "domain"),
-      zenohConfig === undefined ? null : text(zenohConfig, "zenohConfig")));
+      zenohConfig === undefined ? null : text(zenohConfig, "zenohConfig"), text(moduleBindingsPath, "moduleBindingsPath")));
   }
-  publisher(topic, schema) {
-    return new Publisher(token, output("session_publisher", this.handle, text(topic, "topic"),
-      schema === undefined ? 0 : 1, schema === undefined ? 0n : schemaValue(schema)));
+  publisher(name, typeName, schema) {
+    return new Publisher(token, output("session_publisher", this.handle, text(name, "name"),
+      text(typeName, "typeName"), schemaValue(schema)));
   }
-  subscriber(topic, source) {
-    return new Subscription(token, output("session_subscriber", this.handle, text(topic, "topic"),
-      source === undefined ? null : text(source, "source")));
+  subscriber(name, typeName, schema) {
+    return new Subscription(token, output("session_subscriber", this.handle, text(name, "name"),
+      text(typeName, "typeName"), schemaValue(schema)));
   }
-  publishers(topic, timeoutMs) {
-    const list = output("session_publishers", this.handle, text(topic, "topic"), timeout(timeoutMs));
-    try {
-      const length = Number(output("list_len", list));
-      return Array.from({ length }, (_, index) =>
-        new TextDecoder().decode(buffer(output("list_get", list, index))));
-    } finally {
-      check(native().release(list));
-    }
+  ready() {
+    check(native().session_ready(this.handle));
   }
   shutdown() {
     check(native().session_shutdown(this.handle));

@@ -39,10 +39,10 @@ public sealed class LocalBus : Resource
         return new LocalBus(handle);
     }
 
-    public Session Connect(string id, string domain = "default") => WithHandle(bus =>
+    public Session Connect(string id, string domain, string moduleBindingsPath) => WithHandle(bus =>
     {
         Native.Check(Native.LocalBusConnect(bus, Native.Text(id, nameof(id)),
-            Native.Text(domain, nameof(domain)), out var handle));
+            Native.Text(domain, nameof(domain)), Native.Text(moduleBindingsPath, nameof(moduleBindingsPath)), out var handle));
         return new Session(handle);
     });
 }
@@ -51,42 +51,31 @@ public sealed class Session : Resource
 {
     internal Session(ulong handle) : base(handle) { }
 
-    public static Session Open(string id, string domain = "default", string? zenohConfig = null)
+    public static Session Open(string id, string domain, string? zenohConfig, string moduleBindingsPath)
     {
         Native.Check(Native.SessionOpen(Native.Text(id, nameof(id)), Native.Text(domain, nameof(domain)),
-            zenohConfig is null ? null : Native.Text(zenohConfig, nameof(zenohConfig)), out var handle));
+            zenohConfig is null ? null : Native.Text(zenohConfig, nameof(zenohConfig)), Native.Text(moduleBindingsPath, nameof(moduleBindingsPath)), out var handle));
         return new Session(handle);
     }
 
-    public Publisher Publisher(string topic, ulong? schema = null) => WithHandle(session =>
+    public Publisher Publisher(string name, string typeName, ulong schema) => WithHandle(session =>
     {
-        Native.Check(Native.SessionPublisher(session, Native.Text(topic, nameof(topic)),
-            schema.HasValue ? (byte)1 : (byte)0, schema.GetValueOrDefault(), out var handle));
+        Native.Check(Native.SessionPublisher(session, Native.Text(name, nameof(name)),
+            Native.Text(typeName, nameof(typeName)), schema, out var handle));
         return new Publisher(handle);
     });
 
-    public Subscription Subscriber(string topic, string? source = null) => WithHandle(session =>
+    public Subscription Subscriber(string name, string typeName, ulong schema) => WithHandle(session =>
     {
-        Native.Check(Native.SessionSubscriber(session, Native.Text(topic, nameof(topic)),
-            source is null ? null : Native.Text(source, nameof(source)), out var handle));
+        Native.Check(Native.SessionSubscriber(session, Native.Text(name, nameof(name)),
+            Native.Text(typeName, nameof(typeName)), schema, out var handle));
         return new Subscription(handle);
     });
 
-    public IReadOnlyList<string> Publishers(string topic, ulong timeoutMs) => WithHandle(session =>
+    public void Ready() => WithHandle(session =>
     {
-        Native.Check(Native.SessionPublishers(session, Native.Text(topic, nameof(topic)), timeoutMs, out var list));
-        try
-        {
-            Native.Check(Native.ListLen(list, out var length));
-            var result = new List<string>(checked((int)length));
-            for (nuint index = 0; index < length; index++)
-            {
-                Native.Check(Native.ListGet(list, index, out var buffer));
-                result.Add(Native.StringBuffer(buffer));
-            }
-            return (IReadOnlyList<string>)result;
-        }
-        finally { Native.Check(Native.Release(list)); }
+        Native.Check(Native.SessionReady(session));
+        return 0;
     });
 
     public void Shutdown() => WithHandle(session =>

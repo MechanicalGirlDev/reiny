@@ -1,6 +1,7 @@
 # reiny examples
 
-Every module uses one `main.yaml` for runtime composition and optional build-time schema.
+Runtime modules use `main.yaml` for executable definitions and explicit composition.
+Build-time type catalogs live separately in `schema.yaml`; catalogs grant no communication.
 Rust examples are independent Cargo workspaces with their own locks.
 
 | Example | Focus |
@@ -24,8 +25,8 @@ Communication cycles do not imply startup dependencies.
 
 Applications use `cloudy.input::<T>("port")` and `cloudy.output::<T>("port")`, then
 `cloudy.ready()?`. Types identify payload schemas; named ports identify wiring.
-The `schema` block is build-time only: codegen searches upward for the nearest
-`main.yaml` containing it, skipping runtime-only leaves and ignoring providers.
+Codegen searches upward for the nearest `schema.yaml`. `Cloudy::open` requires
+resolved module bindings from `apply` / `run`; schema catalogs alone cannot open endpoints.
 
 Build and run from the example directory with `cargo build --locked` and
 `reiny run main.yaml`. Start with the ring example, then compare the shared catalogs.

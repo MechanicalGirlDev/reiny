@@ -336,9 +336,6 @@ pub struct ModuleManifest {
     /// Exclusive endpoint subsets implemented by owned child processes.
     #[serde(default)]
     pub owned_children: BTreeMap<String, PortDelegation>,
-    /// Build-time type definitions; never interpreted as runtime actions.
-    #[serde(default)]
-    pub schema: Option<serde_yaml::Value>,
 }
 
 /// A fully resolved executable module.
@@ -818,6 +815,12 @@ fn validate_manifest(
     if manifest.build.is_some() && manifest.run.is_none() {
         return Err(invalid(namespace, "build requires run"));
     }
+    if manifest.run.is_none() && manifest.modules.is_empty() {
+        return Err(invalid(
+            namespace,
+            "module requires run or nonempty modules",
+        ));
+    }
     validate_ports(namespace, &manifest.inputs)?;
     validate_ports(namespace, &manifest.outputs)?;
     for port in manifest.inputs.values() {
@@ -840,23 +843,7 @@ fn validate_manifest(
                     format!("unknown process provider '{}'", run.provider),
                 )
             })?;
-        let mut types = BTreeSet::new();
-        for port in manifest.outputs.values() {
-            validate_contract(namespace, &port.contract(), false)?;
-            if port.from.is_some() {
-                return Err(invalid(
-                    namespace,
-                    "executable outputs cannot forward another module",
-                ));
-            }
-            let segment = port.type_name.rsplit('.').next().unwrap_or(&port.type_name);
-            if !types.insert(segment) {
-                return Err(invalid(
-                    namespace,
-                    format!("multiple independent outputs use transport type '{segment}'"),
-                ));
-            }
-        }
+        validate_executable_outputs(namespace, manifest)?;
     } else {
         for port in manifest.inputs.values() {
             if port.replay != Replay::Live || port.buffer != ReceiveBuffer::Fifo {
@@ -893,6 +880,30 @@ fn validate_manifest(
                     ));
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_executable_outputs(
+    namespace: &str,
+    manifest: &ModuleManifest,
+) -> Result<(), ModuleError> {
+    let mut types = BTreeSet::new();
+    for port in manifest.outputs.values() {
+        validate_contract(namespace, &port.contract(), false)?;
+        if port.from.is_some() {
+            return Err(invalid(
+                namespace,
+                "executable outputs cannot forward another module",
+            ));
+        }
+        let segment = port.type_name.rsplit('.').next().unwrap_or(&port.type_name);
+        if !types.insert(segment) {
+            return Err(invalid(
+                namespace,
+                format!("multiple independent outputs use transport type '{segment}'"),
+            ));
         }
     }
     Ok(())

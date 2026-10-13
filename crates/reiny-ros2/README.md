@@ -13,13 +13,14 @@ use reiny_ros2::ros2_client::{MessageTypeName, ServiceTypeName};
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {
     let ros = reiny_ros2::Ros::new(&cloudy, "reiny_bridge")?;      // ROS_DOMAIN_ID from the environment
     ros.export::<RobotState, JointState, _>(                          // reiny → ROS
-        "/joint_states", MessageTypeName::new("sensor_msgs", "JointState"), Qos::SENSOR,
+        "state", "/joint_states", MessageTypeName::new("sensor_msgs", "JointState"), Qos::SENSOR,
         |s| JointState { /* … */ })?;
     ros.import::<Twist, CmdVel, _>(                                   // ROS → reiny
-        "/cmd_vel", MessageTypeName::new("geometry_msgs", "Twist"), Qos::COMMAND,
+        "cmd", "/cmd_vel", MessageTypeName::new("geometry_msgs", "Twist"), Qos::COMMAND,
         |t| CmdVel { /* … */ })?;
     ros.export_service::<Calibrate, SetBoolReq, SetBoolRes, _, _>(    // ROS clients → a reiny service
-        "/calibrate", &ServiceTypeName::new("std_srvs", "SetBool"), |q| Calibrate { .. }, |r| SetBoolRes { .. })?;
+        "calibrate", "/calibrate", &ServiceTypeName::new("std_srvs", "SetBool"), |q| Calibrate { .. }, |r| SetBoolRes { .. })?;
+    cloudy.ready()?;
     cloudy.shutdown().await;
     Ok(())
 }
@@ -29,8 +30,13 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
   (three lines each, or the `ros2-interfaces-<distro>` crates).
 - `export_auto` / `import_auto` map same-shaped types by proto field name
   through `Topic::DESCRIPTOR` — zero lines when names and types line up.
-- QoS: reliability / durability / history map 1:1 onto DDS; `priority` and
-  `express` are dropped. Imported samples carry the bridge's id as source.
+- Declare each port in YAML: `state` is a stream input, `cmd` a stream output,
+  and `calibrate` an RPC input with an exact service source. The automatic
+  routes also require a port name; `import_service` uses a declared RPC output.
+- Reiny sources, buffering, replay, retention and transport policy come from
+  module bindings. The route's `qos` argument configures ROS only: reliability /
+  durability / history map onto DDS; `priority` and `express` are dropped.
+  Imported samples carry the configured endpoint namespace as source.
 - The ROS distribution is a feature (`jazzy` by default, `humble` … `lyrical`),
   passed through to `ros2-client`.
 

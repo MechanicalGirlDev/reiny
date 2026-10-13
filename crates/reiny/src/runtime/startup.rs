@@ -15,16 +15,11 @@ impl Cloudy {
     pub async fn open(mut opts: RuntimeOptions) -> Result<Self> {
         managed_config::validate_namespace(&opts.id)?;
         validate_segment("--domain", &opts.domain)?;
-        let managed = opts.bindings_requested
-            || opts.module_bindings.is_some()
-            || opts.module_bindings_path.is_some();
-        if managed {
-            anyhow::ensure!(
-                opts.argument_errors.is_empty(),
-                "{}",
-                opts.argument_errors.join("; ")
-            );
-        }
+        anyhow::ensure!(
+            opts.argument_errors.is_empty(),
+            "{}",
+            opts.argument_errors.join("; ")
+        );
         anyhow::ensure!(
             !(opts.module_bindings.is_some() && opts.module_bindings_path.is_some()),
             "supply module bindings either directly or by path, not both"
@@ -37,44 +32,33 @@ impl Cloudy {
                 .map(managed_config::read_bindings)
                 .transpose()?,
         };
-        if let Some(bindings) = &bindings {
-            managed_config::validate_bindings(bindings, &opts.id)?;
-        }
-        anyhow::ensure!(
-            bindings.is_some() || std::env::var_os(MODULE_REPORT_ENV).is_none(),
-            "a deployment-owned process cannot open a standalone context"
-        );
+        let bindings = bindings.ok_or_else(|| {
+            anyhow::anyhow!("module bindings are required; launch through reiny apply/run with explicit YAML ports")
+        })?;
+        managed_config::validate_bindings(&bindings, &opts.id)?;
         if let Some(path) = &opts.module_report_path {
             anyhow::ensure!(
                 path.is_absolute(),
                 "{MODULE_REPORT_ENV} requires an absolute path"
             );
-            anyhow::ensure!(
-                bindings.is_some(),
-                "{MODULE_REPORT_ENV} requires module bindings"
-            );
         }
-        let config = if managed {
-            opts.config_path
-                .as_deref()
-                .map(|path| {
-                    let text = std::fs::read_to_string(path).map_err(|error| {
-                        anyhow::anyhow!("reading --config {}: {error}", path.display())
-                    })?;
-                    parse_config(path, &text)
-                })
-                .transpose()?
-        } else {
-            load_config(opts.config_path.as_deref())
-        };
+        let config = opts
+            .config_path
+            .as_deref()
+            .map(|path| {
+                let text = std::fs::read_to_string(path).map_err(|error| {
+                    anyhow::anyhow!("reading --config {}: {error}", path.display())
+                })?;
+                parse_config(path, &text)
+            })
+            .transpose()?;
         #[cfg(feature = "zenoh")]
-        let child_zenoh_config = if bindings.is_some() && opts.engine.is_none() {
+        let child_zenoh_config = if opts.engine.is_none() {
             Some(crate::managed::child_zenoh_config(opts.zenoh_config()?)?)
         } else {
             None
         };
         let engine = opts.take_engine().await?;
-        crate::managed::check_engine(&engine, bindings.is_some())?;
         tracing::info!(id = %opts.id, domain = %opts.domain, "reiny launch up");
         let mut cloudy = Self::new(
             engine,
@@ -85,32 +69,12 @@ impl Cloudy {
             opts.extra_args,
         )
         .await?;
-        cloudy.configure_module(bindings, opts.module_report_path)?;
+        cloudy.configure_module(Some(bindings), opts.module_report_path)?;
         #[cfg(feature = "zenoh")]
         {
             cloudy.module.child_zenoh_config = child_zenoh_config;
         }
         Ok(cloudy)
-    }
-}
-
-/// Read `--config <path>` and parse it into a TOML table. Unreadable or broken: warn and return `None`
-/// (= use only `[config]`'s defaults).
-fn load_config(path: Option<&Path>) -> Option<toml::Table> {
-    let path = path?;
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "ignoring unreadable --config");
-            return None;
-        }
-    };
-    match parse_config(path, &text) {
-        Ok(table) => Some(table),
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "ignoring unparsable --config");
-            None
-        }
     }
 }
 

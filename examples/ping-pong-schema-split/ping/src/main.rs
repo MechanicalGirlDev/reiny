@@ -8,19 +8,8 @@ use crate::internals::{Ping, Point, Pong};
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {
     let pings = cloudy.output::<Ping>("ping")?;
     let mut pongs = cloudy.input::<Pong>("pong")?;
-    // Arm an exact readiness watch before advertising our own readiness.
-    let (parent, _) = cloudy.id().rsplit_once('/').ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "ping must run inside a namespaced composition",
-        )
-    })?;
-    let pong = format!("{parent}/pong");
-    let mut readiness = cloudy.watch_keys(&reiny::engine::Key::topic(
-        cloudy.domain(),
-        Some(&pong),
-        "@ready",
-    ))?;
+    // Register the bound source readiness watch before announcing local readiness.
+    let mut readiness = cloudy.watch_input_ready("pong")?;
     cloudy.ready()?;
     let ready = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         while let Some(event) = readiness.recv().await {

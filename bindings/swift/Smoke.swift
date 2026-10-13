@@ -1,11 +1,15 @@
 import Foundation
 import Reiny
 
+let fixtures = URL(fileURLWithPath: CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "bindings/fixtures").standardizedFileURL
+func fixture(_ name: String) -> String { fixtures.appendingPathComponent(name + ".json").path }
 let bus = LocalBus()
-let sender = try bus.connect(id: "swift-sender", domain: "smoke")
-let receiver = try bus.connect(id: "swift-receiver", domain: "smoke")
-let publisher = try sender.publisher(topic: "Ping", schema: UInt64.max)
-let subscriber = try receiver.subscriber(topic: "Ping", source: "swift-sender")
+let sender = try bus.connect(id: "sender", domain: "smoke", moduleBindingsPath: fixture("sender"))
+let receiver = try bus.connect(id: "receiver", domain: "smoke", moduleBindingsPath: fixture("receiver"))
+let publisher = try sender.publisher(name: "out", typeName: "Binary", schema: 42)
+let subscriber = try receiver.subscriber(name: "in", typeName: "Binary", schema: 42)
+try sender.ready()
+try receiver.ready()
 let payload = Data([10, 4, 0, 1, 255, 0])
 
 try publisher.send(payload: payload)
@@ -13,10 +17,8 @@ guard let message = try subscriber.receive(timeoutMs: 1000) else {
     fatalError("No message received")
 }
 precondition(message.payload == payload)
-precondition(message.source == "swift-sender")
-precondition(message.schema == UInt64.max)
-let publishers = try receiver.publishers(topic: "Ping", timeoutMs: 1000)
-precondition(publishers == ["swift-sender"])
+precondition(message.source == "sender")
+precondition(message.schema == 42)
 receiver.shutdown()
 let afterShutdown = try subscriber.receive(timeoutMs: 1000)
 precondition(afterShutdown == nil)

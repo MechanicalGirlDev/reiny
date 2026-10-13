@@ -1,9 +1,23 @@
 //! The reiny SDK.
 //!
-//! The type vocabulary is generated from `main.yaml`'s `schema` block by `reiny-build` and
-//! embedded through [`Topic`]. Managed modules use named [`Cloudy::input`] and
-//! [`Cloudy::output`] ports resolved by the deployment; standalone code can address types
-//! directly. User code does not construct transport topic strings.
+//! Type definitions are generated from `schema.yaml` by `reiny-build`. Communication is
+//! authorized separately by runtime YAML ports. Launch through `reiny apply/run` and use
+//! named [`Cloudy::input`], [`Cloudy::output`], [`Cloudy::uses`] and [`Cloudy::provides`].
+//! Type definitions alone grant no communication permission.
+//!
+//! Unnamed communication and transport escape hatches are not application APIs:
+//!
+//! ```compile_fail
+//! fn bypass(cloudy: &reiny::Cloudy) {
+//!     let _ = cloudy.engine();
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn bypass<T: reiny::Topic + prost::Message>(cloudy: &reiny::Cloudy) {
+//!     let _ = cloudy.publish::<T>();
+//! }
+//! ```
 //!
 //! ```ignore
 //! use reiny::prelude::*;
@@ -12,8 +26,8 @@
 //!
 //! #[reiny::main]
 //! async fn main(cloudy: Cloudy) -> reiny::Result<()> {
-//!     let pings = cloudy.publish::<Ping>()?;
-//!     let mut pongs = cloudy.subscribe::<Pong>()?;
+//!     let pings = cloudy.output::<Ping>("pings")?;
+//!     let mut pongs = cloudy.input::<Pong>("pongs")?;
 //!     // ...
 //!     Ok(())
 //! }
@@ -25,11 +39,6 @@
 //! ([`engine::Zenoh`], feature `zenoh`). [`engine::Local`] is an in-process bus, so a launch can be
 //! tested with no network at all — hand it to [`Cloudy::open`] through `RuntimeOptions::engine`.
 //!
-//! # The escape hatch
-//!
-//! zenoh features reiny does not wrap are reachable directly through [`Cloudy::session`]. The price
-//! is that **zenoh is a public dependency of reiny** (`pub use zenoh`), so a zenoh major release is a
-//! breaking change for reiny — past this point, zenoh's semver becomes yours.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -52,24 +61,31 @@ mod shutdown;
 use engine::{Engine, Guard, Key, QueryParams, SCHEMA_CHUNK, SERVICE_CHUNK, SUB_CHUNK};
 use shutdown::Shutdown;
 
+pub use managed::DeclaredPublisher;
 pub use managed::{BUNDLE_DIR_ENV, CONFIG_DIR_ENV, MODULE_REPORT_ENV, OwnedChild};
+#[cfg(any(test, feature = "conformance"))]
+use pubsub::RawSubscriberBuilder;
 pub use pubsub::{
-    Envelope, Presence, PresenceEvent, Publisher, PublisherBuilder, RawDescriptor, RawEnvelope,
-    RawPresence, RawSubscriber, RawSubscriberBuilder, Subscriber, SubscriberBuilder,
-    SubscriberStats,
+    Envelope, Presence, PresenceEvent, Publisher, RawDescriptor, RawEnvelope, RawPresence,
+    RawSubscriber, Subscriber, SubscriberStats,
 };
+use pubsub::{PublisherBuilder, SubscriberBuilder};
 pub use reiny_core::bindings;
 #[cfg(feature = "zenoh")]
 pub use runtime::ZenohSource;
 pub use runtime::{DOMAIN_ENV, RuntimeOptions, run_with};
-pub use service::{CallError, Caller, CallerBuilder, Request, Server};
+use service::CallerBuilder;
+pub use service::{CallError, Caller, Request, Server};
 
 /// The type vocabulary lives in `reiny-core` (`no_std`), so that places where zenoh does not run
 /// (`reiny-link`'s MCU side) share the same traits. The downstream path is still `reiny::Topic`.
-pub use reiny_core::{Descriptor, Durability, History, Priority, Qos, Reliability, Service, Topic};
+pub use reiny_core::{
+    Descriptor, Durability, History, PortDirection, PortType, Priority, Qos, Reliability, Service,
+    StaticPort, Topic,
+};
 
-/// zenoh itself. Re-exported so that code using [`Cloudy::session`] cannot end up on a different
-/// zenoh version than the one reiny links against.
+/// Transport dependency for engine implementations and control-plane tooling.
+/// Application contexts do not expose the underlying session.
 #[cfg(feature = "zenoh")]
 pub use zenoh;
 
@@ -139,7 +155,7 @@ const DUPLICATE_CHECK: Duration = Duration::from_millis(300);
 /// A launch's runtime handle. `#[reiny::main]` builds it and hands it over.
 ///
 /// It ties together the engine ([`engine::Engine`]), our instance id, the namespace, and cooperative shutdown.
-/// `publish` / `subscribe` take **nothing but a type parameter**; the topic is resolved from [`Topic`].
+/// Every data operation uses a declared port name and verifies its compiled type.
 pub struct Cloudy {
     engine: Arc<dyn Engine>,
     id: String,
@@ -200,7 +216,8 @@ impl Cloudy {
 
     /// A publisher for the type `T`, emitting to our own `reiny/<domain>/<id>/<T::TYPE>`.
     /// For `QoS` or latched, use the [`Cloudy::publisher`] builder.
-    pub fn publish<T>(&self) -> Result<Publisher<T>>
+    #[cfg(any(test, feature = "conformance"))]
+    pub(crate) fn publish<T>(&self) -> Result<Publisher<T>>
     where
         T: prost::Message + Topic,
     {
@@ -209,7 +226,8 @@ impl Cloudy {
 
     /// A subscriber for the type `T`, subscribing to `reiny/<domain>/*/<T::TYPE>` (the same type from
     /// every publisher in the domain). To pick a source or to use latched, use [`Cloudy::subscriber`].
-    pub fn subscribe<T>(&self) -> Result<Subscriber<T>>
+    #[cfg(any(test, feature = "conformance"))]
+    pub(crate) fn subscribe<T>(&self) -> Result<Subscriber<T>>
     where
         T: prost::Message + Default + Topic,
     {
@@ -217,18 +235,18 @@ impl Cloudy {
     }
 
     /// A publisher builder for the type `T`. Stack `.latched()` and friends, then `.build()`.
-    pub fn publisher<T>(&self) -> PublisherBuilder<'_, T> {
+    pub(crate) fn publisher<T>(&self) -> PublisherBuilder<'_, T> {
         PublisherBuilder::new(self)
     }
 
     /// A subscriber builder for the type `T`. Stack `.from(id)` / `.latched()`, then `.build()`.
-    pub fn subscriber<T>(&self) -> SubscriberBuilder<'_, T> {
+    pub(crate) fn subscriber<T>(&self) -> SubscriberBuilder<'_, T> {
         SubscriberBuilder::new(self)
     }
 
     /// The launch ids currently publishing the type `T` (ourselves included, sorted by id).
     ///
-    /// [`Cloudy::publish`] always accompanies a publisher with a liveliness token on the same key
+    /// [`Cloudy::output`] always accompanies a publisher with a liveliness token on the same key
     /// (there is no opt-out — allowing a publisher without one would make this return value
     /// untrustworthy), so an entry disappears the moment the process dies. No application-level
     pub async fn publishers<T: Topic>(&self) -> Result<Vec<String>> {
@@ -283,19 +301,21 @@ impl Cloudy {
 
     /// Stand up a server for the request type `S`. It puts a queryable on
     /// `reiny/<domain>/<id>/<S::TYPE>`; take requests off [`Server::recv`] and answer with [`Request::reply`].
-    pub fn serve<S: Service>(&self) -> Result<Server<S>> {
+    #[cfg(any(test, feature = "conformance"))]
+    pub(crate) fn serve<S: Service>(&self) -> Result<Server<S>> {
         self.ensure_standalone()?;
         Server::declare(self)
     }
 
     /// A caller builder for the request type `S`. Stack `.to(id)` / `.timeout(d)`, then `.build()`.
-    pub fn caller<S: Service>(&self) -> CallerBuilder<'_, S> {
+    pub(crate) fn caller<S: Service>(&self) -> CallerBuilder<'_, S> {
         CallerBuilder::new(self)
     }
 
     /// Call `S` once (any server in the domain, at the default timeout).
     /// Sugar over [`Cloudy::caller`].
-    pub async fn call<S: Service>(
+    #[cfg(any(test, feature = "conformance"))]
+    pub(crate) async fn call<S: Service>(
         &self,
         request: S,
     ) -> std::result::Result<S::Response, CallError> {
@@ -320,7 +340,8 @@ impl Cloudy {
     /// A subscriber builder for the type **named** `ty` — for a tool that learns the types from the bus
     /// ([`Cloudy::watch_keys`]) instead of naming them in code. Samples arrive undecoded, fingerprint
     /// unchecked; see [`RawSubscriber`]. A launch names its types and uses [`Cloudy::subscriber`].
-    pub fn raw_subscriber(&self, ty: impl Into<String>) -> RawSubscriberBuilder<'_> {
+    #[cfg(any(test, feature = "conformance"))]
+    pub(crate) fn raw_subscriber(&self, ty: impl Into<String>) -> RawSubscriberBuilder<'_> {
         RawSubscriberBuilder::new(self, ty.into())
     }
 
@@ -375,17 +396,18 @@ impl Cloudy {
     }
 
     /// The engine underneath. Reach another engine's own features through `engine().as_any().downcast_ref::<E>()`.
-    pub fn engine(&self) -> Result<&Arc<dyn Engine>> {
-        self.ensure_standalone()?;
-        Ok(&self.engine)
+    pub(crate) fn engine(&self) -> &Arc<dyn Engine> {
+        &self.engine
     }
 
     /// A second `Cloudy` on **another engine**, sharing this one's id / domain / shutdown / config.
     /// The door through which a bridge (`reiny::bridge::forward`) holds "the zenoh `Cloudy`" and "the
     /// link `Cloudy`" in one process. The `@launch` token is declared on the new engine as well.
     pub async fn with_engine(&self, engine: Arc<dyn Engine>) -> Result<Self> {
-        self.ensure_standalone()?;
-        managed::check_engine(&engine, false)?;
+        anyhow::ensure!(
+            self.module.bindings.is_some(),
+            "module bindings are required"
+        );
         let mut cloudy = Self::new(
             engine,
             self.id.clone(),
@@ -404,9 +426,9 @@ impl Cloudy {
     ///
     /// Using it makes zenoh's semver yours — when reiny moves to a new zenoh major, the code that
     /// goes through here comes along for the ride.
-    #[cfg(feature = "zenoh")]
+    #[cfg(all(test, feature = "zenoh"))]
     #[must_use]
-    pub fn session(&self) -> Option<&zenoh::Session> {
+    pub(crate) fn session(&self) -> Option<&zenoh::Session> {
         self.ensure_standalone().ok()?;
         self.engine
             .as_any()

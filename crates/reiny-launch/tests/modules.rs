@@ -151,7 +151,7 @@ fn pure_alias_cycle_fails_when_no_executable_can_publish() {
             "{PROVIDER}modules:\n  a:\n    source: ./a\n    in: {{state: {{type: test.State, from: b.state}}}}\n    out: {{state: {{type: test.State}}}}\n  b:\n    source: ./b\n    in: {{state: {{type: test.State, from: a.state}}}}\n    out: {{state: {{type: test.State}}}}\n  producer: {{source: ./producer}}\n"
         ),
     );
-    let alias = "version: 2\nin:\n  state: {type: test.State}\nout:\n  state: {type: test.State, from: in.state}\n";
+    let alias = "version: 2\nmodules:\n  producer: {source: ../producer}\nin:\n  state: {type: test.State}\nout:\n  state: {type: test.State, from: in.state}\n";
     write(fixture.path(), "a/main.yaml", alias);
     write(fixture.path(), "b/main.yaml", alias);
     write(fixture.path(), "producer/main.yaml", PRODUCER);
@@ -206,6 +206,61 @@ fn run_and_modules_cannot_share_one_instance() {
     let result = DeploymentPlan::load(fixture.path(), false);
     // Then it fails without looking for the nonexistent child.
     assert!(matches!(result, Err(ModuleError::Invalid { .. })));
+}
+
+#[test]
+fn build_time_schema_is_rejected_even_on_executable_manifests() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    for schema in ["{}", "null", "{project: {name: catalog}}"] {
+        write(
+            fixture.path(),
+            "main.yaml",
+            &format!("{PROVIDER}run: {{provider: process, bin: app}}\nschema: {schema}\n"),
+        );
+        assert!(matches!(
+            DeploymentPlan::load(fixture.path(), false),
+            Err(ModuleError::Yaml { .. })
+        ));
+    }
+}
+
+#[test]
+fn manifests_without_executable_or_child_composition_are_rejected() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    for composition in ["", "modules: {}\n"] {
+        write(
+            fixture.path(),
+            "main.yaml",
+            &format!("{PROVIDER}{composition}"),
+        );
+        assert!(matches!(
+            DeploymentPlan::load(fixture.path(), false),
+            Err(ModuleError::Invalid { .. })
+        ));
+    }
+    write(
+        fixture.path(),
+        "main.yaml",
+        &format!("{PROVIDER}modules:\n  catalog: {{source: ./catalog}}\n"),
+    );
+    write(fixture.path(), "catalog/main.yaml", "version: 2\n");
+    assert!(matches!(
+        DeploymentPlan::load(fixture.path(), false),
+        Err(ModuleError::Invalid { .. })
+    ));
+}
+
+#[test]
+fn runtime_planning_does_not_read_schema_yaml() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    write(
+        fixture.path(),
+        "main.yaml",
+        &format!("{PROVIDER}run: {{provider: process, bin: app}}\n"),
+    );
+    write(fixture.path(), "schema.yaml", "not valid yaml: [");
+    let plan = DeploymentPlan::load(fixture.path(), false).expect("runtime-only plan");
+    assert_eq!(plan.nodes.len(), 1);
 }
 
 #[test]

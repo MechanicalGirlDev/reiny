@@ -27,12 +27,11 @@ uniffi = "=0.32.2"
 tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-flume = "0.12"
 
 [dev-dependencies]
 prost.workspace = true
 tempfile = "3"
-# Only tests inspect the active ephemeral TCP locator; no unstable API is exported.
+# Network tests observe an independent ephemeral TCP listener and matching events.
 zenoh = { workspace = true, features = ["unstable"] }
 
 [lints]

@@ -1,0 +1,7 @@
+version: 2
+schema:
+  project: { name: pong }
+  publications:
+    Pong: { proto: proto/pong.proto, message: pong.Pong }
+  dependencies:
+    ping: { path: ../ping }

@@ -66,7 +66,7 @@ fn publisher_declares_matching_schema_and_port_when_created() {
     assert_eq!(manifest["deployment"], "demo");
     assert_eq!(manifest["out"]["ping"]["type"], "ping.Ping");
     assert_eq!(
-        manifest["schema"]["publications"]["Ping"]["message"],
+        yaml(&dir.join("schema.yaml"))["schema"]["publications"]["Ping"]["message"],
         "ping.Ping"
     );
     assert_eq!(manifest["build"]["locked"], false);
@@ -137,7 +137,7 @@ fn user_values_and_sources_survive_when_initialized() {
     std::fs::create_dir(sandbox.0.join("src")).unwrap();
     let source = "fn main() { println!(\"existing\"); }\n";
     let build = "fn main() {}\n";
-    let manifest = "version: 2\nschema: {project: {name: custom}}\n";
+    let manifest = "version: 2\n";
     std::fs::write(sandbox.0.join("src/main.rs"), source).unwrap();
     std::fs::write(sandbox.0.join("build.rs"), build).unwrap();
     std::fs::write(sandbox.0.join("main.yaml"), manifest).unwrap();
@@ -174,16 +174,23 @@ fn runtime_is_preserved_when_local_schema_dependency_is_added() {
     let sandbox = Sandbox::new();
     std::fs::create_dir(sandbox.0.join("dep")).unwrap();
     std::fs::write(
-        sandbox.0.join("dep/main.yaml"),
+        sandbox.0.join("dep/schema.yaml"),
         "version: 2\nschema: {project: {name: ping, version: 1.2.3}}\n",
     )
     .unwrap();
     let manifest = sandbox.0.join("main.yaml");
     std::fs::write(
         &manifest,
-        "version: 2\ndeployment: demo\nproviders: {process: {type: process}}\nrun: {provider: process, bin: demo}\nbuild: {type: cargo, features: [fast], locked: false}\nschema:\n  project: {name: demo}\n  config: {count: {type: u32}}\n",
+        "version: 2\ndeployment: demo\nproviders: {process: {type: process}}\nrun: {provider: process, bin: demo}\nbuild: {type: cargo, features: [fast], locked: false}\n",
     ).unwrap();
     let before = yaml(&manifest);
+    let catalog = sandbox.0.join("schema.yaml");
+    std::fs::write(
+        &catalog,
+        "version: 2\nschema:\n  project: {name: demo}\n  config: {count: {type: u32}}\n",
+    )
+    .unwrap();
+    let before_catalog = yaml(&catalog);
     // When
     sandbox.success(&["add", "dep"]);
     // Then
@@ -191,9 +198,19 @@ fn runtime_is_preserved_when_local_schema_dependency_is_added() {
     for field in ["version", "deployment", "providers", "run", "build"] {
         assert_eq!(after[field], before[field]);
     }
-    assert_eq!(after["schema"]["config"], before["schema"]["config"]);
-    assert_eq!(after["schema"]["dependencies"]["ping"]["path"], "dep");
-    assert_eq!(after["schema"]["dependencies"]["ping"]["version"], "1.2");
+    let after_catalog = yaml(&catalog);
+    assert_eq!(
+        after_catalog["schema"]["config"],
+        before_catalog["schema"]["config"]
+    );
+    assert_eq!(
+        after_catalog["schema"]["dependencies"]["ping"]["path"],
+        "dep"
+    );
+    assert_eq!(
+        after_catalog["schema"]["dependencies"]["ping"]["version"],
+        "1.2"
+    );
 }
 
 #[test]
@@ -202,11 +219,11 @@ fn manifest_bytes_are_unchanged_when_dependency_already_exists() {
     let sandbox = Sandbox::new();
     std::fs::create_dir(sandbox.0.join("dep")).unwrap();
     std::fs::write(
-        sandbox.0.join("dep/main.yaml"),
+        sandbox.0.join("dep/schema.yaml"),
         "version: 2\nschema: {project: {name: ping}}\n",
     )
     .unwrap();
-    let manifest = sandbox.0.join("main.yaml");
+    let manifest = sandbox.0.join("schema.yaml");
     let text = "# retain formatting\nversion: 2\nschema: {dependencies: {ping: {path: elsewhere, version: '7.0'}}}\n";
     std::fs::write(&manifest, text).unwrap();
     // When
@@ -267,7 +284,7 @@ fn schema_check_discovers_catalog_when_nearest_module_is_runtime_only() {
     let sandbox = Sandbox::new();
     std::fs::create_dir_all(sandbox.0.join("leaf/src")).unwrap();
     std::fs::write(
-        sandbox.0.join("main.yaml"),
+        sandbox.0.join("schema.yaml"),
         "version: 2\nschema: {project: {name: demo}, publications: {}}\n",
     )
     .unwrap();

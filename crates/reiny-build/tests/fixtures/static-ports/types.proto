@@ -1,0 +1,5 @@
+syntax = "proto3";
+package fixture;
+message State { uint64 value = 1; }
+message Request { uint64 value = 1; }
+message Response { uint64 value = 1; }

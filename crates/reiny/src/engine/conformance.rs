@@ -128,7 +128,6 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
     // --- launch presence: Cloudy::new raised @launch ---
     let launches = a
         .engine()
-        .expect("standalone engine")
         .alive(&Key::launch(DOMAIN, None), PATIENCE)
         .await
         .expect("alive");

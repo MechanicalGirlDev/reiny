@@ -1,31 +1,25 @@
-//! Multilingual reiny handles, exported through `UniFFI` and an additive C ABI.
-//!
-//! Messages carry the same Protobuf bytes and type names as Rust launches.
-//! These methods are synchronous: call them on an ordinary thread, not inside
-//! a Tokio task. Each session owns its runtime; children keep their session alive.
+//! Foreign-language handles for prepared, named module endpoints.
+//! Synchronous methods run on ordinary threads; endpoint handles retain the session.
 
+use reiny::{Cloudy, DeclaredPublisher, RawEnvelope, RawSubscriber, RuntimeOptions};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
-
-use reiny::engine::{Guard, Key, RawPublisher, SUB_CHUNK, Sample};
-use reiny::{Cloudy, Qos, RuntimeOptions};
 use tokio::runtime::{Builder, Handle, Runtime};
 
-/// Ergonomic C ABI shared by the C, C++, JavaScript, and C# bindings.
+/// Ergonomic C ABI shared by C, C++, JavaScript, and C#.
 pub mod c_api;
 #[cfg(test)]
 mod tests;
-
 uniffi::setup_scaffolding!();
 
-/// Failures crossing a foreign-language boundary.
+/// Failure crossing a foreign-language boundary.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum FfiError {
-    /// A bus, runtime, or argument error.
+    /// Runtime, endpoint contract, or argument failure.
     #[error("{message}")]
     Failure {
-        /// The underlying failure, including its context.
+        /// Underlying error.
         message: String,
     },
 }
@@ -45,48 +39,39 @@ fn ordinary_thread() -> Result<(), FfiError> {
     Ok(())
 }
 
-fn segment(name: &str, value: &str) -> Result<(), FfiError> {
-    if value.is_empty()
-        || value
-            .chars()
-            .any(|c| matches!(c, '/' | '*' | '?' | '#' | '$' | '@') || c.is_whitespace())
-    {
-        return Err(failure(format!(
-            "{name} must be a nonempty key segment without wildcards, separators, or whitespace"
-        )));
+fn bindings_path(path: String) -> Result<std::path::PathBuf, FfiError> {
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err(failure("module bindings path must be absolute"));
     }
-    Ok(())
+    Ok(path)
 }
 
-/// An encoded message and the provenance supplied by the engine.
+/// Encoded protobuf and validated source metadata.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct Message {
-    /// Protobuf wire bytes; binary data and embedded NULs are preserved.
+    /// Protobuf bytes, including embedded NULs.
     pub payload: Vec<u8>,
-    /// Complete sending launch namespace.
+    /// Exact sending module namespace.
     pub source: String,
-    /// Optional Protobuf schema fingerprint, matching `Topic::SCHEMA`.
+    /// Mandatory declared fingerprint.
     pub schema: Option<u64>,
-    /// Optional engine timestamp in Unix nanoseconds.
+    /// Optional Unix nanosecond timestamp.
     pub timestamp: Option<u64>,
 }
 
-impl From<Sample> for Message {
-    fn from(sample: Sample) -> Self {
+impl From<RawEnvelope> for Message {
+    fn from(sample: RawEnvelope) -> Self {
         Self {
             payload: sample.payload,
-            source: sample.key.source.unwrap_or_default(),
-            schema: sample
-                .attachment
-                .as_deref()
-                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
-                .map(u64::from_le_bytes),
+            source: sample.source,
+            schema: sample.schema,
             timestamp: sample.timestamp,
         }
     }
 }
 
-/// An isolated in-process bus. Connect several sessions to the same object.
+/// Isolated in-process bus for prepared modules.
 #[derive(uniffi::Object)]
 pub struct LocalBus {
     engine: Arc<reiny::engine::Local>,
@@ -94,7 +79,7 @@ pub struct LocalBus {
 
 #[uniffi::export]
 impl LocalBus {
-    /// Create a bus without network configuration or discovery.
+    /// Create an isolated local transport.
     #[uniffi::constructor]
     #[must_use]
     pub fn new() -> Arc<Self> {
@@ -103,16 +88,22 @@ impl LocalBus {
         })
     }
 
-    /// Start a launch on this bus. Different domains remain isolated.
-    pub fn connect(&self, id: String, domain: String) -> Result<Arc<Session>, FfiError> {
+    /// Start a module using its absolute prepared bindings JSON path.
+    pub fn connect(
+        &self,
+        id: String,
+        domain: String,
+        module_bindings_path: String,
+    ) -> Result<Arc<Session>, FfiError> {
         let mut options = RuntimeOptions::new(id);
         options.domain = domain;
         options.engine = Some(self.engine.clone());
+        options.module_bindings_path = Some(bindings_path(module_bindings_path)?);
         Session::start(options)
     }
 }
 
-/// A reiny launch with its own runtime and launch-presence token.
+/// Managed module session with its own synchronous runtime.
 #[derive(uniffi::Object)]
 pub struct Session {
     cloudy: Cloudy,
@@ -135,185 +126,133 @@ impl Session {
         ordinary_thread()?;
         Ok(self.runtime.block_on(future))
     }
-
-    fn key(&self, topic: String, source: Option<String>) -> Key {
-        Key {
-            domain: self.cloudy.domain().to_owned(),
-            source,
-            ty: Some(topic),
-            chunk: None,
-        }
-    }
 }
 
 #[uniffi::export]
 impl Session {
-    /// Open Zenoh, optionally loading a Zenoh JSON5/JSON/YAML configuration file.
-    /// A build without the `zenoh` feature returns an error rather than changing engines.
+    /// Open Zenoh using a prepared module contract and optional network configuration.
     #[uniffi::constructor]
     pub fn open(
         id: String,
         domain: String,
         zenoh_config: Option<String>,
+        module_bindings_path: String,
     ) -> Result<Arc<Self>, FfiError> {
+        let path = bindings_path(module_bindings_path)?;
         #[cfg(feature = "zenoh")]
         {
             let mut options = RuntimeOptions::new(id);
             options.domain = domain;
-            if let Some(path) = zenoh_config {
-                options.zenoh = reiny::ZenohSource::File(path.into());
+            options.module_bindings_path = Some(path);
+            if let Some(config) = zenoh_config {
+                options.zenoh = reiny::ZenohSource::File(config.into());
             }
             Self::start(options)
         }
         #[cfg(not(feature = "zenoh"))]
         {
-            let _ = (id, domain, zenoh_config);
+            let _ = (id, domain, zenoh_config, path);
             Err(failure("reiny-ffi was built without the zenoh feature"))
         }
     }
 
-    /// Our launch id.
+    /// Module namespace.
     #[must_use]
     pub fn id(&self) -> String {
         self.cloudy.id().to_owned()
     }
-
-    /// Our logical namespace.
+    /// Logical domain.
     #[must_use]
     pub fn domain(&self) -> String {
         self.cloudy.domain().to_owned()
     }
 
-    /// Declare a publisher for a `Topic::TYPE` name, not an arbitrary key.
-    /// The optional schema is attached as eight little-endian bytes, just as Rust sends it.
+    /// Open a named output with actual protobuf message name and mandatory fingerprint.
     pub fn publisher(
         self: &Arc<Self>,
-        topic: String,
-        schema: Option<u64>,
+        name: &str,
+        type_name: &str,
+        schema: u64,
     ) -> Result<Arc<Publisher>, FfiError> {
-        segment("type", &topic)?;
-        let engine = self.cloudy.engine().map_err(failure)?;
-        let key = self.key(topic, Some(self.cloudy.id().to_owned()));
-        let publisher = engine.publisher(&key, &Qos::DEFAULT).map_err(failure)?;
-        let presence = engine.declare_alive(&key).map_err(failure)?;
+        ordinary_thread()?;
+        let _runtime = self.runtime.enter();
+        let sender = self
+            .cloudy
+            .raw_output(name, type_name, schema)
+            .map_err(failure)?;
         Ok(Arc::new(Publisher {
-            sender: publisher,
-            schema,
-            _presence: presence,
+            sender,
             session: self.clone(),
         }))
     }
 
-    /// Subscribe by type name, optionally accepting only the given launch id.
-    /// The 256-message FIFO applies backpressure, matching reiny's default buffer.
+    /// Open a named input from exactly its prepared sources.
     pub fn subscriber(
         self: &Arc<Self>,
-        topic: String,
-        source: Option<String>,
+        name: &str,
+        type_name: &str,
+        schema: u64,
     ) -> Result<Arc<Subscription>, FfiError> {
-        segment("type", &topic)?;
-        let engine = self.cloudy.engine().map_err(failure)?;
-        let key = self.key(topic, source);
-        let (sender, receiver) = flume::bounded(256);
-        let subscription = engine
-            .subscribe(
-                &key,
-                Box::new(move |sample| {
-                    // A dropped receiver is normal undeclaration, not a delivery failure.
-                    if let Err(error) = sender.send(sample) {
-                        tracing::debug!(%error, "FFI subscription closed");
-                    }
-                }),
-            )
-            .map_err(failure)?;
-        let presence = engine
-            .declare_alive(
-                &Key {
-                    source: Some(self.cloudy.id().to_owned()),
-                    ..key
-                }
-                .with_chunk(SUB_CHUNK),
-            )
+        ordinary_thread()?;
+        let _runtime = self.runtime.enter();
+        let receiver = self
+            .cloudy
+            .raw_input(name, type_name, schema)
             .map_err(failure)?;
         Ok(Arc::new(Subscription {
-            receiver,
-            _declaration: subscription,
-            _presence: presence,
+            receiver: tokio::sync::Mutex::new(receiver),
             session: self.clone(),
         }))
     }
 
-    /// Sorted, deduplicated ids publishing this type in our domain.
-    pub fn publishers(&self, topic: String, timeout_ms: u64) -> Result<Vec<String>, FfiError> {
-        segment("type", &topic)?;
-        let key = self.key(topic, None);
-        let mut ids: Vec<String> = self
-            .wait(
-                self.cloudy
-                    .engine()
-                    .map_err(failure)?
-                    .alive(&key, Duration::from_millis(timeout_ms)),
-            )?
-            .map_err(failure)?
-            .into_iter()
-            .filter_map(|key| key.source)
-            .collect();
-        ids.sort();
-        ids.dedup();
-        Ok(ids)
+    /// Validate all registered endpoints and announce managed readiness.
+    pub fn ready(&self) -> Result<(), FfiError> {
+        ordinary_thread()?;
+        let _runtime = self.runtime.enter();
+        self.cloudy.ready().map_err(failure)
     }
 
-    /// Request cooperative shutdown; current and future receives return `None`.
+    /// Request cooperative shutdown.
     pub fn shutdown(&self) {
         self.cloudy.shutdown_now();
     }
 }
 
-/// A publisher. Its declaration and session stay alive until the last reference is released.
+/// An owned declared output retaining its module.
 #[derive(uniffi::Object)]
 pub struct Publisher {
-    sender: Box<dyn RawPublisher>,
-    schema: Option<u64>,
-    _presence: Guard,
+    sender: DeclaredPublisher,
     session: Arc<Session>,
 }
 
 #[uniffi::export]
 impl Publisher {
-    /// Send encoded Protobuf bytes to the declared type.
+    /// Send protobuf bytes with the declared fingerprint.
     pub fn send(&self, payload: Vec<u8>) -> Result<(), FfiError> {
+        ordinary_thread()?;
         let _runtime = self.session.runtime.enter();
-        self.sender
-            .put(
-                payload,
-                self.schema.map(|value| value.to_le_bytes().to_vec()),
-            )
-            .map_err(failure)
+        self.sender.send(payload).map_err(failure)
     }
 }
 
-/// A subscription with a bounded FIFO and cancel-safe, deadline-bounded receive.
+/// Named input with contract-owned receive buffering.
 #[derive(uniffi::Object)]
 pub struct Subscription {
-    receiver: flume::Receiver<Sample>,
-    _declaration: Guard,
-    _presence: Guard,
+    receiver: tokio::sync::Mutex<RawSubscriber>,
     session: Arc<Session>,
 }
 
 #[uniffi::export]
 impl Subscription {
-    /// Wait up to `timeout_ms`. `None` means timeout or cooperative shutdown.
-    /// Multiple callers share the FIFO; each message is delivered to exactly one caller.
+    /// Receive within the deadline, including time waiting for concurrent callers.
     pub fn receive(&self, timeout_ms: u64) -> Result<Option<Message>, FfiError> {
         self.session.wait(async {
             tokio::select! {
                 biased;
                 () = self.session.cloudy.shutdown() => None,
-                result = tokio::time::timeout(
-                    Duration::from_millis(timeout_ms),
-                    self.receiver.recv_async(),
-                ) => result.ok().and_then(Result::ok).map(Message::from),
+                result = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
+                    self.receiver.lock().await.recv().await.map(Message::from)
+                }) => result.ok().flatten(),
             }
         })
     }

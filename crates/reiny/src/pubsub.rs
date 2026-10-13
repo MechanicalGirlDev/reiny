@@ -23,10 +23,9 @@ use crate::engine::{
     ReplyResult, SCHEMA_CHUNK, SUB_CHUNK, Sample,
 };
 use crate::shutdown::Shutdown;
-use crate::{
-    Cloudy, Descriptor, Durability, History, Priority, Qos, Reliability, Result, Topic,
-    validate_segment,
-};
+#[cfg(any(test, feature = "conformance"))]
+use crate::validate_segment;
+use crate::{Cloudy, Descriptor, Durability, History, Qos, Result, Topic};
 
 /// The depth of the default receive buffer (Fifo). The same as zenoh's `API_DATA_RECEPTION_CHANNEL_SIZE`.
 const FIFO_CAPACITY: usize = 256;
@@ -75,7 +74,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// The builder [`Cloudy::publisher`] returns. With nothing set it is [`Cloudy::publish`].
 #[must_use = "a builder does nothing until .build()"]
-pub struct PublisherBuilder<'a, T> {
+pub(crate) struct PublisherBuilder<'a, T> {
     cloudy: &'a Cloudy,
     qos: Qos,
     _marker: PhantomData<T>,
@@ -92,7 +91,7 @@ impl<'a, T> PublisherBuilder<'a, T> {
 
     /// Set the whole `QoS` at once — one of the [`Qos::SENSOR`] / [`Qos::COMMAND`] / [`Qos::STATE`]
     /// profiles, or a [`Qos`] of your own. The sugar called afterwards (`.latched()` …) layers on top.
-    pub fn qos(mut self, qos: Qos) -> Self {
+    pub(crate) fn qos(mut self, qos: Qos) -> Self {
         self.qos = qos;
         self
     }
@@ -100,26 +99,9 @@ impl<'a, T> PublisherBuilder<'a, T> {
     /// Keep the most recent sample and answer a late subscriber's query with it (latched).
     /// It replaces the task that re-sends "a setting that only needs delivering once at startup" forever.
     /// The history is one sample. = `durability: TransientLocal`.
-    pub fn latched(mut self) -> Self {
+    #[cfg(test)]
+    pub(crate) fn latched(mut self) -> Self {
         self.qos.durability = Durability::TransientLocal;
-        self
-    }
-
-    /// Whether to drop or to wait under congestion. = `Qos.reliability`.
-    pub fn reliability(mut self, reliability: Reliability) -> Self {
-        self.qos.reliability = reliability;
-        self
-    }
-
-    /// Send priority. = `Qos.priority`.
-    pub fn priority(mut self, priority: Priority) -> Self {
-        self.qos.priority = priority;
-        self
-    }
-
-    /// Skip batching and send immediately (lower latency, lower throughput). = `Qos.express`.
-    pub fn express(mut self, express: bool) -> Self {
-        self.qos.express = express;
         self
     }
 
@@ -129,7 +111,8 @@ impl<'a, T> PublisherBuilder<'a, T> {
     /// `history: KeepLast(n > 1)` is an error — a publisher holds at most the one latched sample, and an
     /// n-deep ring is the subscriber's job through `.latest(n)` (it is not silently rounded to 1). A
     /// feature the engine lacks (query, needed by latched; liveliness, needed by presence) errors here too.
-    pub fn build(self) -> Result<Publisher<T>>
+    #[cfg(any(test, feature = "conformance"))]
+    pub(crate) fn build(self) -> Result<Publisher<T>>
     where
         T: Message + Topic,
     {
@@ -239,7 +222,7 @@ pub struct RawDescriptor {
 
 /// The other half of a latched publisher — one queryable on its own publish key, answering with the
 /// last value it sent and nothing more.
-fn declare_latch(
+pub(crate) fn declare_latch(
     cloudy: &Cloudy,
     key: &Key,
     last: Arc<Mutex<Option<Vec<u8>>>>,
@@ -265,7 +248,7 @@ fn declare_latch(
     )
 }
 
-/// A typed publisher. Obtained from [`Cloudy::publish`] / [`PublisherBuilder::build`].
+/// A typed publisher obtained from [`Cloudy::output`].
 ///
 /// Dropping it drops the liveliness token too, so subscribers watching through
 /// [`Cloudy::watch_publishers`] get a [`PresenceEvent::Left`].
@@ -302,7 +285,7 @@ impl<T: Message + Topic> Publisher<T> {
 
 /// The builder [`Cloudy::subscriber`] returns. With nothing set it is [`Cloudy::subscribe`].
 #[must_use = "a builder does nothing until .build()"]
-pub struct SubscriberBuilder<'a, T> {
+pub(crate) struct SubscriberBuilder<'a, T> {
     cloudy: &'a Cloudy,
     from: Vec<Option<String>>,
     latched: bool,
@@ -323,7 +306,8 @@ impl<'a, T> SubscriberBuilder<'a, T> {
 
     /// Subscribe to one launch id only. For setups where several launches publish the same type and the
     /// subscriber wants to pick which one it listens to.
-    pub fn from(mut self, id: impl Into<String>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn from(mut self, id: impl Into<String>) -> Self {
         self.from = vec![Some(id.into())];
         self
     }
@@ -341,7 +325,7 @@ impl<'a, T> SubscriberBuilder<'a, T> {
     /// publisher is not up yet", and then **stays silent forever unless the publisher re-sends** (which
     /// is the entire point of latched, gone). Presence is a **subscription** to liveliness, so
     /// declarations from links established later still arrive — that asymmetry is what closes the hole.
-    pub fn latched(mut self) -> Self {
+    pub(crate) fn latched(mut self) -> Self {
         self.latched = true;
         self
     }
@@ -352,13 +336,14 @@ impl<'a, T> SubscriberBuilder<'a, T> {
     /// every subscription in that launch stalls**. A subscription that only reads a high-rate state at
     /// its own pace (a GUI drawing a 100 Hz `RobotState` at frame rate, say) wants `latest(1)`.
     /// Leave command paths on the default — silently dropping is the more dangerous one for control.
-    pub fn latest(mut self, n: usize) -> Self {
+    pub(crate) fn latest(mut self, n: usize) -> Self {
         self.latest = Some(n.max(1));
         self
     }
 
     /// Declare the subscriber. A feature the engine lacks (`*` subscription, latched) errors here.
-    pub fn build(self) -> Result<Subscriber<T>>
+    #[cfg(any(test, feature = "conformance"))]
+    pub(crate) fn build(self) -> Result<Subscriber<T>>
     where
         T: Message + Default + Topic,
     {
@@ -404,13 +389,15 @@ impl<'a, T> SubscriberBuilder<'a, T> {
 
 /// The builder [`Cloudy::raw_subscriber`] returns — [`SubscriberBuilder`] for a type named at run time.
 #[must_use = "a builder does nothing until .build()"]
-pub struct RawSubscriberBuilder<'a> {
+#[cfg(any(test, feature = "conformance"))]
+pub(crate) struct RawSubscriberBuilder<'a> {
     cloudy: &'a Cloudy,
     ty: String,
     latched: bool,
     latest: Option<usize>,
 }
 
+#[cfg(any(test, feature = "conformance"))]
 impl<'a> RawSubscriberBuilder<'a> {
     pub(crate) fn new(cloudy: &'a Cloudy, ty: String) -> Self {
         Self {
@@ -422,24 +409,22 @@ impl<'a> RawSubscriberBuilder<'a> {
     }
 
     /// Take a latched publisher's most recent value first ([`SubscriberBuilder::latched`]).
-    pub fn latched(mut self) -> Self {
+    pub(crate) fn latched(mut self) -> Self {
         self.latched = true;
         self
     }
 
-    /// Keep only the newest `n` samples ([`SubscriberBuilder::latest`]). A viewer drawing at frame rate
-    /// wants this: the default Fifo, left unread, blocks every subscription in the process.
-    pub fn latest(mut self, n: usize) -> Self {
-        self.latest = Some(n.max(1));
-        self
-    }
-
     /// Declare the subscriber. The name must be one key segment — one type, no `*`.
-    pub fn build(self) -> Result<RawSubscriber> {
+    pub(crate) fn build(self) -> Result<RawSubscriber> {
         self.cloudy.ensure_standalone()?;
         validate_segment("type", &self.ty)?;
         let core = Core::declare(self.cloudy, &self.ty, &[None], self.latched, self.latest)?;
-        Ok(RawSubscriber { core })
+        Ok(RawSubscriber {
+            core,
+            expected_schema: None,
+            _managed: None,
+            _presence: None,
+        })
     }
 }
 
@@ -568,7 +553,7 @@ impl Ring {
     }
 }
 
-/// A typed subscriber. Obtained from [`Cloudy::subscribe`] / [`SubscriberBuilder::build`].
+/// A typed subscriber obtained from [`Cloudy::input`].
 ///
 /// `recv` returns `None` on shutdown (Ctrl+C / SIGTERM / [`Cloudy::shutdown_now`]), so a
 /// `while let Some(m) = sub.recv().await` loop falls out of its own accord.
@@ -634,26 +619,34 @@ impl<T: Message + Default + Topic> Subscriber<T> {
     }
 }
 
-/// A subscriber for a type named at run time. Obtained from [`Cloudy::raw_subscriber`].
+/// An encoded-message subscriber obtained from [`Cloudy::raw_input`].
 ///
-/// Nothing is decoded and no fingerprint is checked: every sample arrives with the sender's fingerprint
-/// beside it, for the caller to judge. It raises no `@sub` token and announces no `@schema` — a viewer
-/// watching the bus must not look like a consumer to [`Cloudy::subscribers`]. `recv` is cancel-safe and
-/// returns `None` on shutdown, as [`Subscriber::recv`] does.
+/// The declared input fixes the sources, type and receive policy. Missing or mismatching
+/// fingerprints are dropped before the caller sees bytes. The handle participates in module
+/// readiness and subscriber presence. Receiving is cancel-safe and returns `None` on shutdown.
 pub struct RawSubscriber {
-    core: Core,
+    pub(crate) core: Core,
+    pub(crate) expected_schema: Option<u64>,
+    pub(crate) _managed: Option<crate::managed::ManagedPort>,
+    pub(crate) _presence: Option<Guard>,
 }
 
 impl RawSubscriber {
     /// Receive the next sample. `None` once the channel is closed or shutdown was requested.
     pub async fn recv(&mut self) -> Option<RawEnvelope> {
-        let sample = self.core.recv().await?;
-        Some(RawEnvelope {
-            schema: attachment_fingerprint(sample.attachment.as_deref()),
-            source: sample.key.source.unwrap_or_default(),
-            payload: sample.payload,
-            timestamp: sample.timestamp,
-        })
+        loop {
+            let sample = self.core.recv().await?;
+            let schema = attachment_fingerprint(sample.attachment.as_deref());
+            if self.expected_schema.is_some() && schema != self.expected_schema {
+                continue;
+            }
+            return Some(RawEnvelope {
+                schema,
+                source: sample.key.source.unwrap_or_default(),
+                payload: sample.payload,
+                timestamp: sample.timestamp,
+            });
+        }
     }
 
     /// What the receive buffer has done so far ([`Subscriber::stats`]).
@@ -665,7 +658,7 @@ impl RawSubscriber {
 
 /// What a typed and a raw subscriber share: the subscription, its receive buffer, and latched's
 /// "presence first, then get" with latest-wins. It hands out samples; decoding is the layer above.
-struct Core {
+pub(crate) struct Core {
     chan: Chan,
     /// The subscription handle (merely held; dropping it undeclares).
     _guard: Vec<Guard>,
@@ -690,7 +683,7 @@ struct Core {
 
 impl Core {
     /// Subscribe to `ty` (from `from`, or every source) behind a Fifo or a `latest` ring.
-    fn declare(
+    pub(crate) fn declare(
         cloudy: &Cloudy,
         ty: &str,
         from: &[Option<String>],
@@ -967,7 +960,7 @@ impl RawPresence {
         Self::many(cloudy, std::slice::from_ref(key))
     }
 
-    fn many(cloudy: &Cloudy, keys: &[Key]) -> Result<Self> {
+    pub(crate) fn many(cloudy: &Cloudy, keys: &[Key]) -> Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut guards = Vec::new();
         for key in keys {

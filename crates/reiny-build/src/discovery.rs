@@ -8,41 +8,35 @@ use serde::Deserialize;
 use super::Manifest;
 
 #[derive(Deserialize)]
-struct MainManifest {
+struct CatalogManifest {
     version: u32,
-    schema: Option<Manifest>,
+    schema: Manifest,
 }
 
-/// Find the nearest ancestor catalog, skipping runtime-only module manifests.
+/// Find the nearest ancestor schema.yaml, without reading runtime manifests.
 pub(super) fn find_manifest(start: &Path) -> Result<(PathBuf, Manifest)> {
     for dir in start.ancestors() {
-        let candidate = dir.join("main.yaml");
+        let candidate = dir.join("schema.yaml");
         if candidate.is_file() {
             super::rerun_if_changed(&candidate);
-            if let Some(schema) = read_main(&candidate)? {
-                return Ok((candidate, schema));
-            }
+            return Ok((candidate.clone(), parse_manifest(&candidate)?));
         }
     }
     bail!(
-        "main.yaml containing schema not found in {} or any parent directory",
+        "schema.yaml not found in {} or any parent directory",
         start.display()
     )
 }
 
 /// A dependency must provide its own public catalog, not inherit another one.
 pub(super) fn parse_manifest(path: &Path) -> Result<Manifest> {
-    read_main(path)?.with_context(|| format!("{} has no schema block", path.display()))
-}
-
-fn read_main(path: &Path) -> Result<Option<Manifest>> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let manifest: MainManifest =
+    let manifest: CatalogManifest =
         serde_yaml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     if manifest.version != 2 {
         bail!(
-            "{}: unsupported main.yaml version {} (expected 2)",
+            "{}: unsupported schema.yaml version {} (expected 2)",
             path.display(),
             manifest.version
         );

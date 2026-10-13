@@ -9,10 +9,10 @@ mod layouts;
 
 /// A throwaway directory tree for manifest fixtures. `describe` reads real files — it rejects a
 /// `proto` that is not there — so these tests need a filesystem. The directory removes itself.
-struct Fixture(PathBuf);
+pub(super) struct Fixture(PathBuf);
 
 impl Fixture {
-    fn new(name: &str) -> Self {
+    pub(super) fn new(name: &str) -> Self {
         use std::sync::atomic::{AtomicU32, Ordering};
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -25,16 +25,16 @@ impl Fixture {
         Self(dir)
     }
 
-    fn root(&self) -> &Path {
+    pub(super) fn root(&self) -> &Path {
         &self.0
     }
 
-    fn path(&self, rel: &str) -> PathBuf {
+    pub(super) fn path(&self, rel: &str) -> PathBuf {
         self.0.join(rel)
     }
 
     /// Write `contents` at `rel`, creating the parent directories.
-    fn write(&self, rel: &str, contents: &str) {
+    pub(super) fn write(&self, rel: &str, contents: &str) {
         let path = self.path(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, contents).unwrap();

@@ -1,7 +1,7 @@
 # ping-pong-config
 
 Pong reads its reply text and delay from typed configuration. Defaults live in
-`pong/main.yaml` under `schema.config`: `reply: pong` and `delay_ms: 0`.
+`pong/schema.yaml` under `schema.config`: `reply: pong` and `delay_ms: 0`.
 Codegen generates `crate::config::Config`, available through `cloudy.config()`.
 
 The leaf `run.config: ../pong.config.yaml` resolves relative to that leaf and

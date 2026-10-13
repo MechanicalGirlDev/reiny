@@ -6,22 +6,61 @@
 //! zenoh session "playing a launch", acting out the publisher / latched / presence parts — wired
 //! deterministically over a fixed loopback TCP port with multicast off, as reiny's own e2e is.
 //!
-//! The payloads are opaque bytes as far as a bag is concerned, so neither prost nor a proto is needed.
+//! The fixture uses protobuf payloads and descriptors with matching fingerprints.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use std::process::Command;
-use std::thread::sleep;
 use std::time::Duration;
 
+use prost::Message;
 use reiny::zenoh::{self, Wait};
 
 /// The loopback port for this test alone (kept clear of the 37447 reiny's e2e uses).
 const ENDPOINT: &str = "tcp/127.0.0.1:37448";
 const BIN: &str = env!("CARGO_BIN_EXE_reiny");
 
-/// The fingerprint of the recorded type (a real attachment, recreated by hand).
-const PROBE_FP: u64 = 0xA1B2_C3D4_E5F6_0718;
+#[derive(Clone, PartialEq, Message)]
+struct Probe {
+    #[prost(uint32, tag = "1")]
+    seq: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct Config {
+    #[prost(string, tag = "1")]
+    value: String,
+}
+
+fn descriptor() -> Vec<u8> {
+    prost_types::FileDescriptorSet {
+        file: vec![prost_types::FileDescriptorProto {
+            name: Some("bag.proto".into()),
+            package: Some("bag".into()),
+            syntax: Some("proto3".into()),
+            message_type: ["Probe", "Config"]
+                .into_iter()
+                .map(|name| prost_types::DescriptorProto {
+                    name: Some(name.into()),
+                    field: vec![prost_types::FieldDescriptorProto {
+                        name: Some(if name == "Probe" { "seq" } else { "value" }.into()),
+                        number: Some(1),
+                        label: Some(prost_types::field_descriptor_proto::Label::Optional as i32),
+                        r#type: Some(if name == "Probe" {
+                            prost_types::field_descriptor_proto::Type::Uint32
+                        } else {
+                            prost_types::field_descriptor_proto::Type::String
+                        } as i32),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }],
+    }
+    .encode_to_vec()
+}
 
 /// Playing a launch: this one session listens on ENDPOINT, and the others (the record / play subprocesses) connect as clients.
 fn fabric() -> zenoh::Session {
@@ -37,7 +76,10 @@ fn fabric() -> zenoh::Session {
 
 /// The fabric arguments every `reiny bag` subprocess shares (a client connecting to the listener).
 fn bus_args(domain: &str) -> Vec<String> {
+    let path = std::env::temp_dir().join(format!("reiny-bag-bindings-{}.json", std::process::id()));
     vec![
+        "--module-bindings".into(),
+        path.to_string_lossy().into_owned(),
         "--domain".into(),
         domain.into(),
         "--connect".into(),
@@ -47,8 +89,24 @@ fn bus_args(domain: &str) -> Vec<String> {
     ]
 }
 
+fn prepare_recording_bindings(path: &std::path::Path) -> reiny::bindings::ModuleBindings {
+    let bindings: reiny::bindings::ModuleBindings = serde_yaml::from_str(
+        "version: 2\nnamespace: bag\nendpoint_namespace: bag\ninputs:\n  probe:\n    contract: {type: bag.Probe}\n    sources: [ctrl]\n  config:\n    contract: {type: bag.Config, replay: last}\n    sources: [cfg]\noutputs:\n  probe:\n    contract: {type: bag.Probe}\n  config:\n    contract: {type: bag.Config, retention: last}\n",
+    ).unwrap();
+    let mut recording_bindings = bindings.clone();
+    recording_bindings.outputs.clear();
+    std::fs::write(path, serde_json::to_vec(&recording_bindings).unwrap()).unwrap();
+    bindings
+}
+
 #[test]
 fn record_info_play_round_trip_and_live_guard() {
+    let bindings_path =
+        std::env::temp_dir().join(format!("reiny-bag-bindings-{}.json", std::process::id()));
+    let bindings = prepare_recording_bindings(&bindings_path);
+    let probe_fp = reiny_build::message_fingerprint(&descriptor(), "bag.Probe")
+        .unwrap()
+        .unwrap();
     let bag = std::env::temp_dir().join(format!("reiny-bag-e2e-{}.mcap", std::process::id()));
     let _ = std::fs::remove_file(&bag);
 
@@ -65,13 +123,41 @@ fn record_info_play_round_trip_and_live_guard() {
         .expect("probe token");
     // 2) The latched cfg/Config: a queryable answering with the most recent value (record's snapshot picks it up).
     let cfg_key = "reiny/lab/cfg/Config";
+    let _cfg_token = fab.liveliness().declare_token(cfg_key).wait().unwrap();
+    let cfg_fp = reiny_build::message_fingerprint(&descriptor(), "bag.Config")
+        .unwrap()
+        .unwrap();
+    let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
     let _cfg_q = fab
         .declare_queryable(cfg_key)
         .callback(move |query| {
-            let _ = query.reply(cfg_key, b"snapshot-value".to_vec()).wait();
+            let _ = query
+                .reply(
+                    cfg_key,
+                    Config {
+                        value: "snapshot-value".into(),
+                    }
+                    .encode_to_vec(),
+                )
+                .attachment(cfg_fp.to_le_bytes().to_vec())
+                .wait();
+            ready_sender.send(()).unwrap();
         })
         .wait()
         .expect("cfg queryable");
+    let mut schema_guards = Vec::new();
+    for (key, name) in [(probe_key, "bag.Probe"), (cfg_key, "bag.Config")] {
+        let key = format!("{key}/@schema/{name}");
+        let reply_key = key.clone();
+        schema_guards.push(
+            fab.declare_queryable(key)
+                .callback(move |query| {
+                    query.reply(reply_key.clone(), descriptor()).wait().unwrap();
+                })
+                .wait()
+                .unwrap(),
+        );
+    }
 
     // --- start record as a subprocess (1.5 s) ---
     let mut record = Command::new(BIN)
@@ -85,13 +171,14 @@ fn record_info_play_round_trip_and_live_guard() {
         .expect("spawn record");
 
     // Wait until record has connected, subscribed and taken its snapshot before publishing anything live.
-    sleep(Duration::from_millis(500));
+    ready_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("recording subscriber and snapshot ready");
     for seq in 0u32..5 {
-        fab.put(probe_key, seq.to_le_bytes().to_vec())
-            .attachment(PROBE_FP.to_le_bytes().to_vec())
+        fab.put(probe_key, Probe { seq }.encode_to_vec())
+            .attachment(probe_fp.to_le_bytes().to_vec())
             .wait()
             .expect("put probe");
-        sleep(Duration::from_millis(60));
     }
 
     let status = record.wait().expect("record wait");
@@ -113,11 +200,18 @@ fn record_info_play_round_trip_and_live_guard() {
         "info lacks the latched cfg row: {info_out}"
     );
     assert!(
-        info_out.contains(&format!("{PROBE_FP:016x}")),
+        info_out.contains(&format!("{probe_fp:016x}")),
         "info lacks the Probe fingerprint: {info_out}"
     );
 
     // --- play: into another domain, with the source rewritten to bag, and picked up on the test side ---
+    let mut playing_bindings = bindings;
+    playing_bindings.inputs.clear();
+    std::fs::write(
+        &bindings_path,
+        serde_json::to_vec(&playing_bindings).unwrap(),
+    )
+    .unwrap();
     let collected = fab
         .declare_subscriber("reiny/replay/*/*")
         .wait()
@@ -138,14 +232,21 @@ fn record_info_play_round_trip_and_live_guard() {
     // Collect: Probe comes back from the source bag with its fingerprint restored. cfg (latched) may be empty.
     let mut probe_values = Vec::new();
     let mut saw_fp = false;
-    while let Ok(Some(sample)) = collected.recv_timeout(Duration::from_millis(500)) {
+    for _ in 0..6 {
+        let sample = collected
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .expect("each replay message");
         let key = sample.key_expr().as_str().to_string();
         if key == "reiny/replay/bag/Probe" {
-            let raw: [u8; 4] = sample.payload().to_bytes().as_ref().try_into().unwrap();
-            probe_values.push(u32::from_le_bytes(raw));
+            probe_values.push(
+                Probe::decode(sample.payload().to_bytes().as_ref())
+                    .unwrap()
+                    .seq,
+            );
             if let Some(att) = sample.attachment()
                 && let Ok(raw) = <[u8; 8]>::try_from(att.to_bytes().as_ref())
-                && u64::from_le_bytes(raw) == PROBE_FP
+                && u64::from_le_bytes(raw) == probe_fp
             {
                 saw_fp = true;
             }
@@ -188,4 +289,5 @@ fn record_info_play_round_trip_and_live_guard() {
 
     drop(probe_pub);
     let _ = std::fs::remove_file(&bag);
+    std::fs::remove_file(bindings_path).unwrap();
 }

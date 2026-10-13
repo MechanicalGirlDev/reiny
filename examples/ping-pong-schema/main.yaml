@@ -31,26 +31,3 @@ modules:
     out:
       ping:
         type: "ping.Ping"
-schema:
-  internals:
-    Ping:
-      proto: "proto/ping.proto"
-      message: "ping.Ping"
-    Pong:
-      proto: "proto/pong.proto"
-      message: "pong.Pong"
-  schema:
-    messages:
-      crate: "pingpong-schema"
-      protos: ["proto/ping.proto", "proto/pong.proto"]
-  projects:
-    ping:
-      version: "0.2.0"
-      description: "ping module"
-      publications: ["Ping"]
-      dependencies: ["Pong"]
-    pong:
-      version: "0.2.0"
-      description: "pong module"
-      publications: ["Pong"]
-      dependencies: ["Ping"]

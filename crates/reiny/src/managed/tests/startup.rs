@@ -49,8 +49,8 @@ async fn managed_config_parse_errors_are_fatal() {
 }
 
 #[tokio::test]
-async fn standalone_config_parse_errors_retain_the_existing_fallback() {
-    // Given an old standalone entrypoint with a malformed config.
+async fn missing_bindings_are_rejected_before_opening_the_engine() {
+    // Given an entrypoint with no resolved YAML contract.
     let directory = Directory::new();
     let path = directory.0.join("config.json");
     std::fs::write(&path, "{").expect("config fixture");
@@ -59,14 +59,8 @@ async fn standalone_config_parse_errors_retain_the_existing_fallback() {
     opts.module_report_path = None;
     opts.config_path = Some(path);
 
-    // When it opens, then its existing default-config behavior is preserved.
-    assert!(
-        Cloudy::open(opts)
-            .await
-            .expect("standalone")
-            .config_table()
-            .is_none()
-    );
+    // When it opens, then absence of bindings cannot become an unrestricted context.
+    assert!(Cloudy::open(opts).await.is_err());
 }
 
 #[tokio::test]

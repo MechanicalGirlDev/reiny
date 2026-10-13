@@ -10,8 +10,8 @@ use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
 /// The encoder / decoder for one message type.
 pub(crate) struct Codec {
     message: MessageDescriptor,
-    /// The descriptor-derived fingerprint (the same computation reiny-build uses). Matched against the attachment to warn.
-    pub(crate) fingerprint: Option<u64>,
+    /// Mandatory descriptor-derived fingerprint for the declared dynamic endpoint.
+    pub(crate) fingerprint: u64,
 }
 
 impl Codec {
@@ -23,7 +23,7 @@ impl Codec {
         let message = pool
             .get_message_by_name(fqn)
             .with_context(|| format!("descriptor set lacks message {fqn}"))?;
-        let fingerprint = reiny_build::message_fingerprint(file_set, fqn).unwrap_or(None);
+        let fingerprint = crate::bus::schema_fingerprint(file_set, fqn)?;
         Ok(Self {
             message,
             fingerprint,
@@ -63,7 +63,7 @@ pub(crate) fn hex(payload: &[u8]) -> String {
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use prost::Message;
     use prost_types::{
@@ -73,7 +73,7 @@ mod tests {
 
     /// The descriptor set of `message Probe { uint32 seq = 1; string name = 2; }`, built by hand
     /// (so the test needs no protoc).
-    fn probe_set() -> Vec<u8> {
+    pub(crate) fn probe_set() -> Vec<u8> {
         let field =
             |name: &str, number: i32, ty: field_descriptor_proto::Type| FieldDescriptorProto {
                 name: Some(name.into()),
@@ -106,7 +106,10 @@ mod tests {
     fn json_round_trip() {
         let codec = Codec::from_file_set(&probe_set(), "e2e.Probe").unwrap();
         assert_eq!(codec.full_name(), "e2e.Probe");
-        assert!(codec.fingerprint.is_some());
+        assert_eq!(
+            codec.fingerprint,
+            crate::bus::schema_fingerprint(&probe_set(), "e2e.Probe").unwrap()
+        );
         let bytes = codec.encode_json(r#"{"seq": 7, "name": "x"}"#).unwrap();
         // field 1 varint 7, field 2 len-delimited "x"
         assert_eq!(bytes, [0x08, 0x07, 0x12, 0x01, b'x']);

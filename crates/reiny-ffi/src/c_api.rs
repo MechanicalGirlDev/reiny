@@ -15,7 +15,6 @@ enum Object {
     Publisher(Arc<Publisher>),
     Subscription(Arc<Subscription>),
     Message(Arc<Message>),
-    List(Arc<Vec<String>>),
     Buffer(Arc<Vec<u8>>),
 }
 
@@ -69,7 +68,6 @@ typed!(session, Session, Session);
 typed!(publisher, Publisher, Publisher);
 typed!(subscription, Subscription, Subscription);
 typed!(message, Message, Message);
-typed!(list, List, Vec<String>);
 typed!(buffer, Buffer, Vec<u8>);
 
 thread_local! {
@@ -182,37 +180,35 @@ export!(reiny_local_bus_new(out: *mut u64) {
     *out = insert(Object::Bus(LocalBus::new()))?;
     Ok(())
 });
-export!(reiny_local_bus_connect(handle: u64, id: *const c_char, domain: *const c_char, out: *mut u64) {
+export!(reiny_local_bus_connect(handle: u64, id: *const c_char, domain: *const c_char, bindings: *const c_char, out: *mut u64) {
     output(out)?;
-    let value = bus(handle)?.connect(text(id)?, text(domain)?).map_err(|e| e.to_string())?;
+    let value = bus(handle)?.connect(text(id)?, text(domain)?, text(bindings)?).map_err(|e| e.to_string())?;
     *out = insert(Object::Session(value))?;
     Ok(())
 });
-export!(reiny_session_open(id: *const c_char, domain: *const c_char, config: *const c_char, out: *mut u64) {
+export!(reiny_session_open(id: *const c_char, domain: *const c_char, config: *const c_char, bindings: *const c_char, out: *mut u64) {
     output(out)?;
-    let value = Session::open(text(id)?, text(domain)?, optional_text(config)?).map_err(|e| e.to_string())?;
+    let value = Session::open(text(id)?, text(domain)?, optional_text(config)?, text(bindings)?).map_err(|e| e.to_string())?;
     *out = insert(Object::Session(value))?;
     Ok(())
 });
-export!(reiny_session_publisher(handle: u64, topic: *const c_char, has_schema: u8, schema: u64, out: *mut u64) {
+export!(reiny_session_publisher(handle: u64, name: *const c_char, type_name: *const c_char, schema: u64, out: *mut u64) {
     output(out)?;
-    if has_schema > 1 { return Err("has_schema must be 0 or 1".into()); }
-    let value = session(handle)?.publisher(text(topic)?, (has_schema == 1).then_some(schema)).map_err(|e| e.to_string())?;
+    let value = session(handle)?.publisher(&text(name)?, &text(type_name)?, schema).map_err(|e| e.to_string())?;
     *out = insert(Object::Publisher(value))?;
     Ok(())
 });
-export!(reiny_session_subscriber(handle: u64, topic: *const c_char, source: *const c_char, out: *mut u64) {
+export!(reiny_session_subscriber(handle: u64, name: *const c_char, type_name: *const c_char, schema: u64, out: *mut u64) {
     output(out)?;
-    let value = session(handle)?.subscriber(text(topic)?, optional_text(source)?).map_err(|e| e.to_string())?;
+    let value = session(handle)?.subscriber(&text(name)?, &text(type_name)?, schema).map_err(|e| e.to_string())?;
     *out = insert(Object::Subscription(value))?;
     Ok(())
 });
-export!(reiny_session_publishers(handle: u64, topic: *const c_char, timeout: u64, out: *mut u64) {
-    output(out)?;
-    let value = session(handle)?.publishers(text(topic)?, timeout).map_err(|e| e.to_string())?;
-    *out = insert(Object::List(Arc::new(value)))?;
-    Ok(())
-});
+/// Validate declared ports and announce module readiness.
+#[unsafe(no_mangle)]
+pub extern "C" fn reiny_session_ready(handle: u64) -> i32 {
+    boundary(|| session(handle)?.ready().map_err(|e| e.to_string()))
+}
 
 /// Request cooperative shutdown on a session handle.
 #[unsafe(no_mangle)]
@@ -257,18 +253,6 @@ export!(reiny_message_timestamp(handle: u64, has: *mut u8, value: *mut u64) {
     *has = u8::from(timestamp.is_some()); *value = timestamp.unwrap_or(0);
     Ok(())
 });
-export!(reiny_list_len(handle: u64, out: *mut usize) {
-    output(out)?;
-    *out = list(handle)?.len();
-    Ok(())
-});
-export!(reiny_list_get(handle: u64, index: usize, out: *mut u64) {
-    output(out)?;
-    let values = list(handle)?;
-    let value = values.get(index).ok_or("list index out of bounds")?;
-    *out = insert(Object::Buffer(Arc::new(value.as_bytes().to_vec())))?;
-    Ok(())
-});
 export!(reiny_buffer_len(handle: u64, out: *mut usize) {
     output(out)?;
     *out = buffer(handle)?.len();
@@ -292,6 +276,20 @@ mod tests {
         unsafe {
             let mut bus = 0;
             assert_eq!(reiny_local_bus_new(&raw mut bus), 0);
+            let mut session = 99;
+            let id = CString::new("sender").unwrap();
+            let domain = CString::new("test").unwrap();
+            assert_eq!(
+                reiny_local_bus_connect(
+                    bus,
+                    id.as_ptr(),
+                    domain.as_ptr(),
+                    std::ptr::null(),
+                    &raw mut session,
+                ),
+                -1
+            );
+            assert_eq!(session, 99);
             let mut len = 99;
             assert_eq!(reiny_buffer_len(bus, &raw mut len), -1);
             assert_eq!(len, 99);
@@ -347,12 +345,6 @@ mod tests {
             assert_eq!(*buffer(payload).unwrap(), [0, 255, 0]);
             assert_eq!(*buffer(source).unwrap(), b"sender");
             assert_eq!(reiny_release(payload), 0);
-            assert_eq!(reiny_release(source), 0);
-            let list = insert(Object::List(Arc::new(vec!["sender".into()]))).unwrap();
-            assert_eq!(reiny_list_get(list, 1, &raw mut source), -1);
-            assert_eq!(reiny_list_get(list, 0, &raw mut source), 0);
-            assert_eq!(reiny_release(list), 0);
-            assert_eq!(*buffer(source).unwrap(), b"sender");
             assert_eq!(reiny_release(source), 0);
         }
     }

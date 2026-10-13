@@ -1,0 +1,9 @@
+version: 2
+schema:
+  project: { name: static-ports-fixture }
+  publications:
+    State: { proto: types.proto, message: fixture.State }
+    Request: { proto: types.proto, message: fixture.Request }
+    Response: { proto: types.proto, message: fixture.Response }
+  services:
+    Calculate: { request: Request, response: Response }

@@ -197,7 +197,6 @@ fn write_manifests(
     for (namespace, manifest) in manifests {
         let instance = instance_path(namespace, &plan.deployment)?;
         manifest.build = None;
-        manifest.schema = None;
         for (name, call) in &mut manifest.modules {
             let child = instance_path(&format!("{namespace}/{name}"), &plan.deployment)?;
             call.source = ModuleSource::Local(relative_path(&instance, &child));

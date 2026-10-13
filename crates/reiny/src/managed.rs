@@ -15,13 +15,16 @@ use crate::{
     validate_segment,
 };
 
+mod bridging;
 pub(crate) mod config;
+mod dynamic;
+pub use dynamic::DeclaredPublisher;
 mod owned;
+#[cfg(any(test, feature = "conformance"))]
 mod scope;
 pub use owned::OwnedChild;
 #[cfg(feature = "zenoh")]
 pub(crate) use owned::child_zenoh_config;
-pub(crate) use scope::check_engine;
 #[cfg(test)]
 mod tests;
 
@@ -68,7 +71,7 @@ struct Ports {
 
 struct Registration {
     contract: PortReport,
-    transport_type: &'static str,
+    transport_type: String,
     live: Weak<()>,
 }
 
@@ -123,7 +126,7 @@ impl Registration {
                 contract: contract.clone(),
                 response: None,
             },
-            transport_type: T::TYPE,
+            transport_type: T::TYPE.to_string(),
             live: Arc::downgrade(live),
         })
     }
@@ -221,6 +224,9 @@ impl Cloudy {
     }
 
     /// Open a stream input from exactly its configured sources, with app-owned replay and buffering.
+    ///
+    /// Use [`Cloudy::watch_input_ready`] before [`Cloudy::ready`] when an initial volatile
+    /// publication must wait for a connected application to finish opening its ports.
     pub fn input<T: prost::Message + Default + Topic>(&self, name: &str) -> Result<Subscriber<T>> {
         let contract = self.named_contract(name, true, PortKind::Stream)?;
         let mut ports = self.lock_ports(name, true)?;
@@ -244,6 +250,28 @@ impl Cloudy {
         subscriber.managed = Some(ManagedPort::new(self, live));
         ports.inputs.insert(name.to_string(), registration);
         Ok(subscriber)
+    }
+
+    /// Watch readiness of exactly the source modules wired to a declared input.
+    ///
+    /// Existing ready sources are replayed as joined events. Register the watch before
+    /// announcing local readiness so cyclic compositions need no startup sleeps.
+    pub fn watch_input_ready(&self, name: &str) -> Result<crate::RawPresence> {
+        let bindings = self
+            .module
+            .bindings
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("module bindings are required"))?;
+        let input = bindings
+            .inputs
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("undefined input '{name}'"))?;
+        let keys: Vec<_> = input
+            .sources
+            .iter()
+            .map(|source| Key::topic(&self.domain, Some(source), READY_CHUNK))
+            .collect();
+        crate::RawPresence::many(self, &keys)
     }
 
     /// Open a stream output using the app's transport policy and retained history.

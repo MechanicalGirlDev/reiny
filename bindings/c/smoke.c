@@ -8,9 +8,10 @@
 } } while (0)
 #define OK(expr) REQUIRE((expr) == 0)
 
-int main(void) {
+int main(int argc, char **argv) {
+    REQUIRE(argc == 3); /* Absolute sender and receiver fixture paths. */
     reiny_handle bus = 0, a = 0, b = 0, pub = 0, sub = 0, msg = 0;
-    reiny_handle payload = 0, source = 0, presence = 0, name = 0;
+    reiny_handle payload = 0, source = 0;
     const uint8_t binary[] = {0, 255, 1, 0, 128};
     const uint8_t *data = NULL;
     size_t size = 0;
@@ -19,20 +20,14 @@ int main(void) {
     OK(reiny_local_bus_new(&bus));
     REQUIRE(reiny_session_shutdown(bus) == -1);
     REQUIRE(reiny_local_bus_new(NULL) == -1);
-    REQUIRE(reiny_local_bus_connect(bus, NULL, "c-smoke", &a) == -1);
-    OK(reiny_local_bus_connect(bus, "sender", "c-smoke", &a));
-    OK(reiny_local_bus_connect(bus, "receiver", "c-smoke", &b));
-    OK(reiny_session_subscriber(b, "Binary", "sender", &sub));
-    REQUIRE(reiny_session_publisher(a, "Binary", 2, 42, &pub) == -1);
-    OK(reiny_session_publisher(a, "Binary", 1, 42, &pub));
-    OK(reiny_session_publishers(b, "Binary", 1000, &presence));
-    OK(reiny_list_len(presence, &size));
-    REQUIRE(size == 1);
-    OK(reiny_list_get(presence, 0, &name));
-    REQUIRE(reiny_list_get(presence, size, &source) == -1);
-    OK(reiny_buffer_len(name, &size));
-    OK(reiny_buffer_data(name, &data));
-    REQUIRE(size == 6 && memcmp(data, "sender", size) == 0);
+    REQUIRE(reiny_local_bus_connect(bus, NULL, "c-smoke", argv[1], &a) == -1);
+    OK(reiny_local_bus_connect(bus, "sender", "c-smoke", argv[1], &a));
+    OK(reiny_local_bus_connect(bus, "receiver", "c-smoke", argv[2], &b));
+    OK(reiny_session_subscriber(b, "in", "Binary", 42, &sub));
+    REQUIRE(reiny_session_publisher(a, "missing", "Binary", 42, &pub) == -1);
+    OK(reiny_session_publisher(a, "out", "Binary", 42, &pub));
+    OK(reiny_session_ready(a));
+    OK(reiny_session_ready(b));
     REQUIRE(reiny_publisher_send(pub, NULL, 1) == -1);
     OK(reiny_publisher_send(pub, binary, sizeof binary));
     OK(reiny_subscription_receive(sub, 1000, &msg));
@@ -62,8 +57,6 @@ int main(void) {
     OK(reiny_release(msg));
     OK(reiny_subscription_receive(sub, 1, &msg));
     REQUIRE(msg == 0);
-    OK(reiny_release(name));
-    OK(reiny_release(presence));
     OK(reiny_release(source));
     OK(reiny_release(pub));
     OK(reiny_release(sub));

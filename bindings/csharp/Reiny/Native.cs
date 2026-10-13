@@ -55,15 +55,15 @@ internal static class Native
     [DllImport(Library, EntryPoint = "reiny_local_bus_new", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int LocalBusNew(out ulong handle);
     [DllImport(Library, EntryPoint = "reiny_local_bus_connect", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int LocalBusConnect(ulong bus, [MarshalAs(UnmanagedType.LPUTF8Str)] string id, [MarshalAs(UnmanagedType.LPUTF8Str)] string domain, out ulong handle);
+    internal static extern int LocalBusConnect(ulong bus, [MarshalAs(UnmanagedType.LPUTF8Str)] string id, [MarshalAs(UnmanagedType.LPUTF8Str)] string domain, [MarshalAs(UnmanagedType.LPUTF8Str)] string moduleBindingsPath, out ulong handle);
     [DllImport(Library, EntryPoint = "reiny_session_open", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int SessionOpen([MarshalAs(UnmanagedType.LPUTF8Str)] string id, [MarshalAs(UnmanagedType.LPUTF8Str)] string domain, [MarshalAs(UnmanagedType.LPUTF8Str)] string? config, out ulong handle);
+    internal static extern int SessionOpen([MarshalAs(UnmanagedType.LPUTF8Str)] string id, [MarshalAs(UnmanagedType.LPUTF8Str)] string domain, [MarshalAs(UnmanagedType.LPUTF8Str)] string? config, [MarshalAs(UnmanagedType.LPUTF8Str)] string moduleBindingsPath, out ulong handle);
     [DllImport(Library, EntryPoint = "reiny_session_publisher", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int SessionPublisher(ulong session, [MarshalAs(UnmanagedType.LPUTF8Str)] string topic, byte hasSchema, ulong schema, out ulong handle);
+    internal static extern int SessionPublisher(ulong session, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, [MarshalAs(UnmanagedType.LPUTF8Str)] string typeName, ulong schema, out ulong handle);
     [DllImport(Library, EntryPoint = "reiny_session_subscriber", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int SessionSubscriber(ulong session, [MarshalAs(UnmanagedType.LPUTF8Str)] string topic, [MarshalAs(UnmanagedType.LPUTF8Str)] string? source, out ulong handle);
-    [DllImport(Library, EntryPoint = "reiny_session_publishers", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int SessionPublishers(ulong session, [MarshalAs(UnmanagedType.LPUTF8Str)] string topic, ulong timeout, out ulong handle);
+    internal static extern int SessionSubscriber(ulong session, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, [MarshalAs(UnmanagedType.LPUTF8Str)] string typeName, ulong schema, out ulong handle);
+    [DllImport(Library, EntryPoint = "reiny_session_ready", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int SessionReady(ulong session);
     [DllImport(Library, EntryPoint = "reiny_session_shutdown", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int SessionShutdown(ulong session);
     [DllImport(Library, EntryPoint = "reiny_publisher_send", CallingConvention = CallingConvention.Cdecl)]
@@ -78,10 +78,6 @@ internal static class Native
     internal static extern int MessageSchema(ulong message, out byte has, out ulong value);
     [DllImport(Library, EntryPoint = "reiny_message_timestamp", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int MessageTimestamp(ulong message, out byte has, out ulong value);
-    [DllImport(Library, EntryPoint = "reiny_list_len", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int ListLen(ulong list, out nuint length);
-    [DllImport(Library, EntryPoint = "reiny_list_get", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int ListGet(ulong list, nuint index, out ulong handle);
     [DllImport(Library, EntryPoint = "reiny_buffer_len", CallingConvention = CallingConvention.Cdecl)]
     private static extern int BufferLen(ulong buffer, out nuint length);
     [DllImport(Library, EntryPoint = "reiny_buffer_data", CallingConvention = CallingConvention.Cdecl)]

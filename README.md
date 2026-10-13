@@ -4,17 +4,14 @@ This project is reiny.
 The way the data flows is just like rain.
 
 reiny is a Rust SDK for distributed "launches" (processes) that communicate over
-[Zenoh](https://zenoh.io) pub/sub. The organizing principle is **type = topic**:
-launches publish and subscribe by **Rust type**, never by topic string.
+[Zenoh](https://zenoh.io) pub/sub. Applications communicate through **named ports**:
+Rust types identify payload schemas, and runtime composition decides which
+endpoints connect.
 
-- Publishing type `T` goes to `reiny/<domain>/<id>/T`
-- Subscribing to type `T` receives `reiny/<domain>/*/T` (the same type from every publisher)
-
-The type → topic mapping is generated at build time by `reiny-build` (each
-launch's `build.rs`) from the `schema` block of a `main.yaml`, so user code never
-names a topic string.
-`<domain>` is a logical namespace (`--domain` / `REINY_DOMAIN`, default
-`"default"`): launches in different domains never see each other, even on one LAN.
+`reiny-build` compiles the catalog in `schema.yaml` from each launch's `build.rs`.
+The separate `main.yaml` declares executable modules, endpoint policies, and
+explicit wiring. A schema catalog generates types; it does not grant communication.
+The deployment supplies the module bindings and logical domain.
 
 ```rust,ignore
 use reiny::prelude::*;
@@ -23,17 +20,16 @@ use crate::dependencies::pong::Pong;  // ditto
 
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {
-    let pings = cloudy.publish::<Ping>()?;
-    let mut pongs = cloudy.subscribe::<Pong>()?;
+    let pings = cloudy.output::<Ping>("ping")?;
+    let mut pongs = cloudy.input::<Pong>("pong")?;
+    cloudy.ready()?;
     // ...
     Ok(())
 }
 ```
 
-That's the **standalone** API. A module running inside a `main.yaml`
-deployment opens its declared ports by name instead
-(`cloudy.input::<Pong>("pong")`, `cloudy.output::<Ping>("ping")`, then
-`cloudy.ready()`), so the deployment decides who talks to whom. See
+Run the module through `reiny apply` or `reiny run`; `Cloudy::open` requires
+resolved `ModuleBindings`. See
 [`docs/modules.md`](docs/modules.md).
 Version 2 app manifests own endpoint policies and executable definitions;
 project manifests reuse them through `source` and supply instance wiring and
@@ -41,20 +37,20 @@ configuration. The [0.9 migration guide](docs/design/0.9.0.md) covers instance
 asset overrides; the [0.8 migration guide](docs/design/0.8.0.md) covers named
 endpoint contracts.
 
-Request/response rides the same model — the **request type is the address**:
+Request/response uses named RPC endpoints with request and response schemas:
 
 ```rust,ignore
-let mut adds = cloudy.serve::<Add>()?;                 // reiny/<domain>/<id>/Add
+let mut adds = cloudy.provides::<Add>("adder")?;
 while let Some(req) = adds.recv().await {
     req.reply(Sum { sum: req.value.a + req.value.b }).await?;   // or req.reply_err("…")
 }
-let sum = cloudy.call::<Add>(Add { a: 1, b: 2 }).await?;         // Sum
+let adder = cloudy.uses::<Add>("adder")?;
+let sum = adder.call(Add { a: 1, b: 2 }).await?; // Sum from the wired server
 ```
 
-Anything reiny does not wrap is reachable through `cloudy.session()`, which hands
-you the zenoh `Session` directly. reiny re-exports zenoh (`pub use zenoh`) so you
-never link two versions — the trade is that **zenoh's semver becomes yours**: a
-zenoh major bump is a reiny breaking change.
+The application SDK exposes no engine or session escape hatch and no type-only
+publish, subscribe, or RPC operations. Transport tooling stays separate from
+the module communication contract.
 
 ## Crates
 
@@ -66,7 +62,7 @@ For a Rust launch, depend on `reiny` and add `reiny-build` under
 | Crate | Role |
 | --- | --- |
 | [`reiny`](crates/reiny) | The SDK itself: `Cloudy` (the pub/sub handle) and the `#[reiny::main]` runtime |
-| [`reiny-build`](crates/reiny-build) | `build.rs` helper: compiles protos from the `main.yaml` schema block and generates types/topics |
+| [`reiny-build`](crates/reiny-build) | `build.rs` helper: compiles protos from `schema.yaml` and generates payload types and fingerprints |
 | [`reiny-cli`](crates/reiny-cli) | The `reiny` command: plan / apply / run / status / stop / update / compress for deployments, scaffold (new/init/add), check, build, bag, topic / node / service introspection, `bridge serial\|udp\|iceoryx2` |
 
 ### Supporting libraries
@@ -86,7 +82,7 @@ Choose these for the transport, ecosystem, or language your application needs.
 
 | Crate | Role |
 | --- | --- |
-| [`reiny-link`](crates/reiny-link) | reiny over anything that moves bytes: a `no_std` sans-I/O `Link` plus host-side serial / UDP transports, a tokio `Host`, and `LinkEngine` to put a `Cloudy` on the link |
+| [`reiny-link`](crates/reiny-link) | Named static ports over byte transports: a `no_std` sans-I/O `Link`, serial / UDP transports, and a tokio `Host` |
 | [`reiny-iceoryx2`](crates/reiny-iceoryx2) | `Engine` on iceoryx2 — launches on one host over shared memory (needs libclang to build on Windows / macOS) |
 | [`reiny-ros2`](crates/reiny-ros2) | ROS 2 bridge library on pure-Rust DDS (`ros2-client`): typed `export` / `import` of topics and services from a bridge launch, no ROS install |
 | [`reiny-ffi`](crates/reiny-ffi) | UniFFI SDK for Python, Kotlin, Swift, and Ruby; shared C ABI for C, C++, JavaScript, TypeScript, and C# |
@@ -117,8 +113,8 @@ libclang on Windows / macOS. `cargo fmt --all --check` checks the entire workspa
 For non-Rust launches, see [the multilingual FFI SDK](crates/reiny-ffi).
 It uses the same type names and Protobuf wire bytes as Rust launches.
 
-Use the `reiny` CLI to scaffold a module and run a deployment. Each directory
-has one `main.yaml`; the format, wiring rules and lifecycle are described in
+Use the `reiny` CLI to scaffold a module and run a deployment. Runtime modules
+have `main.yaml`; Rust payload catalogs live in `schema.yaml`. The wiring rules and lifecycle are described in
 [`docs/modules.md`](docs/modules.md).
 
 ```sh
@@ -136,10 +132,14 @@ reiny stop
 Record and replay the bus, `ros2 bag`-style (format is [MCAP](https://mcap.dev),
 so Foxglove and the `mcap` CLI read it directly):
 
+Data commands require resolved `--module-bindings` from a runtime composition.
+In these commands, `$BINDINGS` is that prepared contract path; its stream inputs
+and outputs determine what can be recorded or replayed.
+
 ```sh
-reiny bag record --type RobotState --out walk.mcap   # Ctrl+C to stop
+reiny bag record --module-bindings "$BINDINGS" --type RobotState --out walk.mcap
 reiny bag info walk.mcap
-reiny bag play walk.mcap --rate 0.5 --loop           # back onto the bus
+reiny bag play walk.mcap --module-bindings "$BINDINGS" --rate 0.5 --loop
 ```
 
 Design and the split of what reiny records vs. what the `mcap` CLI is left to do:
@@ -150,11 +150,14 @@ Look at a live bus, `ros2 topic / node / service`-style:
 ```sh
 reiny node list                       # live launch ids
 reiny topic list                      # type → publishers / subscribers / servers
-reiny topic hz RobotState             # rate per source (Ctrl+C to stop)
-reiny topic echo RobotState --count 3 # JSON, decoded from the schema the launch serves
-reiny topic pub Command '{"stop":{}}' # encoded the same way; --rate / --count to keep going
-reiny service call CalibrationCommand '{"start":{}}' --to hs-control
+reiny topic hz robot_state --module-bindings "$BINDINGS"
+reiny topic echo robot_state --module-bindings "$BINDINGS" --count 3
+reiny topic pub command '{"stop":{}}' --module-bindings "$BINDINGS"
+reiny service call calibration '{"start":{}}' --module-bindings "$BINDINGS"
 ```
+
+Here `robot_state`, `command`, and `calibration` are declared input, output,
+and RPC input port names, not type-wide communication grants.
 
 See [`examples/`](examples) for runnable demos (each is its own cargo workspace).
 For larger workspaces, [`examples/ping-pong-schema`](examples/ping-pong-schema)
@@ -164,9 +167,9 @@ instead of per launch, and
 catalog across several independently publishable schema crates without
 generating shared leaf types twice.
 [`examples/ping-pong-service`](examples/ping-pong-service) is the request/response
-sample (`services` in the `main.yaml` schema block).
+sample (`schema.services` in `schema.yaml`).
 [`examples/owned-child`](examples/owned-child) demonstrates an app-owned helper
-with delegated retained state and RPC endpoints, plus a standalone probe.
+with delegated retained state and RPC endpoints, plus a wired verification task.
 
 ## Topic contract
 

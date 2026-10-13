@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-/* Additive ergonomic bridge to the UniFFI facade; not UniFFI's generated ABI.
+/* Ergonomic bridge to the UniFFI facade; not UniFFI's generated ABI.
  * Every function returns 0 on success, -1 on error. Errors are UTF-8, NUL
  * terminated, thread-local, and valid until the next call on that thread.
  * reiny_last_error itself does not clear the error.
@@ -31,19 +31,22 @@ extern "C" {
  * Buffers are owned handles. Their data is read-only and NOT NUL terminated.
  * Pointers from buffer_data remain valid until that buffer is released.
  * Do not free them with free/delete or release concurrently with a read.
- * Message and list getters create independent owned buffer handles.
+ * Message getters create independent owned buffer handles.
  * Schema/timestamp has flags are 0 or 1, with value 0 when absent.
  * Panics become errors in unwind builds; panic=abort cannot be caught.
  */
+/* Session constructors require an absolute prepared module-bindings JSON path.
+ * Port names, exact sources, and policies come from that contract.
+ * Register every declared port with its type name and schema before ready. */
 typedef uint64_t reiny_handle;
 REINY_API const char *reiny_last_error(void);
 REINY_API int32_t reiny_release(reiny_handle handle);
 REINY_API int32_t reiny_local_bus_new(reiny_handle *out);
-REINY_API int32_t reiny_local_bus_connect(reiny_handle bus, const char *id, const char *domain, reiny_handle *out);
-REINY_API int32_t reiny_session_open(const char *id, const char *domain, const char *zenoh_config, reiny_handle *out);
-REINY_API int32_t reiny_session_publisher(reiny_handle session, const char *topic, uint8_t has_schema, uint64_t schema, reiny_handle *out);
-REINY_API int32_t reiny_session_subscriber(reiny_handle session, const char *topic, const char *source, reiny_handle *out);
-REINY_API int32_t reiny_session_publishers(reiny_handle session, const char *topic, uint64_t timeout_ms, reiny_handle *out);
+REINY_API int32_t reiny_local_bus_connect(reiny_handle bus, const char *id, const char *domain, const char *module_bindings_path, reiny_handle *out);
+REINY_API int32_t reiny_session_open(const char *id, const char *domain, const char *zenoh_config, const char *module_bindings_path, reiny_handle *out);
+REINY_API int32_t reiny_session_publisher(reiny_handle session, const char *name, const char *type_name, uint64_t schema, reiny_handle *out);
+REINY_API int32_t reiny_session_subscriber(reiny_handle session, const char *name, const char *type_name, uint64_t schema, reiny_handle *out);
+REINY_API int32_t reiny_session_ready(reiny_handle session);
 REINY_API int32_t reiny_session_shutdown(reiny_handle session);
 REINY_API int32_t reiny_publisher_send(reiny_handle publisher, const uint8_t *data, size_t size);
 REINY_API int32_t reiny_subscription_receive(reiny_handle subscription, uint64_t timeout_ms, reiny_handle *out);
@@ -51,8 +54,6 @@ REINY_API int32_t reiny_message_payload(reiny_handle message, reiny_handle *out)
 REINY_API int32_t reiny_message_source(reiny_handle message, reiny_handle *out);
 REINY_API int32_t reiny_message_schema(reiny_handle message, uint8_t *has, uint64_t *value);
 REINY_API int32_t reiny_message_timestamp(reiny_handle message, uint8_t *has, uint64_t *value);
-REINY_API int32_t reiny_list_len(reiny_handle list, size_t *out);
-REINY_API int32_t reiny_list_get(reiny_handle list, size_t index, reiny_handle *out);
 REINY_API int32_t reiny_buffer_len(reiny_handle buffer, size_t *out);
 REINY_API int32_t reiny_buffer_data(reiny_handle buffer, const uint8_t **out);
 

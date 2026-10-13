@@ -11,13 +11,14 @@
 //! async fn main(cloudy: Cloudy) -> reiny::Result<()> {
 //!     let ros = reiny_ros2::Ros::new(&cloudy, "reiny_bridge")?;          // ROS_DOMAIN_ID from the env
 //!     ros.export::<RobotState, JointState>(                                 // reiny → ROS
-//!         "/joint_states", MessageTypeName::new("sensor_msgs", "JointState"), Qos::SENSOR,
+//!         "state", "/joint_states", MessageTypeName::new("sensor_msgs", "JointState"), Qos::SENSOR,
 //!         |s| JointState { .. })?;
 //!     ros.import::<Twist, CmdVel>(                                          // ROS → reiny
-//!         "/cmd_vel", MessageTypeName::new("geometry_msgs", "Twist"), Qos::COMMAND,
+//!         "cmd", "/cmd_vel", MessageTypeName::new("geometry_msgs", "Twist"), Qos::COMMAND,
 //!         |t| CmdVel { .. })?;
 //!     ros.export_service::<Calibrate, SetBoolReq, SetBoolRes, _, _>(       // a ROS client → a reiny service
-//!         "/calibrate", &ServiceTypeName::new("std_srvs", "SetBool"), |q| .., |r| ..)?;
+//!         "calibrate", "/calibrate", &ServiceTypeName::new("std_srvs", "SetBool"), |q| .., |r| ..)?;
+//!     cloudy.ready()?;
 //!     cloudy.shutdown().await;
 //!     Ok(())
 //! }
@@ -31,8 +32,11 @@
 //!   field name through `Topic::DESCRIPTOR` (the proto descriptor). Zero lines; a type that does not
 //!   fit that rule uses the closure form instead.
 //! - ROS's domain (`ROS_DOMAIN_ID`) and reiny's domain are different things; a bridge holds both.
-//! - presence: `import` publishes under the bridge's id as the source. The ROS graph is not mirrored.
-//! - `QoS`: reliability / durability / history map one to one. `priority` / `express` are dropped.
+//! - Every route requires an explicit declared YAML port. Exports use inputs; imports use outputs.
+//!   Reiny sources, buffering, replay, and publication policy come only from module bindings.
+//! - presence: `import` publishes under the configured endpoint namespace. The ROS graph is not mirrored.
+//! - `qos` configures only the ROS endpoint; it cannot override the reiny port's policy.
+//!   Reliability / durability / history map one to one. `priority` / `express` are dropped.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -127,9 +131,11 @@ impl<'c> Ros<'c> {
         &self.node
     }
 
-    /// reiny → ROS: subscribe to the type `T`, turn it into `R` with `convert`, and publish it on the ROS topic `topic`.
+    /// reiny → ROS: open declared input `port`, convert `T` to `R`, and publish on ROS `topic`.
+    /// `qos` configures ROS only; the input's sources, replay and buffering come from module bindings.
     pub fn export<T, R, F>(
         &self,
+        port: &str,
         topic: &str,
         ty: MessageTypeName,
         qos: Qos,
@@ -140,24 +146,31 @@ impl<'c> Ros<'c> {
         R: Message + Send + Sync + 'static,
         F: Fn(T) -> R + Send + 'static,
     {
-        self.export_with(topic, ty, qos, move |t| Ok(convert(t)))
+        self.export_with(port, topic, ty, qos, move |t| Ok(convert(t)))
     }
 
     /// The automatic form of [`Ros::export`]: deserialize into `R` by proto field name, through
     /// `T::DESCRIPTOR`. Zero lines of conversion when the names and types line up. An error if `T` has no descriptor.
-    pub fn export_auto<T, R>(&self, topic: &str, ty: MessageTypeName, qos: Qos) -> Result<()>
+    pub fn export_auto<T, R>(
+        &self,
+        port: &str,
+        topic: &str,
+        ty: MessageTypeName,
+        qos: Qos,
+    ) -> Result<()>
     where
         T: ProstMessage + Default + Topic + Send + 'static,
         R: Message + Send + Sync + 'static,
     {
         let descriptor = auto::descriptor::<T>()?;
-        self.export_with(topic, ty, qos, move |t: T| {
+        self.export_with(port, topic, ty, qos, move |t: T| {
             auto::to_ros::<T, R>(&descriptor, &t)
         })
     }
 
     fn export_with<T, R, F>(
         &self,
+        port: &str,
         topic: &str,
         ty: MessageTypeName,
         qos: Qos,
@@ -168,6 +181,7 @@ impl<'c> Ros<'c> {
         R: Message + Send + Sync + 'static,
         F: Fn(T) -> Result<R> + Send + 'static,
     {
+        let mut subscriber = self.cloudy.input::<T>(port)?;
         let name = parse_name(topic)?;
         let policies = QosProfile::from(&qos_policies(qos));
         let publisher = {
@@ -176,11 +190,6 @@ impl<'c> Ros<'c> {
             node.create_publisher::<R>(&ros_topic, Some(policies))
                 .map_err(err)?
         };
-        let mut subscriber = self.cloudy.subscriber::<T>();
-        if let History::KeepLast(n) = qos.history {
-            subscriber = subscriber.latest(n);
-        }
-        let mut subscriber = subscriber.build()?;
         let topic = topic.to_string();
         self.spawn(async move {
             while let Some(value) = subscriber.recv().await {
@@ -199,9 +208,11 @@ impl<'c> Ros<'c> {
     }
 
     /// ROS → reiny: subscribe to the ROS topic `topic`, turn it into `T` with `convert`, and publish
-    /// it on reiny (with the bridge's id as the source).
+    /// it through declared output `port` (with its configured endpoint namespace as the source).
+    /// `qos` configures ROS only; the output's transport policy comes from module bindings.
     pub fn import<R, T, F>(
         &self,
+        port: &str,
         topic: &str,
         ty: MessageTypeName,
         qos: Qos,
@@ -212,23 +223,30 @@ impl<'c> Ros<'c> {
         T: ProstMessage + Topic + Send + 'static,
         F: Fn(R) -> T + Send + 'static,
     {
-        self.import_with(topic, ty, qos, move |r| Ok(convert(r)))
+        self.import_with(port, topic, ty, qos, move |r| Ok(convert(r)))
     }
 
     /// The automatic form of [`Ros::import`] (the inverse of [`Ros::export_auto`]).
-    pub fn import_auto<R, T>(&self, topic: &str, ty: MessageTypeName, qos: Qos) -> Result<()>
+    pub fn import_auto<R, T>(
+        &self,
+        port: &str,
+        topic: &str,
+        ty: MessageTypeName,
+        qos: Qos,
+    ) -> Result<()>
     where
         R: Message + Send + Sync + 'static,
         T: ProstMessage + Default + Topic + Send + 'static,
     {
         let descriptor = auto::descriptor::<T>()?;
-        self.import_with(topic, ty, qos, move |r: R| {
+        self.import_with(port, topic, ty, qos, move |r: R| {
             auto::from_ros::<R, T>(&descriptor, &r)
         })
     }
 
     fn import_with<R, T, F>(
         &self,
+        port: &str,
         topic: &str,
         ty: MessageTypeName,
         qos: Qos,
@@ -239,6 +257,7 @@ impl<'c> Ros<'c> {
         T: ProstMessage + Topic + Send + 'static,
         F: Fn(R) -> Result<T> + Send + 'static,
     {
+        let publisher = self.cloudy.output::<T>(port)?;
         let name = parse_name(topic)?;
         let policies = QosProfile::from(&qos_policies(qos));
         let subscription = {
@@ -247,16 +266,6 @@ impl<'c> Ros<'c> {
             node.create_subscription::<R>(&ros_topic, Some(policies))
                 .map_err(err)?
         };
-        // A reiny publisher only has KeepLast(1) or KeepAll (an n-deep ring is the subscriber's).
-        let history = match qos.history {
-            History::KeepLast(1) => History::KeepLast(1),
-            _ => History::KeepAll,
-        };
-        let publisher = self
-            .cloudy
-            .publisher::<T>()
-            .qos(Qos { history, ..qos })
-            .build()?;
         let topic = topic.to_string();
         self.spawn(async move {
             loop {
@@ -280,11 +289,12 @@ impl<'c> Ros<'c> {
     }
 
     /// A ROS client → a reiny service: serve the ROS service `name`, turn the request into `S` with
-    /// `to_request`, call reiny's (any, same-domain) server, and answer with `to_response`.
+    /// `to_request`, call the exact server bound to RPC input `port`, and answer with `to_response`.
     /// When reiny gives `NoReply` / `Timeout` / `reply_err`, nothing is answered on the ROS side (a ROS
     /// service has no notion of an error response).
     pub fn export_service<S, Q, P, FQ, FP>(
         &self,
+        port: &str,
         name: &str,
         ty: &ServiceTypeName,
         to_request: FQ,
@@ -298,6 +308,7 @@ impl<'c> Ros<'c> {
         FQ: Fn(Q) -> S + Send + 'static,
         FP: Fn(S::Response) -> P + Send + 'static,
     {
+        let caller = self.cloudy.uses::<S>(port)?;
         let service_name = parse_name(name)?;
         let server = lock(&self.node)
             .create_server::<Q, P>(
@@ -308,7 +319,6 @@ impl<'c> Ros<'c> {
                 QosProfile::from(&service_qos()),
             )
             .map_err(err)?;
-        let caller = self.cloudy.caller::<S>().build()?;
         let name = name.to_string();
         self.spawn(async move {
             loop {
@@ -332,11 +342,12 @@ impl<'c> Ros<'c> {
         Ok(())
     }
 
-    /// A reiny caller → a ROS service: serve the reiny service `S`, turn the request into a ROS request
+    /// A reiny caller → a ROS service: open declared RPC output `port`, turn the request into a ROS request
     /// with `to_request`, call the ROS service `name`, and answer with `to_response`.
     /// A failure on the ROS side becomes a `reply_err`.
     pub fn import_service<S, Q, P, FQ, FP>(
         &self,
+        port: &str,
         name: &str,
         ty: &ServiceTypeName,
         to_request: FQ,
@@ -350,6 +361,7 @@ impl<'c> Ros<'c> {
         FQ: Fn(S) -> Q + Send + 'static,
         FP: Fn(P) -> S::Response + Send + 'static,
     {
+        let mut server = self.cloudy.provides::<S>(port)?;
         let service_name = parse_name(name)?;
         let client = lock(&self.node)
             .create_client::<Q, P>(
@@ -360,7 +372,6 @@ impl<'c> Ros<'c> {
                 QosProfile::from(&service_qos()),
             )
             .map_err(err)?;
-        let mut server = self.cloudy.serve::<S>()?;
         let name = name.to_string();
         self.spawn(async move {
             while let Some(request) = server.recv().await {

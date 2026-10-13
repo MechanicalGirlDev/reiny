@@ -2,7 +2,7 @@
 //!
 //! Across the link there is exactly one peer (an MCU). The types that peer declared in its Hello are
 //! the entire world this engine shows, and the `Link` is run in bridge mode
-//! ([`Link::as_bridge`](crate::Link::as_bridge)) — declaring no types of its own and mirroring the
+//! ([`Host::bridge`](crate::Host::bridge)) — declaring no types of its own and mirroring the
 //! peer's declarations instead:
 //!
 //! | reiny | link |
@@ -223,7 +223,9 @@ async fn run(host: Arc<Host>, domain: String, state: Arc<Mutex<State>>) {
                     }
                 }
             }
-            HostEvent::Request { hash, seq, payload } => {
+            HostEvent::Request {
+                hash, seq, payload, ..
+            } => {
                 let st = lock(&state);
                 let Some(peer) = &st.peer else { continue };
                 // A type the peer never announced with `calls` has no name here, so refuse it.
@@ -277,7 +279,7 @@ impl Engine for LinkEngine {
             wildcard_source: true,
             liveliness: true,
             query: true,
-            attachment: false,
+            attachment: true,
         }
     }
 

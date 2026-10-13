@@ -53,9 +53,17 @@ async fn service(bus: Arc<dyn Engine>) -> Cloudy {
 }
 
 async fn standalone_node(bus: Arc<dyn Engine>, namespace: &str) -> Cloudy {
-    let mut opts = options(bus, bindings(namespace));
-    opts.module_bindings = None;
-    Cloudy::open(opts).await.expect("standalone node")
+    // Internal transport regression fixture; application startup cannot construct this context.
+    Cloudy::new(
+        bus,
+        namespace.to_string(),
+        DOMAIN.to_string(),
+        crate::shutdown::Shutdown::new(),
+        None,
+        Vec::new(),
+    )
+    .await
+    .expect("transport fixture")
 }
 
 #[tokio::test]

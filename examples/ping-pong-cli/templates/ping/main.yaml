@@ -14,9 +14,3 @@ build:
   features: []
   default_features: true
   locked: true
-schema:
-  project: { name: ping }
-  publications:
-    Ping: { proto: proto/ping.proto, message: ping.Ping }
-  dependencies:
-    pong: { path: ../pong }

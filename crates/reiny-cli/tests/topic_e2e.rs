@@ -103,8 +103,33 @@ fn fabric() -> zenoh::Session {
 }
 
 fn reiny(args: &[&str]) -> Output {
-    Command::new(BIN)
+    let bindings =
+        std::env::temp_dir().join(format!("reiny-topic-bindings-{}.json", std::process::id()));
+    let mut contract: reiny::bindings::ModuleBindings = serde_yaml::from_str(
+        "version: 2\nnamespace: sim\nendpoint_namespace: sim\ninputs:\n  Probe:\n    contract: {type: e2e.Probe}\n    sources: [ctrl]\n  Add:\n    contract: {type: e2e.Add, kind: rpc, response: e2e.Sum}\n    sources: [ctrl]\noutputs:\n  Cmd:\n    contract: {type: e2e.Sum, qos: sensor, retention: last}\n",
+    ).unwrap();
+    let data = args.len() > 2
+        && matches!(
+            (args[0], args[1]),
+            ("topic", "pub" | "echo" | "hz" | "bw") | ("service", "call")
+        );
+    if data {
+        if args[1] == "pub" {
+            contract.inputs.clear();
+            contract.outputs.retain(|name, _| name == args[2]);
+        } else {
+            contract.outputs.clear();
+            contract.inputs.retain(|name, _| name == args[2]);
+        }
+    }
+    let report = bindings.with_extension("report.json");
+    std::fs::write(&bindings, serde_json::to_vec(&contract).unwrap()).unwrap();
+    let output = Command::new(BIN)
         .args(args)
+        .env("REINY_MODULE_REPORT", &report)
+        .args(["--name", "sim"])
+        .arg("--module-bindings")
+        .arg(&bindings)
         .args([
             "--domain",
             "lab",
@@ -114,7 +139,25 @@ fn reiny(args: &[&str]) -> Output {
             "client",
         ])
         .output()
-        .expect("spawn reiny")
+        .expect("spawn reiny");
+    std::fs::remove_file(bindings).unwrap();
+    if data && output.status.success() {
+        let actual: reiny::bindings::ModuleReport =
+            serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+        assert_eq!(actual.namespace, "sim");
+        assert_eq!(actual.inputs.len(), contract.inputs.len());
+        assert_eq!(actual.outputs.len(), contract.outputs.len());
+        for port in actual.inputs.values().chain(actual.outputs.values()) {
+            assert_eq!(
+                Some(port.schema),
+                reiny_build::message_fingerprint(&file_set(), &port.type_name).unwrap()
+            );
+        }
+    }
+    if report.exists() {
+        std::fs::remove_file(report).unwrap();
+    }
+    output
 }
 
 fn stdout(o: &Output) -> String {
@@ -172,13 +215,27 @@ fn topic_node_service_against_live_launch() {
         .expect("service token");
     let _add_schema_req = schema_queryable(&fab, add_key, "e2e.Add");
     let _add_schema_resp = schema_queryable(&fab, add_key, "e2e.Sum");
+    let add_fp = reiny_build::message_fingerprint(&file_set(), "e2e.Add")
+        .unwrap()
+        .unwrap();
+    let sum_fp = reiny_build::message_fingerprint(&file_set(), "e2e.Sum")
+        .unwrap()
+        .unwrap();
     let _add_q = fab
         .declare_queryable(add_key)
         .callback(move |q| {
             let Some(payload) = q.payload() else { return };
+            assert_eq!(
+                q.attachment()
+                    .map(|attachment| attachment.to_bytes().into_owned()),
+                Some(add_fp.to_le_bytes().to_vec())
+            );
             let add = Add::decode(payload.to_bytes().as_ref()).expect("decode Add");
             let sum = Sum { sum: add.a + add.b };
-            let _ = q.reply(add_key, sum.encode_to_vec()).wait();
+            let _ = q
+                .reply(add_key, sum.encode_to_vec())
+                .attachment(sum_fp.to_le_bytes().to_vec())
+                .wait();
         })
         .wait()
         .expect("add queryable");
@@ -207,7 +264,7 @@ fn topic_node_service_against_live_launch() {
     };
 
     // --- playing the launch gui: it only subscribes to Cmd (@sub + @schema; there is no publisher) ---
-    let cmd_key = "reiny/lab/gui/Cmd";
+    let cmd_key = "reiny/lab/gui/Sum";
     let _cmd_sub_token = fab
         .liveliness()
         .declare_token(format!("{cmd_key}/@sub"))
@@ -216,7 +273,7 @@ fn topic_node_service_against_live_launch() {
     let _cmd_schema = schema_queryable(&fab, cmd_key, "e2e.Sum");
     let (cmd_seen, cmd_received) = std::sync::mpsc::channel();
     let _cmd_sub = {
-        fab.declare_subscriber("reiny/lab/*/Cmd")
+        fab.declare_subscriber("reiny/lab/sim/Sum")
             .callback(move |s| {
                 if Sum::decode(s.payload().to_bytes().as_ref()).is_ok_and(|v| v.sum == 7) {
                     let _ = cmd_seen.send(());
@@ -237,7 +294,7 @@ fn topic_node_service_against_live_launch() {
     // A launch that only listens is still a launch, and `sub :` is the line that says so.
     let out = stdout(&reiny(&["node", "info", "gui"]));
     assert!(
-        out.contains("sub : Cmd") && out.contains("pub : -"),
+        out.contains("sub : Sum") && out.contains("pub : -"),
         "node info gui: {out}"
     );
 
@@ -254,7 +311,7 @@ fn topic_node_service_against_live_launch() {
     // TYPE  PUB  SUB  SRV
     assert_eq!(row("Probe"), ["Probe", "ctrl", "-", "-"], "{out}");
     assert_eq!(row("Add"), ["Add", "-", "-", "ctrl"], "{out}");
-    assert_eq!(row("Cmd"), ["Cmd", "-", "gui", "-"], "{out}");
+    assert_eq!(row("Sum"), ["Sum", "-", "gui", "-"], "{out}");
 
     // --- topic hz: a Hz appears on ctrl's row ---
     let out = stdout(&reiny(&["topic", "hz", "Probe", "--duration", "1.5"]));
@@ -311,7 +368,7 @@ fn topic_node_service_against_live_launch() {
         "sim",
     ]));
     assert!(
-        out.contains("reiny/lab/sim/Cmd: sent 1") && out.contains("e2e.Sum"),
+        out.contains("reiny/lab/sim/Sum: sent 1") && out.contains("e2e.Sum"),
         "topic pub: {out}"
     );
     cmd_received

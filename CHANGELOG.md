@@ -4,6 +4,17 @@
 
 ### Breaking changes
 
+- Build-time catalogs move to `schema.yaml` (`version: 2` and `schema` envelope).
+  Runtime `main.yaml` rejects schema catalogs and requires an executable `run`
+  or a nonempty `modules` composition.
+- `Cloudy::open` requires resolved module bindings from `apply` / `run`.
+  Applications communicate only through named `input`, `output`, `uses`, and
+  `provides`; standalone communication, type-only APIs, and engine/session
+  escape hatches are removed. Catalogs alone do not grant communication.
+- Link endpoints use a static YAML-generated named port table. ROS and FFI
+  routes also open declared named ports rather than type-only endpoints.
+- CLI data operations require prepared `--module-bindings`; discovered types
+  and schema catalogs no longer authorize publishing, receiving, or RPC calls.
 - Removed the 0.2 `reiny::__rt::run` entry point.
 - Build catalogs require version 2 and named schema parts; version 1 and the old single `crate` schema declaration are rejected.
 - Topics require an explicit `SCHEMA: u64` and `DESCRIPTOR` declaration. Typed pub/sub and RPC reject missing, malformed, and mismatched fingerprints.

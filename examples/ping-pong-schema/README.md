@@ -1,7 +1,7 @@
 # ping-pong-schema
 
 A shared catalog generated once in the `pingpong-schema` library. The root
-`main.yaml` selects it with the named part `schema.schema.messages`, declaring
+`schema.yaml` selects it with the named part `schema.schema.messages`, declaring
 `crate: pingpong-schema` and both owned proto paths in `protos`. Even a catalog
 with one schema crate uses a named part.
 Codegen uses the current Cargo package to choose its role: the schema package

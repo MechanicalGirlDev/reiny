@@ -9,14 +9,14 @@ fn config_keys_are_idents_and_values_scalars() {
     };
     let f = Fixture::new("config-key");
     f.write("proto/a.proto", "");
-    f.write("main.yaml", &manifest("delay-ms: 0"));
+    f.write("schema.yaml", &manifest("delay-ms: 0"));
     let err = describe_err(f.root());
     assert!(err.contains("[config]"), "{err}");
     assert!(err.contains("delay-ms"), "{err}");
 
     let f = Fixture::new("config-value");
     f.write("proto/a.proto", "");
-    f.write("main.yaml", &manifest("limits: { max: 1 }"));
+    f.write("schema.yaml", &manifest("limits: { max: 1 }"));
     let err = describe_err(f.root());
     assert!(err.contains("[config].limits"), "{err}");
     assert!(err.contains("table"), "{err}");
@@ -27,7 +27,7 @@ fn describe_reports_config_and_services() {
     let f = Fixture::new("services");
     f.write("proto/calc.proto", "");
     f.write(
-        "main.yaml",
+        "schema.yaml",
         r"
 {version: 2,schema: {project: {name: calc,version: 0.1.0},publications: {Add: {proto: proto/calc.proto,message: calc.Add},Sum: {proto: proto/calc.proto,message: calc.Sum}},services: {Adder: {request: Add,response: Sum}},config: {rate_hz: 10,name: calc}}}
 ",

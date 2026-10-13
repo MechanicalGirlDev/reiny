@@ -4,22 +4,22 @@ use super::*;
 fn v1_catalog_is_rejected_at_discovery_and_dependency_boundaries() {
     let f = Fixture::new("v1-catalog");
     f.write(
-        "main.yaml",
+        "schema.yaml",
         "version: 1\nschema: { project: { name: app } }\n",
     );
     let err = find_manifest(f.root()).unwrap_err().to_string();
-    assert!(err.contains("unsupported main.yaml version 1"), "{err}");
-    let err = parse_manifest(&f.path("main.yaml"))
+    assert!(err.contains("unsupported schema.yaml version 1"), "{err}");
+    let err = parse_manifest(&f.path("schema.yaml"))
         .unwrap_err()
         .to_string();
-    assert!(err.contains("unsupported main.yaml version 1"), "{err}");
+    assert!(err.contains("unsupported schema.yaml version 1"), "{err}");
 }
 
 #[test]
 fn legacy_single_schema_crate_is_rejected() {
     let f = Fixture::new("single-schema");
     f.write(
-        "main.yaml",
+        "schema.yaml",
         "version: 2\nschema:\n  internals: {}\n  schema: { crate: app-schema }\n",
     );
     let err = describe_err(f.root());
@@ -28,8 +28,8 @@ fn legacy_single_schema_crate_is_rejected() {
 }
 
 #[test]
-fn main_manifest_requires_supported_version_and_valid_schema() {
-    // Given malformed unified manifests.
+fn catalog_requires_supported_version_and_valid_schema() {
+    // Given malformed catalog manifests.
     for (name, text) in [
         ("missing-version", "schema: { project: { name: app } }\n"),
         (
@@ -41,9 +41,11 @@ fn main_manifest_requires_supported_version_and_valid_schema() {
             "version: 2\nschema: { publications: invalid }\n",
         ),
         ("bad-yaml", "version: 2\nschema: [\n"),
+        ("missing-schema", "version: 2\n"),
+        ("null-schema", "version: 2\nschema: null\n"),
     ] {
         let f = Fixture::new(name);
-        f.write("main.yaml", text);
+        f.write("schema.yaml", text);
 
         // When discovery encounters them, it must not silently fall back.
         let result = find_manifest(f.root());
@@ -60,7 +62,7 @@ fn ancestor_catalog_still_rejects_topic_collisions() {
     f.write("proto/a.proto", "");
     f.write("proto/b.proto", "");
     f.write(
-        "main.yaml",
+        "schema.yaml",
         "version: 2\nschema:\n  internals:\n    First: { proto: proto/a.proto, message: first.Value }\n    Second: { proto: proto/b.proto, message: second.Value }\n",
     );
     f.write(
@@ -76,10 +78,23 @@ fn ancestor_catalog_still_rejects_topic_collisions() {
 }
 
 #[test]
+fn invalid_nearest_catalog_does_not_fall_back_to_ancestor() {
+    let f = Fixture::new("invalid-nearest");
+    f.write(
+        "schema.yaml",
+        "version: 2\nschema: { project: { name: ancestor } }\n",
+    );
+    f.write("worker/schema.yaml", "version: 2\n");
+    let err = describe_err(&f.path("worker"));
+    assert!(err.contains("worker"), "{err}");
+    assert!(err.contains("missing field `schema`"), "{err}");
+}
+
+#[test]
 fn describe_reports_layout_mistakes() {
     // Neither [project] nor [internals]/[projects]: the message names both ways out.
     let f = Fixture::new("neither");
-    f.write("main.yaml", "version: 2\nschema: {}\n");
+    f.write("schema.yaml", "version: 2\nschema: {}\n");
     let err = describe_err(f.root());
     assert!(err.contains("[project]"), "{err}");
     assert!(err.contains("[internals]"), "{err}");
@@ -87,7 +102,7 @@ fn describe_reports_layout_mistakes() {
     // A publication naming a proto that is not on disk.
     let f = Fixture::new("missing-proto");
     f.write(
-        "main.yaml",
+        "schema.yaml",
         r"
 {version: 2,schema: {project: {name: ping,version: 0.1.0},publications: {Ping: {proto: proto/ping.proto,message: ping.Ping}}}}
 ",
@@ -100,14 +115,14 @@ fn describe_reports_layout_mistakes() {
     let f = Fixture::new("bad-dep-key");
     f.write("dep/proto/d.proto", "");
     f.write(
-        "dep/main.yaml",
+        "dep/schema.yaml",
         r"
 {version: 2,schema: {project: {name: dep,version: 0.1.0},publications: {D: {proto: proto/d.proto,message: d.D}}}}
 ",
     );
     f.write("app/proto/a.proto", "");
     f.write(
-        "app/main.yaml",
+        "app/schema.yaml",
         r#"
 {version: 2,schema: {project: {name: app,version: 0.1.0},publications: {A: {proto: proto/a.proto,message: a.A}},dependencies: {my-dep: {version: "0.1",path: ../dep}}}}
 "#,
@@ -121,6 +136,6 @@ fn describe_reports_layout_mistakes() {
 fn missing_manifest_names_the_starting_directory() {
     let f = Fixture::new("no-manifest"); // deliberately empty
     let err = describe_err(f.root());
-    assert!(err.contains("main.yaml"), "{err}");
+    assert!(err.contains("schema.yaml"), "{err}");
     assert!(err.contains("no-manifest"), "{err}");
 }

@@ -1,0 +1,15 @@
+[package]
+name = "static-ports-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+reiny = { package = "reiny-core", path = "../../../../reiny-core" }
+reiny-link = { path = "../../../../reiny-link", default-features = false }
+prost = { version = "0.14", default-features = false, features = ["derive"] }
+
+[build-dependencies]
+reiny-build = { path = "../../.." }

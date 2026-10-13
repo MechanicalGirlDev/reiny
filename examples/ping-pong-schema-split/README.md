@@ -1,7 +1,7 @@
 # ping-pong-schema-split
 
 The shared schema is split into `pingpong-geometry` (Point) and `pingpong-msg`
-(Ping/Pong, which refer to Point). The root `main.yaml` declares parts under
+(Ping/Pong, which refer to Point). The root `schema.yaml` declares parts under
 `schema.schema.geometry` and `schema.schema.msg`. Type ownership follows proto paths.
 
 Geometry exports include paths and owned descriptor names through Cargo `links`

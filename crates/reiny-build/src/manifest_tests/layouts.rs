@@ -8,7 +8,7 @@ fn one_named_schema_part_assigns_ownership_and_compiles_its_protos() {
         "syntax = \"proto3\"; package ping; message Ping { uint64 value = 1; }\n",
     );
     f.write(
-        "main.yaml",
+        "schema.yaml",
         "version: 2\nschema:\n  internals:\n    Ping: { proto: proto/ping.proto, message: ping.Ping }\n  schema:\n    messages:\n      crate: app-schema\n      protos: [proto/ping.proto]\n  projects:\n    ping: { publications: [Ping] }\n",
     );
     let res = describe(f.root()).unwrap();
@@ -37,14 +37,14 @@ fn describe_resolves_a_per_project_layout() {
     let f = Fixture::new("per-project");
     f.write("pong/proto/pong.proto", "");
     f.write(
-        "pong/main.yaml",
+        "pong/schema.yaml",
         r"
 {version: 2,schema: {project: {name: pong,version: 0.1.0},publications: {Pong: {proto: proto/pong.proto,message: pong.Pong}}}}
 ",
     );
     f.write("ping/proto/ping.proto", "");
     f.write(
-        "ping/main.yaml",
+        "ping/schema.yaml",
         r#"
 {version: 2,schema: {project: {name: ping,version: 0.1.0},publications: {Ping: {proto: proto/ping.proto,message: ping.Ping}},dependencies: {pong: {version: "0.1",path: ../pong}}}}
 "#,
@@ -91,7 +91,7 @@ fn describe_resolves_a_workspace_layout() {
     f.write("proto/ping.proto", "");
     f.write("proto/pong.proto", "");
     f.write(
-        "main.yaml",
+        "schema.yaml",
         r"
 {version: 2,schema: {internals: {Ping: {proto: proto/ping.proto,message: ping.Ping},Pong: {proto: proto/pong.proto,message: pong.Pong}},projects: {talker: {publications: [Ping],dependencies: [Pong]},listener: {publications: [Pong],dependencies: [Ping]}}}}
 ",

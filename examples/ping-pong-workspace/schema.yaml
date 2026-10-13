@@ -1,0 +1,20 @@
+version: 2
+schema:
+  internals:
+    Ping:
+      proto: "proto/ping.proto"
+      message: "ping.Ping"
+    Pong:
+      proto: "proto/pong.proto"
+      message: "pong.Pong"
+  projects:
+    ping:
+      version: "0.1.0"
+      description: "ping module"
+      publications: ["Ping"]
+      dependencies: ["Pong"]
+    pong:
+      version: "0.1.0"
+      description: "pong module"
+      publications: ["Pong"]
+      dependencies: ["Ping"]

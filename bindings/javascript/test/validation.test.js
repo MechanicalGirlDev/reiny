@@ -8,7 +8,9 @@ test("native handles cannot be constructed by callers", () => {
 });
 
 test("network string validation runs before loading the library", () => {
-  assert.throws(() => Session.open("bad\0id"), TypeError);
-  assert.throws(() => Session.open("id", "bad\0domain"), TypeError);
-  assert.throws(() => Session.open("id", "domain", "bad\0config"), TypeError);
+  assert.throws(() => Session.open("bad\0id", "domain", undefined, "bindings.json"), TypeError);
+  assert.throws(() => Session.open("id", "bad\0domain", undefined, "bindings.json"), TypeError);
+  assert.throws(() => Session.open("id", "domain", "bad\0config", "bindings.json"), TypeError);
+  assert.throws(() => Session.open("id", "domain", undefined), TypeError);
+  assert.throws(() => Session.open("id", "domain", undefined, "bad\0bindings"), TypeError);
 });

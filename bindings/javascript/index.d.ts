@@ -17,16 +17,16 @@ export function loadLibrary(path?: string): void;
 export class LocalBus {
   private constructor();
   static new(): LocalBus;
-  connect(id: string, domain?: string): Session;
+  connect(id: string, domain: string, moduleBindingsPath: string): Session;
   dispose(): void;
 }
 
 export class Session {
   private constructor();
-  static open(id: string, domain?: string, zenohConfig?: string): Session;
-  publisher(topic: string, schema?: bigint): Publisher;
-  subscriber(topic: string, source?: string): Subscription;
-  publishers(topic: string, timeoutMs: number): readonly string[];
+  static open(id: string, domain: string, zenohConfig: string | undefined, moduleBindingsPath: string): Session;
+  publisher(name: string, typeName: string, schema: bigint): Publisher;
+  subscriber(name: string, typeName: string, schema: bigint): Subscription;
+  ready(): void;
   shutdown(): void;
   dispose(): void;
 }

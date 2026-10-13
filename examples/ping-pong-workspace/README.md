@@ -1,9 +1,9 @@
 # ping-pong-workspace
 
 The same Ping/Pong cycle as the ring example, with one shared proto catalog.
-The root `main.yaml` contains `schema.internals` and `schema.projects`; each leaf
-contains runtime ports and a process run declaration, without a schema block.
-Codegen skips those leaves and inherits the root catalog. Proto paths remain relative
+The root `schema.yaml` contains `schema.internals` and `schema.projects`; each leaf
+has a runtime `main.yaml` with ports and a process run declaration.
+Codegen discovers the root catalog independently of those runtime manifests. Proto paths remain relative
 to the catalog, not to the leaf directory.
 
 Both applications generate the messages independently and import

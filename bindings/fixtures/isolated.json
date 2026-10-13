@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "namespace": "isolated",
+  "endpoint_namespace": "isolated",
+  "inputs": {
+    "in": {
+      "contract": {
+        "type": "Binary"
+      },
+      "sources": [
+        "sender",
+        "isolated"
+      ]
+    }
+  },
+  "outputs": {
+    "out": {
+      "contract": {
+        "type": "Binary"
+      }
+    }
+  }
+}

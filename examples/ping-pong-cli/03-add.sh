@@ -10,6 +10,7 @@ echo "==> cd ping && reiny add ../pong   (ping → Pong を購読)"
 
 for proj in ping pong; do
   cp "templates/$proj/main.yaml" "$proj/main.yaml"
+  cp "templates/$proj/schema.yaml" "$proj/schema.yaml"
   cp "templates/$proj/main.rs" "$proj/src/main.rs"
 done
 

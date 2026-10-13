@@ -1,16 +1,19 @@
-//! A `Cloudy` on top of a link: one side plays the MCU (a plain `Host` that declares types), the
-//! other is a `Cloudy` over a bridge-mode `Host` wrapped in a `LinkEngine`, joined by
-//! `tokio::io::duplex`. Presence / Data / latched / services all flow in both directions. No
-//! hardware.
+//! Transport adapter tests over a duplex stream. Applications use named static ports;
+//! the host side exercises the low-level Engine boundary without an unbound Cloudy.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests may fail by panicking
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use reiny::{CallError, Cloudy, PresenceEvent, RuntimeOptions, Service, Topic};
+use prost::Message;
+use reiny::engine::{Engine, Guard, Key, Presence, QueryParams, SERVICE_CHUNK, SUB_CHUNK, Sample};
+use reiny::{Service, Topic};
 use reiny_link::transport::Stream;
-use reiny_link::{Host, HostEvent, HostLink, LinkEngine, wire};
+use reiny_link::{
+    Host, HostEvent, HostLink, LinkEngine, PortDirection, PortType, StaticPort, wire,
+};
+use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::time::timeout;
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -76,23 +79,114 @@ impl Service for Echo {
     type Response = Echo;
 }
 
+const PORTS: &[StaticPort] = &[
+    StaticPort {
+        name: "position",
+        direction: PortDirection::Output,
+        ty: Pos::TYPE,
+        schema: Pos::SCHEMA,
+        response: None,
+    },
+    StaticPort {
+        name: "command",
+        direction: PortDirection::Input,
+        ty: Cmd::TYPE,
+        schema: Cmd::SCHEMA,
+        response: None,
+    },
+    StaticPort {
+        name: "addition",
+        direction: PortDirection::Service,
+        ty: Add::TYPE,
+        schema: Add::SCHEMA,
+        response: Some(PortType {
+            ty: Sum::TYPE,
+            schema: Sum::SCHEMA,
+        }),
+    },
+    StaticPort {
+        name: "echo",
+        direction: PortDirection::Client,
+        ty: Echo::TYPE,
+        schema: Echo::SCHEMA,
+        response: Some(PortType {
+            ty: Echo::TYPE,
+            schema: Echo::SCHEMA,
+        }),
+    },
+];
+
 const WAIT: Duration = Duration::from_secs(5);
+
+fn fingerprint<T: Topic>() -> Vec<u8> {
+    T::SCHEMA.to_le_bytes().to_vec()
+}
+
+fn watch(engine: &LinkEngine, key: &Key) -> (Guard, UnboundedReceiver<Presence>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let guard = engine
+        .watch_alive(
+            key,
+            Box::new(move |event| {
+                let _ = tx.send(event);
+            }),
+        )
+        .unwrap();
+    (guard, rx)
+}
+
+fn subscribe(engine: &LinkEngine, key: &Key) -> (Guard, UnboundedReceiver<Sample>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let guard = engine
+        .subscribe(
+            key,
+            Box::new(move |sample| {
+                let _ = tx.send(sample);
+            }),
+        )
+        .unwrap();
+    (guard, rx)
+}
+
+async fn link_to_engine(link: HostLink, id: &str) -> (Arc<Host>, LinkEngine) {
+    let peer = link.id().to_string();
+    let (mcu_end, host_end) = tokio::io::duplex(4096);
+    let mcu = Arc::new(Host::spawn(link, Stream(mcu_end)));
+    let engine = LinkEngine::spawn(Host::bridge(id, Stream(host_end)).unwrap(), "lab");
+    let launch = Key::launch("lab", Some(&peer));
+    let (_watch, mut events) = watch(&engine, &launch);
+    assert_eq!(
+        timeout(WAIT, events.recv()).await.unwrap(),
+        Some(Presence::Joined(launch))
+    );
+    assert!(matches!(
+        timeout(WAIT, mcu.recv()).await.unwrap(),
+        Some(HostEvent::Connected { .. })
+    ));
+    (mcu, engine)
+}
+
+fn request<T: Topic + Message>(value: &T) -> QueryParams {
+    QueryParams {
+        payload: Some(value.encode_to_vec()),
+        attachment: Some(fingerprint::<T>()),
+        timeout: WAIT,
+    }
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn outgoing_data_and_requests_require_matching_fingerprints() {
-    use reiny::engine::{Key, QueryParams};
-
-    let mut mcu_link = HostLink::host("mcu").unwrap();
-    mcu_link.subscribes::<Cmd>().unwrap();
-    mcu_link.serves::<Add>().unwrap();
-    let (mcu, cloudy) = link_to_cloudy(mcu_link, "fingerprints").await;
-    let mut watch = cloudy.watch_subscribers::<Cmd>().unwrap();
+    let mut link = HostLink::host("mcu", PORTS).unwrap();
+    link.subscribes::<Cmd>("command").unwrap();
+    link.serves::<Add>("addition").unwrap();
+    let (mcu, engine) = link_to_engine(link, "fingerprints").await;
+    assert!(engine.caps().attachment);
+    let sub = Key::topic("lab", Some("mcu"), Cmd::TYPE).with_chunk(SUB_CHUNK);
+    let (_watch, mut events) = watch(&engine, &sub);
     assert_eq!(
-        timeout(WAIT, watch.recv()).await.unwrap(),
-        Some(PresenceEvent::Joined("mcu".to_string()))
+        timeout(WAIT, events.recv()).await.unwrap(),
+        Some(Presence::Joined(sub))
     );
-
-    let engine = cloudy.engine().unwrap();
     let publisher = engine
         .publisher(
             &Key::topic("lab", Some("host"), Cmd::TYPE),
@@ -106,10 +200,7 @@ async fn outgoing_data_and_requests_require_matching_fingerprints() {
     ] {
         assert!(
             publisher
-                .put(
-                    prost::Message::encode_to_vec(&Cmd { v: 1 }),
-                    attachment.clone()
-                )
+                .put(Cmd { v: 1 }.encode_to_vec(), attachment.clone())
                 .is_err()
         );
         assert!(
@@ -117,69 +208,70 @@ async fn outgoing_data_and_requests_require_matching_fingerprints() {
                 .query(
                     &Key::topic("lab", Some("mcu"), Add::TYPE),
                     QueryParams {
-                        payload: Some(prost::Message::encode_to_vec(&Add { a: 1, b: 2 })),
+                        payload: Some(Add { a: 1, b: 2 }.encode_to_vec()),
                         attachment,
                         timeout: WAIT,
-                    },
+                    }
                 )
                 .is_err()
         );
     }
     publisher
-        .put(
-            prost::Message::encode_to_vec(&Cmd { v: 2 }),
-            Some(Cmd::SCHEMA.to_le_bytes().to_vec()),
-        )
+        .put(Cmd { v: 2 }.encode_to_vec(), Some(fingerprint::<Cmd>()))
         .unwrap();
-    // The first event must be the valid send: rejected writes must not leak onto the wire.
     let event = timeout(WAIT, mcu.recv()).await.unwrap().unwrap();
     assert_eq!(event.decode::<Cmd>(), Some(Cmd { v: 2 }));
+    assert_eq!(
+        engine.host().send("command", &Cmd { v: 3 }),
+        Err(reiny_link::Error::UnknownPort)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn hierarchical_peer_namespace_keeps_type_identity_and_exact_routing() {
-    use reiny::engine::{Key, QueryParams};
-
     const PEER: &str = "deployment/arm/mcu";
-    let mut mcu_link = HostLink::host(PEER).unwrap();
-    mcu_link.publishes::<Pos>().unwrap();
-    mcu_link.subscribes::<Cmd>().unwrap();
-    mcu_link.serves::<Add>().unwrap();
-    let (mcu, cloudy) = link_to_cloudy(mcu_link, "deployment/host/bridge").await;
-
-    // Presence history is the handshake signal on the engine side; declarations precede Data.
-    let mut watch = cloudy.watch_publishers::<Pos>().unwrap();
+    let mut link = HostLink::host(PEER, PORTS).unwrap();
+    link.publishes::<Pos>("position").unwrap();
+    link.subscribes::<Cmd>("command").unwrap();
+    link.serves::<Add>("addition").unwrap();
+    let (mcu, engine) = link_to_engine(link, "deployment/host/bridge").await;
+    let position = Key::topic("lab", Some(PEER), Pos::TYPE);
+    let (_watch, mut events) = watch(&engine, &position);
     assert_eq!(
-        timeout(WAIT, watch.recv()).await.unwrap(),
-        Some(PresenceEvent::Joined(PEER.to_string()))
+        timeout(WAIT, events.recv()).await.unwrap(),
+        Some(Presence::Joined(position.clone()))
     );
-    assert_eq!(cloudy.publishers::<Pos>().await.unwrap(), [PEER]);
-    assert_eq!(cloudy.subscribers::<Cmd>().await.unwrap(), [PEER]);
-    assert_eq!(cloudy.servers::<Add>().await.unwrap(), [PEER]);
-    let mut exact = cloudy.subscriber::<Pos>().from(PEER).build().unwrap();
-    let mut recursive = cloudy.subscribe::<Pos>().unwrap();
-    assert!(mcu.send(&Pos { x: 9 }).unwrap());
-    for envelope in [
-        timeout(WAIT, exact.recv_envelope()).await.unwrap().unwrap(),
-        timeout(WAIT, recursive.recv_envelope())
-            .await
-            .unwrap()
-            .unwrap(),
+    for key in [
+        position.clone(),
+        Key::topic("lab", Some(PEER), Cmd::TYPE).with_chunk(SUB_CHUNK),
+        Key::topic("lab", Some(PEER), Add::TYPE).with_chunk(SERVICE_CHUNK),
     ] {
-        assert_eq!(envelope.source, PEER);
-        assert_eq!(envelope.value.x, 9);
+        assert_eq!(engine.alive(&key, WAIT).await.unwrap(), [key]);
     }
-
-    let (data_tx, mut data_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_exact, mut exact) = subscribe(&engine, &position);
+    let (_recursive, mut recursive) = subscribe(&engine, &Key::topic("lab", None, Pos::TYPE));
+    assert!(mcu.send("position", &Pos { x: 9 }).unwrap());
+    for sample in [
+        timeout(WAIT, exact.recv()).await.unwrap().unwrap(),
+        timeout(WAIT, recursive.recv()).await.unwrap().unwrap(),
+    ] {
+        assert_eq!(sample.key, position);
+        assert_eq!(Pos::decode(sample.payload.as_slice()).unwrap().x, 9);
+        assert_eq!(sample.attachment, Some(fingerprint::<Pos>()));
+    }
+    let (data_tx, mut data_rx) = mpsc::unbounded_channel();
     let peer_task = {
         let mcu = Arc::clone(&mcu);
         tokio::spawn(async move {
             while let Some(event) = mcu.recv().await {
                 match event {
-                    HostEvent::Request { hash, seq, payload } => {
+                    HostEvent::Request {
+                        hash, seq, payload, ..
+                    } => {
                         assert_eq!(hash, wire::type_hash(Add::TYPE));
-                        let add = <Add as prost::Message>::decode(payload.as_slice()).unwrap();
-                        mcu.reply::<Add>(seq, &Sum { s: add.a + add.b }).unwrap();
+                        let add = Add::decode(payload.as_slice()).unwrap();
+                        mcu.reply::<Add>("addition", seq, &Sum { s: add.a + add.b })
+                            .unwrap();
                     }
                     HostEvent::Data { .. } => data_tx.send(event).unwrap(),
                     HostEvent::Connected { .. } | HostEvent::Disconnected => {}
@@ -187,311 +279,269 @@ async fn hierarchical_peer_namespace_keeps_type_identity_and_exact_routing() {
             }
         })
     };
-    let cmd = cloudy.publish::<Cmd>().unwrap();
-    cmd.send(Cmd { v: 11 }).await.unwrap();
+    let cmd = engine
+        .publisher(
+            &Key::topic("lab", Some("host"), Cmd::TYPE),
+            &reiny::Qos::default(),
+        )
+        .unwrap();
+    cmd.put(Cmd { v: 11 }.encode_to_vec(), Some(fingerprint::<Cmd>()))
+        .unwrap();
     let event = timeout(WAIT, data_rx.recv()).await.unwrap().unwrap();
-    let HostEvent::Data { hash, .. } = &event else {
-        panic!("expected Data")
-    };
-    assert_eq!(*hash, wire::type_hash(Cmd::TYPE));
     assert_eq!(event.decode::<Cmd>(), Some(Cmd { v: 11 }));
-
-    // A real answering peer makes a widened or chunk-erasing request fail this test, not time out.
     let exact_key = Key::topic("lab", Some(PEER), Add::TYPE);
     for key in [
         Key::topic("lab", Some("deployment/arm"), Add::TYPE),
         Key::topic("other", Some(PEER), Add::TYPE),
         exact_key.with_chunk("@schema/probe.Add"),
     ] {
-        let mut replies = cloudy
-            .engine()
-            .unwrap()
-            .query(
-                &key,
-                QueryParams {
-                    payload: Some(prost::Message::encode_to_vec(&Add { a: 2, b: 3 })),
-                    attachment: None,
-                    timeout: WAIT,
-                },
-            )
-            .unwrap();
+        let mut replies = engine.query(&key, request(&Add { a: 2, b: 3 })).unwrap();
         assert!(
             timeout(WAIT, replies.next()).await.unwrap().is_none(),
             "{key}"
         );
     }
-    let sum = timeout(
-        WAIT,
-        cloudy
-            .caller::<Add>()
-            .to(PEER)
-            .build()
-            .unwrap()
-            .call(Add { a: 2, b: 3 }),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(sum.s, 5);
+    let mut replies = engine
+        .query(&exact_key, request(&Add { a: 2, b: 3 }))
+        .unwrap();
+    let sum = timeout(WAIT, replies.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(sum.key, exact_key);
+    assert_eq!(sum.attachment, Some(fingerprint::<Sum>()));
+    assert_eq!(Sum::decode(sum.payload.as_slice()).unwrap().s, 5);
     peer_task.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::too_many_lines)] // one pass end to end (a link is a pair; splitting it saves nothing)
-async fn cloudy_over_a_link() {
-    let (mcu_end, host_end) = tokio::io::duplex(4096);
-
-    // The MCU side: publishes Pos latched, subscribes to Cmd, serves Add, calls Echo.
-    let mut mcu_link = HostLink::host("mcu").unwrap();
-    mcu_link.publishes_latched::<Pos>().unwrap();
-    mcu_link.subscribes::<Cmd>().unwrap();
-    mcu_link.serves::<Add>().unwrap();
-    mcu_link.calls::<Echo>().unwrap();
-    let mcu = Arc::new(Host::spawn(mcu_link, Stream(mcu_end)));
-
-    // The host side: a bridge-mode Host turned into an Engine, with a Cloudy on top.
-    let engine = LinkEngine::spawn(
-        Host::spawn(
-            HostLink::host("host").unwrap().as_bridge(),
-            Stream(host_end),
-        ),
-        "lab",
-    );
-    let mut opts = RuntimeOptions::new("host");
-    opts.domain = "lab".to_string();
-    opts.engine = Some(Arc::new(engine));
-    opts.install_tracing = false;
-    let cloudy = Cloudy::open(opts).await.expect("cloudy over link");
-
-    // One task handles the MCU's events: Data goes to a channel, Add gets answered.
-    let (data_tx, mut data_rx) = tokio::sync::mpsc::unbounded_channel::<HostEvent>();
-    let (conn_tx, mut conn_rx) = tokio::sync::mpsc::unbounded_channel::<HostEvent>();
-    {
-        let mcu = Arc::clone(&mcu);
-        tokio::spawn(async move {
-            while let Some(ev) = mcu.recv().await {
-                match ev {
-                    HostEvent::Request { hash, seq, payload }
-                        if hash == wire::type_hash("EngAdd") =>
-                    {
-                        let add = <Add as prost::Message>::decode(payload.as_slice()).unwrap();
-                        mcu.reply::<Add>(seq, &Sum { s: add.a + add.b }).unwrap();
-                    }
-                    HostEvent::Data { .. } => {
-                        let _ = data_tx.send(ev);
-                    }
-                    HostEvent::Connected { .. } | HostEvent::Disconnected => {
-                        let _ = conn_tx.send(ev);
-                    }
-                    HostEvent::Request { .. } => {}
-                }
-            }
-        });
-    }
-
-    // Handshake: from the MCU's side the peer is a bridge, declaring no types at all.
-    let Some(HostEvent::Connected { id, types }) = timeout(WAIT, conn_rx.recv()).await.unwrap()
-    else {
-        panic!("mcu should connect")
-    };
-    assert_eq!((id.as_str(), types.len()), ("host", 0));
-
-    // Presence: the MCU's Hello is what publishers / servers / watch report.
-    let mut watch = cloudy.watch_publishers::<Pos>().unwrap();
+#[allow(clippy::too_many_lines)] // exercises the bidirectional transport adapter as one pair
+async fn engine_over_declared_ports() {
+    let mut link = HostLink::host("mcu", PORTS).unwrap();
+    link.publishes_latched::<Pos>("position").unwrap();
+    link.subscribes::<Cmd>("command").unwrap();
+    link.serves::<Add>("addition").unwrap();
+    link.calls::<Echo>("echo").unwrap();
+    let (mcu, engine) = link_to_engine(link, "host").await;
+    assert!(mcu.link().lock().unwrap().peer_is_bridge());
+    assert_eq!(mcu.peer().unwrap().1, Vec::<reiny_link::PeerType>::new());
+    let position = Key::topic("lab", Some("mcu"), Pos::TYPE);
+    let (_watch, mut events) = watch(&engine, &position);
     assert_eq!(
-        timeout(WAIT, watch.recv()).await.unwrap(),
-        Some(PresenceEvent::Joined("mcu".to_string()))
+        timeout(WAIT, events.recv()).await.unwrap(),
+        Some(Presence::Joined(position.clone()))
     );
-    assert_eq!(cloudy.publishers::<Pos>().await.unwrap(), ["mcu"]);
-    assert_eq!(cloudy.servers::<Add>().await.unwrap(), ["mcu"]);
     assert_eq!(
-        cloudy.publishers::<Cmd>().await.unwrap(),
-        Vec::<String>::new()
+        engine.alive(&position, WAIT).await.unwrap().as_slice(),
+        core::slice::from_ref(&position)
     );
-    // What the MCU listens for shows up as presence too, and does not leak into publishers::<Cmd>().
-    assert_eq!(cloudy.subscribers::<Cmd>().await.unwrap(), ["mcu"]);
     assert_eq!(
-        cloudy.subscribers::<Pos>().await.unwrap(),
-        Vec::<String>::new()
+        engine
+            .alive(
+                &Key::topic("lab", Some("mcu"), Add::TYPE).with_chunk(SERVICE_CHUNK),
+                WAIT
+            )
+            .await
+            .unwrap()
+            .len(),
+        1
     );
-
-    // MCU → Cloudy: Data (the fingerprint reaches the attachment by way of the Hello).
-    let mut sub = cloudy.subscribe::<Pos>().unwrap();
-    assert!(mcu.send(&Pos { x: 1 }).unwrap());
-    let envelope = timeout(WAIT, sub.recv_envelope()).await.unwrap().unwrap();
-    assert_eq!((envelope.value.x, envelope.source.as_str()), (1, "mcu"));
-
-    // Latched: a late subscriber gets the most recent value, which the engine is holding.
-    let mut late = cloudy.subscriber::<Pos>().latched().build().unwrap();
     assert_eq!(
-        timeout(WAIT, late.recv()).await.unwrap().map(|p| p.x),
-        Some(1)
+        engine
+            .alive(&Key::topic("lab", Some("mcu"), Cmd::TYPE), WAIT)
+            .await
+            .unwrap(),
+        Vec::<Key>::new()
     );
-
-    // Cloudy → MCU: a publish only lands for a type that is actually subscribed.
-    let cmd = cloudy.publish::<Cmd>().unwrap();
-    cmd.send(Cmd { v: 7 }).await.unwrap();
-    let ev = timeout(WAIT, data_rx.recv()).await.unwrap().unwrap();
-    assert_eq!(ev.decode::<Cmd>(), Some(Cmd { v: 7 }));
-
-    // Cloudy → MCU: a service call.
-    let sum = timeout(WAIT, cloudy.call::<Add>(Add { a: 2, b: 3 }))
+    assert_eq!(
+        engine
+            .alive(
+                &Key::topic("lab", Some("mcu"), Cmd::TYPE).with_chunk(SUB_CHUNK),
+                WAIT
+            )
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        engine
+            .alive(&position.with_chunk(SUB_CHUNK), WAIT)
+            .await
+            .unwrap(),
+        Vec::<Key>::new()
+    );
+    let (_sub, mut samples) = subscribe(&engine, &position);
+    assert!(mcu.send("position", &Pos { x: 1 }).unwrap());
+    let sample = timeout(WAIT, samples.recv()).await.unwrap().unwrap();
+    assert_eq!(sample.key, position);
+    assert_eq!(Pos::decode(sample.payload.as_slice()).unwrap().x, 1);
+    assert_eq!(sample.attachment, Some(fingerprint::<Pos>()));
+    let mut latched = engine
+        .query(
+            &position,
+            QueryParams {
+                payload: None,
+                attachment: None,
+                timeout: WAIT,
+            },
+        )
+        .unwrap();
+    let sample = timeout(WAIT, latched.next())
         .await
         .unwrap()
+        .unwrap()
         .unwrap();
-    assert_eq!(sum.s, 5);
-    let nobody = cloudy
-        .caller::<Add>()
-        .to("ghost")
-        .timeout(Duration::from_millis(500))
-        .build()
+    assert_eq!(Pos::decode(sample.payload.as_slice()).unwrap().x, 1);
+    let cmd = engine
+        .publisher(
+            &Key::topic("lab", Some("host"), Cmd::TYPE),
+            &reiny::Qos::default(),
+        )
         .unwrap();
-    assert!(matches!(
-        nobody.call(Add { a: 1, b: 1 }).await,
-        Err(CallError::NoReply)
-    ));
-
-    // MCU → Cloudy: a service call (a bridge takes requests for types it does not serve and hands
-    // them to the responder).
-    let mut server = cloudy.serve::<Echo>().unwrap();
-    let server_task = tokio::spawn(async move {
-        let req = server.recv().await.unwrap();
-        let text = req.value.text.clone();
-        req.reply(Echo {
-            text: format!("{text}!"),
-        })
+    cmd.put(Cmd { v: 7 }.encode_to_vec(), Some(fingerprint::<Cmd>()))
+        .unwrap();
+    let event = timeout(WAIT, mcu.recv()).await.unwrap().unwrap();
+    assert_eq!(event.decode::<Cmd>(), Some(Cmd { v: 7 }));
+    let service = Key::topic("lab", Some("mcu"), Add::TYPE);
+    let mut replies = engine
+        .query(&service, request(&Add { a: 2, b: 3 }))
+        .unwrap();
+    let event = timeout(WAIT, mcu.recv()).await.unwrap().unwrap();
+    let HostEvent::Request { seq, .. } = &event else {
+        panic!("expected request")
+    };
+    let add = event.decode::<Add>().unwrap();
+    mcu.reply::<Add>("addition", *seq, &Sum { s: add.a + add.b })
+        .unwrap();
+    let sample = timeout(WAIT, replies.next())
         .await
+        .unwrap()
+        .unwrap()
         .unwrap();
-    });
+    assert_eq!(sample.attachment, Some(fingerprint::<Sum>()));
+    assert_eq!(Sum::decode(sample.payload.as_slice()).unwrap().s, 5);
+    let mut nobody = engine
+        .query(
+            &Key::topic("lab", Some("ghost"), Add::TYPE),
+            request(&Add { a: 1, b: 1 }),
+        )
+        .unwrap();
+    assert!(timeout(WAIT, nobody.next()).await.unwrap().is_none());
+    let echo_key = Key::topic("lab", Some("host"), Echo::TYPE);
+    let response_key = echo_key.clone();
+    let responder = engine
+        .respond(
+            &echo_key,
+            Box::new(move |query| {
+                assert_eq!(query.attachment(), Some(fingerprint::<Echo>().as_slice()));
+                let echo = Echo::decode(query.payload().unwrap()).unwrap();
+                query
+                    .reply(
+                        &response_key,
+                        Echo {
+                            text: format!("{}!", echo.text),
+                        }
+                        .encode_to_vec(),
+                        Some(fingerprint::<Echo>()),
+                    )
+                    .unwrap();
+            }),
+        )
+        .unwrap();
     let echoed = timeout(
         WAIT,
-        mcu.call::<Echo>(
-            &Echo {
-                text: "hi".to_string(),
-            },
-            WAIT,
-        ),
+        mcu.call::<Echo>("echo", &Echo { text: "hi".into() }, WAIT),
     )
     .await
     .unwrap()
     .unwrap();
     assert_eq!(echoed.text, "hi!");
-    server_task.await.unwrap();
-    // A request for a type with no responder comes back as an error rather than hanging.
-    let err = mcu
-        .call::<Echo>(
-            &Echo {
-                text: "x".to_string(),
-            },
-            WAIT,
-        )
+    drop(responder);
+    let error = mcu
+        .call::<Echo>("echo", &Echo { text: "x".into() }, WAIT)
         .await;
     assert!(
-        matches!(err, Err(reiny_link::CallError::Remote(_))),
-        "{err:?}"
+        matches!(error, Err(reiny_link::CallError::Remote(_))),
+        "{error:?}"
     );
 }
 
-/// Wire an MCU-side `Host` to a `Cloudy` over a bridge-mode link, both ends on one duplex.
-async fn link_to_cloudy(mcu: HostLink, id: &str) -> (Arc<Host>, Cloudy) {
-    let (mcu_end, host_end) = tokio::io::duplex(4096);
-    let mcu = Arc::new(Host::spawn(mcu, Stream(mcu_end)));
-    let engine = LinkEngine::spawn(
-        Host::spawn(HostLink::host(id).unwrap().as_bridge(), Stream(host_end)),
-        "lab",
-    );
-    let mut opts = RuntimeOptions::new(id);
-    opts.domain = "lab".to_string();
-    opts.engine = Some(Arc::new(engine));
-    opts.install_tracing = false;
-    let cloudy = Cloudy::open(opts).await.expect("cloudy over link");
-    // Wait for the handshake: until the bridge's Hello lands, the MCU knows of no peer and every
-    // call would come back as `NoPeerService` for the wrong reason.
-    match timeout(WAIT, mcu.recv()).await.unwrap() {
-        Some(HostEvent::Connected { .. }) => {}
-        other => panic!("expected the mcu to connect, got {other:?}"),
-    }
-    (mcu, cloudy)
-}
-
-/// Presence on a link *is* the peer's Hello, so losing the peer has to retract it. That includes the
-/// transport simply ending (EOF), which never produces a `Disconnected` event — without the retract,
-/// `publishers()` would keep naming a peer nothing can reach.
 #[tokio::test(flavor = "multi_thread")]
 async fn peer_loss_retracts_presence() {
-    let mut mcu_link = HostLink::host("mcu").unwrap();
-    mcu_link.publishes::<Pos>().unwrap();
-    mcu_link.serves::<Add>().unwrap();
-    let (mcu, cloudy) = link_to_cloudy(mcu_link, "loss").await;
-
-    let mut watch = cloudy.watch_publishers::<Pos>().unwrap();
+    let mut link = HostLink::host("mcu", PORTS).unwrap();
+    link.publishes::<Pos>("position").unwrap();
+    link.serves::<Add>("addition").unwrap();
+    let (mcu, engine) = link_to_engine(link, "loss").await;
+    let position = Key::topic("lab", Some("mcu"), Pos::TYPE);
+    let (_watch, mut events) = watch(&engine, &position);
     assert_eq!(
-        timeout(WAIT, watch.recv()).await.unwrap(),
-        Some(PresenceEvent::Joined("mcu".to_string()))
+        timeout(WAIT, events.recv()).await.unwrap(),
+        Some(Presence::Joined(position.clone()))
     );
-    assert_eq!(cloudy.publishers::<Pos>().await.unwrap(), ["mcu"]);
-
-    // Dropping the MCU host drops its transport, so the bridge side sees EOF.
+    assert_eq!(
+        engine.alive(&position, WAIT).await.unwrap().as_slice(),
+        core::slice::from_ref(&position)
+    );
     drop(mcu);
     assert_eq!(
-        timeout(WAIT, watch.recv()).await.unwrap(),
-        Some(PresenceEvent::Left("mcu".to_string()))
+        timeout(WAIT, events.recv()).await.unwrap(),
+        Some(Presence::Left(position.clone()))
     );
     assert_eq!(
-        cloudy.publishers::<Pos>().await.unwrap(),
-        Vec::<String>::new()
+        engine.alive(&position, WAIT).await.unwrap(),
+        Vec::<Key>::new()
     );
-    assert_eq!(cloudy.servers::<Add>().await.unwrap(), Vec::<String>::new());
+    assert_eq!(
+        engine
+            .alive(
+                &Key::topic("lab", Some("mcu"), Add::TYPE).with_chunk(SERVICE_CHUNK),
+                WAIT
+            )
+            .await
+            .unwrap(),
+        Vec::<Key>::new()
+    );
 }
 
-/// A request the MCU never announced with `calls()` reaches the bridge as a bare hash it cannot name,
-/// and it must come back as an error naming the fix — not hang, and not be routed to some other type.
 #[tokio::test(flavor = "multi_thread")]
 async fn request_type_the_peer_never_announced_is_refused() {
-    let mcu_link = HostLink::host("mcu").unwrap(); // note: no calls::<Echo>()
-    let (mcu, cloudy) = link_to_cloudy(mcu_link, "unannounced").await;
-    let _server = cloudy.serve::<Echo>().unwrap();
-
-    let err = mcu
-        .call::<Echo>(
-            &Echo {
-                text: "hi".to_string(),
-            },
-            WAIT,
+    let link = HostLink::host("mcu", PORTS).unwrap();
+    let (mcu, engine) = link_to_engine(link, "unannounced").await;
+    let _server = engine
+        .respond(
+            &Key::topic("lab", Some("host"), Echo::TYPE),
+            Box::new(|_| panic!("undeclared client reached transport")),
         )
+        .unwrap();
+    let error = mcu
+        .call::<Echo>("echo", &Echo { text: "hi".into() }, WAIT)
         .await;
-    match err {
-        Err(reiny_link::CallError::Remote(m)) => assert!(m.contains("calls()"), "{m}"),
-        other => panic!("expected a Remote error naming calls(), got {other:?}"),
-    }
+    assert!(
+        matches!(
+            error,
+            Err(reiny_link::CallError::Link(reiny_link::Error::NotDeclared))
+        ),
+        "{error:?}"
+    );
 }
 
-/// A link has no finalize, so a responder that drops a request without answering would leave the MCU
-/// waiting for its whole timeout. The engine turns that drop into an error instead.
 #[tokio::test(flavor = "multi_thread")]
 async fn dropped_request_answers_with_an_error() {
-    let mut mcu_link = HostLink::host("mcu").unwrap();
-    mcu_link.calls::<Echo>().unwrap();
-    let (mcu, cloudy) = link_to_cloudy(mcu_link, "dropped").await;
-
-    let mut server = cloudy.serve::<Echo>().unwrap();
-    tokio::spawn(async move {
-        // Take the request and drop it without replying.
-        drop(server.recv().await.unwrap());
-    });
-
+    let mut link = HostLink::host("mcu", PORTS).unwrap();
+    link.calls::<Echo>("echo").unwrap();
+    let (mcu, engine) = link_to_engine(link, "dropped").await;
+    let _server = engine
+        .respond(&Key::topic("lab", Some("host"), Echo::TYPE), Box::new(drop))
+        .unwrap();
     let started = std::time::Instant::now();
-    let err = mcu
-        .call::<Echo>(
-            &Echo {
-                text: "hi".to_string(),
-            },
-            WAIT,
-        )
+    let error = mcu
+        .call::<Echo>("echo", &Echo { text: "hi".into() }, WAIT)
         .await;
-    match err {
-        Err(reiny_link::CallError::Remote(m)) => assert_eq!(m, "no reply"),
-        other => panic!("expected Remote(\"no reply\"), got {other:?}"),
+    match error {
+        Err(reiny_link::CallError::Remote(message)) => assert_eq!(message, "no reply"),
+        other => panic!("expected Remote(no reply), got {other:?}"),
     }
     assert!(started.elapsed() < WAIT, "waited for the full timeout");
 }

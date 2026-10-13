@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use prost::Message;
-use reiny_core::{Service, Topic};
+use reiny_core::{PortDirection, PortType, Service, StaticPort, Topic};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -24,8 +24,8 @@ pub type HostLink = Link<Vec<u8>, 64, 4096>;
 
 impl HostLink {
     /// Build one at the host's default sizes (16 KiB for each of the two buffers).
-    pub fn host(id: &str) -> Result<Self, Error> {
-        Self::new(id, vec![0; 16 * 1024], vec![0; 16 * 1024])
+    pub fn host(id: &str, ports: &'static [StaticPort]) -> Result<Self, Error> {
+        Self::new(id, ports, vec![0; 16 * 1024], vec![0; 16 * 1024])
     }
 }
 
@@ -58,6 +58,8 @@ pub enum HostEvent {
     Data {
         /// The type hash.
         hash: u32,
+        /// The negotiated message fingerprint.
+        schema: u64,
         /// The running counter.
         seq: u8,
         /// The prost bytes.
@@ -67,6 +69,8 @@ pub enum HostEvent {
     Request {
         /// The request type's hash.
         hash: u32,
+        /// The negotiated request fingerprint.
+        schema: u64,
         /// The correlation id.
         seq: u8,
         /// The prost bytes.
@@ -79,9 +83,18 @@ impl HostEvent {
     #[must_use]
     pub fn decode<T: Topic + Message + Default>(&self) -> Option<T> {
         match self {
-            Self::Data { hash, payload, .. } | Self::Request { hash, payload, .. }
-                if *hash == wire::type_hash(T::TYPE) =>
-            {
+            Self::Data {
+                hash,
+                schema,
+                payload,
+                ..
+            }
+            | Self::Request {
+                hash,
+                schema,
+                payload,
+                ..
+            } if *hash == wire::type_hash(T::TYPE) && *schema == T::SCHEMA => {
                 T::decode(payload.as_slice()).ok()
             }
             _ => None,
@@ -138,6 +151,16 @@ pub struct Host {
 }
 
 impl Host {
+    /// Run the internal transport adapter used by `LinkEngine`.
+    ///
+    /// This host has no application ports; typed application operations are refused.
+    pub fn bridge<T: Transport + 'static>(id: &str, transport: T) -> Result<Self, Error> {
+        Ok(Self::spawn(
+            HostLink::host(id, &[])?.into_bridge(),
+            transport,
+        ))
+    }
+
     /// Start running `link` over `transport`.
     pub fn spawn<T: Transport + 'static>(link: HostLink, transport: T) -> Self {
         let link = Arc::new(Mutex::new(link));
@@ -170,14 +193,15 @@ impl Host {
     }
 
     /// Send the type `T`. `Ok(false)` if the peer does not subscribe to it.
-    pub fn send<T: Topic + Message>(&self, msg: &T) -> Result<bool, Error> {
-        let sent = lock(&self.link).send(msg)?;
+    pub fn send<T: Topic + Message>(&self, name: &str, msg: &T) -> Result<bool, Error> {
+        let sent = lock(&self.link).send(name, msg)?;
         self.wake.notify_one();
         Ok(sent)
     }
 
     /// The pre-encoded form of [`Host::send`] (type hash + prost bytes).
-    pub fn send_raw(&self, hash: u32, payload: &[u8]) -> Result<bool, Error> {
+    #[cfg(feature = "engine")]
+    pub(crate) fn send_raw(&self, hash: u32, payload: &[u8]) -> Result<bool, Error> {
         let sent = lock(&self.link).send_raw(hash, payload)?;
         self.wake.notify_one();
         Ok(sent)
@@ -186,11 +210,21 @@ impl Host {
     /// Send the request type `S` and wait for the response.
     pub async fn call<S: Service>(
         &self,
+        name: &str,
         req: &S,
         timeout: Duration,
     ) -> Result<S::Response, CallError> {
         {
             let link = lock(&self.link);
+            link.check_port::<S>(
+                name,
+                PortDirection::Client,
+                Some(PortType {
+                    ty: S::Response::TYPE,
+                    schema: S::Response::SCHEMA,
+                }),
+            )
+            .map_err(CallError::Link)?;
             if link
                 .peer_types()
                 .any(|t| t.hash == wire::type_hash(S::TYPE) && t.schema != S::SCHEMA)
@@ -208,7 +242,7 @@ impl Host {
     }
 
     /// The pre-encoded form of [`Host::call`]. Returns the response fingerprint and prost bytes.
-    pub async fn call_raw(
+    pub(crate) async fn call_raw(
         &self,
         hash: u32,
         payload: Vec<u8>,
@@ -247,26 +281,36 @@ impl Host {
     }
 
     /// Answer a [`HostEvent::Request`].
-    pub fn reply<S: Service>(&self, seq: u8, resp: &S::Response) -> Result<(), Error> {
-        lock(&self.link).reply::<S>(seq, resp)?;
+    pub fn reply<S: Service>(&self, name: &str, seq: u8, resp: &S::Response) -> Result<(), Error> {
+        lock(&self.link).reply::<S>(name, seq, resp)?;
         self.wake.notify_one();
         Ok(())
     }
 
     /// The pre-encoded form of [`Host::reply`]. `hash` is the *request* type's.
-    pub fn reply_raw(&self, seq: u8, hash: u32, schema: u64, payload: &[u8]) -> Result<(), Error> {
+    #[cfg(feature = "engine")]
+    pub(crate) fn reply_raw(
+        &self,
+        seq: u8,
+        hash: u32,
+        schema: u64,
+        payload: &[u8],
+    ) -> Result<(), Error> {
         lock(&self.link).reply_raw(seq, hash, schema, payload)?;
         self.wake.notify_one();
         Ok(())
     }
 
     /// Answer a [`HostEvent::Request`] with an error.
-    pub fn reply_err<S: Service>(&self, seq: u8, message: &str) -> Result<(), Error> {
-        self.reply_err_raw(seq, wire::type_hash(S::TYPE), message)
+    pub fn reply_err<S: Service>(&self, name: &str, seq: u8, message: &str) -> Result<(), Error> {
+        lock(&self.link).reply_err::<S>(name, seq, message)?;
+        self.wake.notify_one();
+        Ok(())
     }
 
     /// The type-hash form of [`Host::reply_err`].
-    pub fn reply_err_raw(&self, seq: u8, hash: u32, message: &str) -> Result<(), Error> {
+    #[cfg(feature = "engine")]
+    pub(crate) fn reply_err_raw(&self, seq: u8, hash: u32, message: &str) -> Result<(), Error> {
         lock(&self.link).reply_err_raw(seq, hash, message)?;
         self.wake.notify_one();
         Ok(())
@@ -430,11 +474,13 @@ fn convert(l: &HostLink, ev: Event, pending: &Pending, peer: &Peer) -> Option<Ho
         }
         Event::Data(f) => Some(HostEvent::Data {
             hash: f.hash,
+            schema: l.frame_schema(&f)?,
             seq: f.seq,
             payload: l.payload(&f).to_vec(),
         }),
         Event::Request(f) => Some(HostEvent::Request {
             hash: f.hash,
+            schema: l.frame_schema(&f)?,
             seq: f.seq,
             payload: l.payload(&f).to_vec(),
         }),
@@ -483,6 +529,7 @@ mod tests {
     fn data(hash: u32, payload: Vec<u8>) -> HostEvent {
         HostEvent::Data {
             hash,
+            schema: A::SCHEMA,
             seq: 0,
             payload,
         }
@@ -500,6 +547,7 @@ mod tests {
         // A Request decodes the same way; the other two events carry no payload at all.
         let req = HostEvent::Request {
             hash: wire::type_hash(A::TYPE),
+            schema: A::SCHEMA,
             seq: 3,
             payload: A { v: 1 }.encode_to_vec(),
         };
@@ -520,6 +568,17 @@ mod tests {
     #[test]
     fn decode_rejects_garbage_payloads() {
         let ev = data(wire::type_hash(A::TYPE), vec![0xff, 0xff, 0xff]);
+        assert_eq!(ev.decode::<A>(), None);
+    }
+
+    #[test]
+    fn decode_rejects_another_fingerprint_for_the_same_type_hash() {
+        let ev = HostEvent::Data {
+            hash: wire::type_hash(A::TYPE),
+            schema: A::SCHEMA + 1,
+            seq: 0,
+            payload: A { v: 7 }.encode_to_vec(),
+        };
         assert_eq!(ev.decode::<A>(), None);
     }
 

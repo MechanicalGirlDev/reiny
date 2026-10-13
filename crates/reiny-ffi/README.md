@@ -1,7 +1,7 @@
 # reiny-ffi
 
 The multilingual reiny SDK. One Rust library exposes a synchronous UniFFI
-facade and an additive, handle-based C ABI. Both call the same reiny engine:
+facade and an ergonomic, handle-based C ABI. Both call the same reiny engine:
 there is no separate wire protocol or subprocess adapter.
 
 | Language | Binding |
@@ -25,24 +25,28 @@ in Node.js, not in a browser; Kotlin targets JVM/Android, not Kotlin/JS.
 
 ## Message contract
 
-Pass the **type segment** from the generated Rust `Topic::TYPE`, for example
-`Ping`, not a Zenoh path or necessarily the fully qualified Protobuf name.
+Register a declared **port name**, its contract **type name**, and the compiled
+uint64 schema fingerprint, for example `publisher("out", "Binary", 42)`.
+The type name must match the prepared endpoint contract; it is not a Zenoh path.
 Compile the same `.proto` files for each language and serialize their messages
 with that language's Protobuf implementation. The FFI sends those wire bytes
 unchanged, including empty payloads and embedded NULs. It does not JSON-encode
 messages or generate your application-specific Protobuf classes.
 
-Publishing goes to `reiny/<domain>/<id>/<type>` and subscribing to that type
-receives all sources in the domain unless a source filter is supplied.
+Every session requires an absolute path to prepared version-2 module-bindings
+JSON. Its namespace must equal the session id. The contract owns port names,
+endpoint namespaces, exact input sources, and endpoint policies.
+Subscriptions receive only their declared sources in the session domain;
+there is no caller source override or wildcard subscription.
 `Message` includes the original bytes, source id, optional schema fingerprint,
-and optional Unix-nanosecond engine timestamp. Supply the generated
-`Topic::SCHEMA` when available; an absent fingerprint is allowed just as it is
-for handwritten Rust topics. This raw foreign receive API reports fingerprints
-rather than validating them or decoding Protobuf.
+and optional Unix-nanosecond engine timestamp. Port registration requires the
+compiled schema fingerprint; it cannot be omitted. The SDK enforces the managed
+contract and schema while leaving Protobuf encoding and decoding to the caller.
 
-The initial foreign API covers launch creation, binary publish/subscribe,
-source filtering, publisher discovery, and cooperative shutdown. Typed Rust
-services, latched/QoS builders, descriptor advertisement, link transports, and
+The foreign API covers managed session creation, named binary publish/subscribe,
+synchronous readiness, and cooperative shutdown. Register all declared ports,
+then call `Session.ready()` before sending. Publisher discovery is removed.
+Typed Rust services, policy builders, descriptor advertisement, link transports, and
 ROS bridges remain in the Rust SDK; they are not foreign API methods.
 
 ## Build
@@ -100,12 +104,16 @@ PYTHONPATH=bindings/generated/python python bindings/python/smoke.py
 
 ```python
 from reiny_ffi import LocalBus
+from pathlib import Path
 
+fixtures = Path("bindings/fixtures").resolve()
 bus = LocalBus()
-sender = bus.connect("sender", "lab")
-receiver = bus.connect("receiver", "lab")
-subscription = receiver.subscriber("Ping", None)
-publisher = sender.publisher("Ping", None)
+sender = bus.connect("sender", "lab", str(fixtures / "sender.json"))
+receiver = bus.connect("receiver", "lab", str(fixtures / "receiver.json"))
+subscription = receiver.subscriber("in", "Binary", 42)
+publisher = sender.publisher("out", "Binary", 42)
+sender.ready()
+receiver.ready()
 publisher.send(b"\x0a\x03\x00\x01\xff")  # Ping { bytes data = 1; }
 message = subscription.receive(1000)
 assert message is not None
@@ -113,7 +121,8 @@ assert message.source == "sender"
 ```
 
 For cross-process communication, use
-`Session.open("sender", "lab", "zenoh.json5")`. The third argument is an optional
+`Session.open("sender", "lab", "zenoh.json5", str(fixtures / "sender.json"))`.
+The third argument is an optional
 Zenoh configuration **file path**, not inline JSON. Pass `None` for defaults.
 LocalBus sessions communicate only with sessions attached to that same object.
 
@@ -173,7 +182,7 @@ ruby -I bindings/generated/ruby bindings/ruby/smoke.rb
 
 See each directory under [`../../bindings`](../../bindings) for build and smoke
 commands. C callers must release owned handles exactly once, including
-message/list/buffer outputs. C++ and managed wrappers provide deterministic
+message/buffer outputs. C++ and managed wrappers provide deterministic
 resource cleanup. The C header documents borrowed pointers, buffer lifetime,
 error retrieval, timeout results, and concurrency contracts.
 
@@ -190,8 +199,9 @@ async Python application, or Node.js event loop. Rust async callers should use
 `spawn_blocking` or the existing async typed SDK. Methods that drive the runtime
 reject calls inside an active Tokio runtime.
 
-Each subscription uses a 256-message FIFO with backpressure, like the Rust
-default. Drain it to avoid stalling delivery. `receive(timeout_ms)` returns no
+Each subscription uses the receive-buffer policy from its prepared contract;
+the default is a 256-message FIFO with backpressure. Drain it to avoid stalling
+delivery. `receive(timeout_ms)` returns no
 message on timeout or shutdown. Concurrent receivers compete for the same
 FIFO; each sample goes to only one receiver. `Session.shutdown()` wakes pending
 receives and prevents further receive delivery. It is cooperative shutdown,

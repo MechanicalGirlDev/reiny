@@ -1,4 +1,4 @@
-# Overrides schema.config defaults from pong/main.yaml.
+# Overrides schema.config defaults from pong/schema.yaml.
 # The leaf run.config path resolves relative to the leaf module directory.
 reply: PONG!
 delay_ms: 250

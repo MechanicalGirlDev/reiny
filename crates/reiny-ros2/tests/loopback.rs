@@ -12,6 +12,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use reiny::bindings::{
+    CONTRACT_VERSION, EndpointContract, InputBinding, ModuleBindings, OutputBinding, PortKind,
+};
 use reiny::engine::Local;
 use reiny::{Cloudy, Qos, RuntimeOptions, Service, Topic};
 use reiny_ros2::Ros;
@@ -155,12 +158,60 @@ fn context(domain_id: u16) -> Context {
     Context::from_domain_participant(builder.build().expect("participant")).expect("context")
 }
 
-async fn open(bus: Local, id: &str) -> Cloudy {
+async fn open(bus: Local, id: &str, bindings: ModuleBindings) -> Cloudy {
     let mut opts = RuntimeOptions::new(id);
     opts.domain = "ros".to_string();
     opts.engine = Some(Arc::new(bus));
     opts.install_tracing = false;
+    opts.module_bindings = Some(bindings);
     Cloudy::open(opts).await.expect("cloudy")
+}
+
+fn bindings(
+    id: &str,
+    inputs: &[(&str, &str, Option<&str>, &str)],
+    outputs: &[(&str, &str, Option<&str>)],
+) -> ModuleBindings {
+    let contract = |ty: &str, response: Option<&str>| EndpointContract {
+        type_name: ty.to_string(),
+        kind: if response.is_some() {
+            PortKind::Rpc
+        } else {
+            PortKind::Stream
+        },
+        response: response.map(str::to_string),
+        ..Default::default()
+    };
+    ModuleBindings {
+        version: CONTRACT_VERSION,
+        namespace: id.to_string(),
+        endpoint_namespace: id.to_string(),
+        inputs: inputs
+            .iter()
+            .map(|&(name, ty, response, source)| {
+                (
+                    name.to_string(),
+                    InputBinding {
+                        contract: contract(ty, response),
+                        sources: vec![source.to_string()],
+                    },
+                )
+            })
+            .collect(),
+        outputs: outputs
+            .iter()
+            .map(|&(name, ty, response)| {
+                (
+                    name.to_string(),
+                    OutputBinding {
+                        contract: contract(ty, response),
+                    },
+                )
+            })
+            .collect(),
+        children: Default::default(),
+        executables: Vec::new(),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -177,8 +228,38 @@ async fn bridge_round_trips_with_a_ros_node() {
     let domain_id = u16::try_from(std::process::id() % 200).unwrap() + 1;
 
     let bus = Local::new();
-    let cloudy = open(bus.clone(), "bridge").await;
-    let launch = open(bus, "g").await;
+    let cloudy = open(
+        bus.clone(),
+        "bridge",
+        bindings(
+            "bridge",
+            &[
+                ("state", State::TYPE, None, "g"),
+                ("add", Add::TYPE, Some(Sum::TYPE), "g"),
+            ],
+            &[
+                ("cmd", Cmd::TYPE, None),
+                ("echo", Echo::TYPE, Some(Echoed::TYPE)),
+            ],
+        ),
+    )
+    .await;
+    let launch = open(
+        bus,
+        "g",
+        bindings(
+            "g",
+            &[
+                ("cmd", Cmd::TYPE, None, "bridge"),
+                ("echo", Echo::TYPE, Some(Echoed::TYPE), "bridge"),
+            ],
+            &[
+                ("state", State::TYPE, None),
+                ("add", Add::TYPE, Some(Sum::TYPE)),
+            ],
+        ),
+    )
+    .await;
 
     // --- playing ROS ---
     let ros_ctx = context(domain_id);
@@ -248,7 +329,32 @@ async fn bridge_round_trips_with_a_ros_node() {
 
     // --- the bridge (another Context on the same DDS domain) ---
     let ros = Ros::with_context(&cloudy, context(domain_id), "reiny_bridge").unwrap();
+    for port in ["missing", "cmd", "add"] {
+        assert!(
+            ros.export::<State, RosState, _>(
+                port,
+                "/state",
+                MessageTypeName::new("test_msgs", "State"),
+                Qos::COMMAND,
+                |s| RosState { x: s.x },
+            )
+            .is_err(),
+            "undeclared, wrong-direction and RPC ports must not become stream routes"
+        );
+    }
+    assert!(
+        ros.export::<Cmd, RosCmd, _>(
+            "state",
+            "/cmd",
+            MessageTypeName::new("test_msgs", "Cmd"),
+            Qos::COMMAND,
+            |c| RosCmd { v: c.v },
+        )
+        .is_err(),
+        "a declared port must reject a different compiled type"
+    );
     ros.export::<State, RosState, _>(
+        "state",
         "/state",
         MessageTypeName::new("test_msgs", "State"),
         Qos::COMMAND,
@@ -256,6 +362,7 @@ async fn bridge_round_trips_with_a_ros_node() {
     )
     .unwrap();
     ros.import::<RosCmd, Cmd, _>(
+        "cmd",
         "/cmd",
         MessageTypeName::new("test_msgs", "Cmd"),
         Qos::COMMAND,
@@ -263,6 +370,7 @@ async fn bridge_round_trips_with_a_ros_node() {
     )
     .unwrap();
     ros.export_service::<Add, RosAddReq, RosAddRes, _, _>(
+        "add",
         "/add",
         &ServiceTypeName::new("test_srvs", "Add"),
         |q| Add { a: q.a, b: q.b },
@@ -270,6 +378,7 @@ async fn bridge_round_trips_with_a_ros_node() {
     )
     .unwrap();
     ros.import_service::<Echo, RosEchoReq, RosEchoRes, _, _>(
+        "echo",
         "/echo",
         &ServiceTypeName::new("test_srvs", "Echo"),
         |e| RosEchoReq { text: e.text },
@@ -278,9 +387,9 @@ async fn bridge_round_trips_with_a_ros_node() {
     .unwrap();
 
     // --- the reiny-side launch ---
-    let states = launch.publish::<State>().unwrap();
-    let mut cmds = launch.subscribe::<Cmd>().unwrap();
-    let mut add = launch.serve::<Add>().unwrap();
+    let states = launch.output::<State>("state").unwrap();
+    let mut cmds = launch.input::<Cmd>("cmd").unwrap();
+    let mut add = launch.provides::<Add>("add").unwrap();
     tokio::spawn(async move {
         while let Some(req) = add.recv().await {
             let sum = req.value.a + req.value.b;
@@ -324,11 +433,7 @@ async fn bridge_round_trips_with_a_ros_node() {
 
     // a reiny caller → a ROS service. Until the bridge's DDS client discovers the ROS server the
     // request is lost, so retry on a short deadline.
-    let caller = launch
-        .caller::<Echo>()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .expect("standalone caller");
+    let caller = launch.uses::<Echo>("echo").expect("declared caller");
     let mut echoed = None;
     for _ in 0..5 {
         if let Ok(r) = caller

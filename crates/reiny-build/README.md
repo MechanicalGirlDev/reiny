@@ -11,9 +11,9 @@ fn main() {
 }
 ```
 
-`compile()` searches upward for the nearest `main.yaml` containing a `schema`
-block, skipping runtime-only module manifests. It reads only that build-time
-catalog; runtime providers and module wiring are never evaluated by codegen.
+`compile()` searches upward for the nearest `schema.yaml` and reads its required
+`schema` block. It never reads `main.yaml` or falls back past an invalid catalog.
+Runtime providers and module wiring are never evaluated by codegen.
 Catalogs and runtime manifests require `version: 2`; version 1 is rejected.
 It compiles the declared
 protos with prost, and writes `$OUT_DIR/reiny_generated.rs`. The output contains
@@ -25,7 +25,7 @@ The schema block supports both per-project catalogs (`project`, `publications`,
 `dependencies`) and workspace catalogs (`internals`, `projects`, optional `schema`
 crates and `services`). Proto and dependency paths are relative to the directory
 containing that catalog. Dependency projects provide their public catalog in
-their own `main.yaml`.
+their own `schema.yaml`.
 
 Shared schema crates use named parts under `schema.schema`, even when there is
 only one crate. Each part declares `crate`, a nonempty list of owned `protos`,
@@ -57,5 +57,36 @@ schema:
 
 `protoc` is vendored via `protoc-bin-vendored`, so no system protoc install is
 required.
+
+## Explicit static port contracts
+
+For a `no_std` app, call `reiny_build::compile_ports("ports.yaml")` from
+`build.rs` alongside `compile()`. The path is explicit and relative to the
+Cargo package, never discovered from an ancestor. Include the separate output
+at the crate root, alongside the generated schema modules:
+
+```rust,ignore
+include!(concat!(env!("OUT_DIR"), "/reiny_ports.rs"));
+```
+
+```yaml
+version: 2
+in:
+  measurements: { type: sensors.Sample }
+out:
+  commands: { type: control.Command }
+uses:
+  calculate: { type: calc.Request, response: calc.Response }
+provides:
+  reset: { type: control.Reset, response: control.ResetResult }
+```
+
+FQNs resolve through `schema.yaml` to generated Rust types. The resulting
+`PORTS` slice contains `reiny::StaticPort` entries with `Topic::TYPE` wire names
+and `Topic::SCHEMA` fingerprints. `in` / `out` generate `Input` / `Output`;
+`uses` / `provides` generate `Client` / `Service`, including response metadata.
+Runtime-style `in` / `out` entries with `kind: rpc` also generate client / service ports.
+The catalog alone grants no ports. Pass `PORTS` to `Link::new` or
+`HostLink::host`; port operations use the YAML names.
 
 License: MIT

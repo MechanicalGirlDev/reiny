@@ -1,6 +1,6 @@
 //! reiny's build helper. Each launch's `build.rs` calls [`compile`].
 //!
-//! It reads the build-time `schema` block of `main.yaml`, compiles the protos it needs with prost,
+//! It reads the build-time `schema` block of `schema.yaml`, compiles the protos it needs with prost,
 //! and writes `$OUT_DIR/reiny_generated.rs`. Runtime provider fields are never evaluated here.
 //!
 //! - the `publications` / `dependencies::<project>` / `internals` modules (re-exports of the generated types)
@@ -10,9 +10,9 @@
 //! `use crate::publications::Ping;`.
 //!
 //! Two layouts are handled:
-//! - **per-project** (a main.yaml with `[project]`): resolves its own `[publications]` plus the public
+//! - **per-project** (a schema.yaml with `[project]`): resolves its own `[publications]` plus the public
 //!   types of every `[dependencies]` project. The type → topic owner is "the project that publishes it".
-//! - **workspace shared** (a main.yaml with `[internals]` / `[projects.*]`): compiles the whole shared
+//! - **workspace shared** (a schema.yaml with `[internals]` / `[projects.*]`): compiles the whole shared
 //!   catalog `[internals]` and exposes it as `internals::*`.
 
 // This is a helper crate called from build scripts, so the right response to a misconfiguration is to
@@ -30,10 +30,10 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
-// The main.yaml schema
+// The schema.yaml schema
 // ---------------------------------------------------------------------------
 
-/// The whole main.yaml (it accepts the per-project shape and the workspace shape alike).
+/// The whole schema.yaml (it accepts the per-project shape and the workspace shape alike).
 #[derive(Debug, Deserialize)]
 struct Manifest {
     /// The per-project identity. Its presence is what selects per-project mode.
@@ -72,7 +72,7 @@ struct ServiceDef {
 struct SchemaPartDef {
     #[serde(rename = "crate")]
     crate_name: String,
-    /// The protos this part owns (relative to the directory holding main.yaml).
+    /// The protos this part owns (relative to the directory holding schema.yaml).
     protos: Vec<String>,
     /// The part names it depends on. Must be **transitively closed**, and each edge needs a Cargo dep too.
     #[serde(default)]
@@ -163,7 +163,7 @@ struct ServiceEntry {
 /// One resolved message type.
 #[derive(Debug, Clone)]
 struct Entry {
-    /// The public name in the generated module (the main.yaml key, e.g. `Ping`).
+    /// The public name in the generated module (the schema.yaml key, e.g. `Ping`).
     alias: String,
     /// The proto package's segments (e.g. `["ping"]`).
     package: Vec<String>,
@@ -198,7 +198,7 @@ impl Entry {
 // Resolution modes and results (public API; also used for introspection from the CLI)
 // ---------------------------------------------------------------------------
 
-/// Which layout the main.yaml was resolved as.
+/// Which layout the schema.yaml was resolved as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
     /// per-project (`[project]`). Generates its own publications plus the dependencies' public types.
@@ -239,7 +239,7 @@ impl Mode {
 /// An introspection view of one resolved message type ([`Entry`] made public for `reiny check`).
 #[derive(Debug, Clone)]
 pub struct TypeInfo {
-    /// The public name in the generated module (the main.yaml key).
+    /// The public name in the generated module (the schema.yaml key).
     pub alias: String,
     /// The proto's fully qualified message name (e.g. `ping.Ping`).
     pub message: String,
@@ -253,7 +253,7 @@ pub struct TypeInfo {
     pub owner: Option<String>,
 }
 
-/// The result of resolving a main.yaml. Pure information from before any proto is compiled, so it is
+/// The result of resolving a schema.yaml. Pure information from before any proto is compiled, so it is
 /// available without the `compile` feature. `reiny check` prints it; [`compile`] writes its output from it.
 pub struct Resolution {
     mode: Mode,
@@ -285,7 +285,7 @@ pub struct ProjectInfo {
 pub struct ServiceInfo {
     /// The `[services]` key (a display name; it does not appear in the generated code).
     pub name: String,
-    /// The request type's alias (exactly as written in main.yaml).
+    /// The request type's alias (exactly as written in schema.yaml).
     pub request: String,
     /// The request type's fully qualified message name (e.g. `calc.Add`).
     pub request_message: String,
@@ -302,7 +302,7 @@ impl Resolution {
         &self.mode
     }
 
-    /// The absolute path of the main.yaml that was used.
+    /// The absolute path of the schema.yaml that was used.
     #[must_use]
     pub fn manifest_path(&self) -> &Path {
         &self.manifest_path
@@ -386,7 +386,7 @@ impl Resolution {
 #[cfg(feature = "compile")]
 pub use prost_build;
 
-/// Called from `build.rs`. Reads main.yaml, compiles the protos and puts the output in `$OUT_DIR`.
+/// Called from `build.rs`. Reads schema.yaml, compiles the protos and puts the output in `$OUT_DIR`.
 ///
 /// Needs the `compile` feature (on by default). For introspection that does not want prost pulled in —
 /// as in `reiny check` — use [`describe`] directly.
@@ -447,16 +447,16 @@ pub fn compile_with(customize: impl FnOnce(&mut prost_build::Config)) -> Result<
     Ok(())
 }
 
-/// Introspection for `reiny check`. It resolves the **whole catalog** the main.yaml describes rather
+/// Introspection for `reiny check`. It resolves the **whole catalog** the schema.yaml describes rather
 /// than one package's view of it (in a workspace, all of `[internals]`; per-project, own publications
 /// plus dependencies). No proto is compiled, so it works without the `compile` feature. Validation
 /// (identifiers, topic collisions) still runs, so a misconfigured layout surfaces here.
 pub fn describe(dir: &Path) -> Result<Resolution> {
-    let (manifest_path, manifest) =
-        find_manifest(dir).with_context(|| format!("locating main.yaml from {}", dir.display()))?;
+    let (manifest_path, manifest) = find_manifest(dir)
+        .with_context(|| format!("locating schema.yaml from {}", dir.display()))?;
     let manifest_root = manifest_path
         .parent()
-        .expect("main.yaml has a parent")
+        .expect("schema.yaml has a parent")
         .to_path_buf();
 
     let schema_parts = normalize_schema(&manifest, &manifest_root)?;
@@ -498,15 +498,15 @@ pub fn describe(dir: &Path) -> Result<Resolution> {
     })
 }
 
-/// Find the main.yaml → decide the mode → validate → build a [`Resolution`] (no proto touched yet).
+/// Find the schema.yaml → decide the mode → validate → build a [`Resolution`] (no proto touched yet).
 /// Called from build.rs (`compile`), from one package's point of view.
 #[cfg(feature = "compile")]
 fn resolve_for(manifest_dir: &Path, pkg_name: &str) -> Result<Resolution> {
     let (manifest_path, manifest) = find_manifest(manifest_dir)
-        .with_context(|| format!("locating main.yaml from {}", manifest_dir.display()))?;
+        .with_context(|| format!("locating schema.yaml from {}", manifest_dir.display()))?;
     let manifest_root = manifest_path
         .parent()
-        .expect("main.yaml has a parent")
+        .expect("schema.yaml has a parent")
         .to_path_buf();
     rerun_if_changed(&manifest_path);
 
@@ -561,11 +561,13 @@ fn project_infos(manifest: &Manifest) -> Vec<ProjectInfo> {
 }
 
 // ---------------------------------------------------------------------------
-// Finding and resolving the main.yaml
+// Finding and resolving the schema.yaml
 // ---------------------------------------------------------------------------
 
 mod discovery;
 use discovery::{find_manifest, parse_manifest};
+mod ports;
+pub use ports::compile_ports;
 
 /// per-project: own publications plus each dependency project's public types.
 fn resolve_per_project(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
@@ -583,10 +585,10 @@ fn resolve_per_project(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
         // A dep name becomes `pub mod <dep>` in the generated code, so it must be a Rust identifier.
         ensure_rust_ident(dep_name, "dependency key", "[dependencies]")?;
         let dep_dir = resolve_relative(root, &dep.path);
-        let dep_manifest_path = dep_dir.join("main.yaml");
+        let dep_manifest_path = dep_dir.join("schema.yaml");
         let dep_manifest = parse_manifest(&dep_manifest_path).with_context(|| {
             format!(
-                "dependency '{}' main.yaml at {}",
+                "dependency '{}' schema.yaml at {}",
                 dep_name,
                 dep_manifest_path.display()
             )
@@ -594,7 +596,7 @@ fn resolve_per_project(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
         rerun_if_changed(&dep_manifest_path);
         dep_manifest.project.as_ref().with_context(|| {
             format!(
-                "dependency '{}' ({}) is not a per-project main.yaml (no [project])",
+                "dependency '{}' ({}) is not a per-project schema.yaml (no [project])",
                 dep_name,
                 dep_manifest_path.display()
             )
@@ -632,7 +634,7 @@ fn resolve_workspace(
         } else {
             bail!(
                 "package '{pkg_name}' has no [projects.{pkg_name}] entry in the workspace \
-                 main.yaml ({})",
+                 schema.yaml ({})",
                 manifest_path.display()
             );
         }
@@ -2076,13 +2078,13 @@ mod tests {
                 owner: None,
             },
         ];
-        assign_owners(&mut entries, &parts, Path::new("/x/main.yaml")).unwrap();
+        assign_owners(&mut entries, &parts, Path::new("/x/schema.yaml")).unwrap();
         assert_eq!(entries[0].owner.as_deref(), Some("geometry"));
         assert_eq!(entries[1].owner.as_deref(), Some("state"));
 
         // A proto belonging to no part is rejected (silently dropping it from codegen would be worse).
         entries[1].proto = PathBuf::from("/x/stray.proto");
-        let err = assign_owners(&mut entries, &parts, Path::new("/x/main.yaml"))
+        let err = assign_owners(&mut entries, &parts, Path::new("/x/schema.yaml"))
             .unwrap_err()
             .to_string();
         assert!(err.contains("stray.proto"), "got: {err}");
@@ -2195,7 +2197,7 @@ mod tests {
                 owner: None,
             },
         ];
-        let err = validate_no_topic_collision(&entries, Path::new("/x/main.yaml")).unwrap_err();
+        let err = validate_no_topic_collision(&entries, Path::new("/x/schema.yaml")).unwrap_err();
         assert!(err.to_string().contains("Ping"));
     }
 
@@ -2227,7 +2229,7 @@ mod tests {
         let m = svc_manifest(
             "Adder = { request = \"Add\", response = \"Sum\" }\nEcho = { request = \"dep::Echo\", response = \"dep::Echo\" }",
         );
-        let svcs = resolve_services(&m, &svc_entries(), &[], Path::new("/x/main.yaml")).unwrap();
+        let svcs = resolve_services(&m, &svc_entries(), &[], Path::new("/x/schema.yaml")).unwrap();
         assert_eq!(svcs.len(), 2);
         assert_eq!(
             (svcs[0].name.as_str(), svcs[0].request, svcs[0].response),
@@ -2242,13 +2244,15 @@ mod tests {
     #[test]
     fn services_reject_unknown_alias_and_duplicate_request() {
         let m = svc_manifest("Adder = { request = \"Add\", response = \"Nope\" }");
-        let err = resolve_services(&m, &svc_entries(), &[], Path::new("/x/main.yaml")).unwrap_err();
+        let err =
+            resolve_services(&m, &svc_entries(), &[], Path::new("/x/schema.yaml")).unwrap_err();
         assert!(err.to_string().contains("Nope"), "{err}");
 
         let m = svc_manifest(
             "A = { request = \"Add\", response = \"Sum\" }\nB = { request = \"Add\", response = \"Add\" }",
         );
-        let err = resolve_services(&m, &svc_entries(), &[], Path::new("/x/main.yaml")).unwrap_err();
+        let err =
+            resolve_services(&m, &svc_entries(), &[], Path::new("/x/schema.yaml")).unwrap_err();
         assert!(err.to_string().contains("同じ request 型"), "{err}");
     }
 
@@ -2273,7 +2277,7 @@ mod tests {
                 owner: None,
             },
         ];
-        assert!(validate_no_topic_collision(&entries, Path::new("/x/main.yaml")).is_ok());
+        assert!(validate_no_topic_collision(&entries, Path::new("/x/schema.yaml")).is_ok());
     }
 
     #[test]

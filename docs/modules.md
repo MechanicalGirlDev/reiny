@@ -127,10 +127,9 @@ build:
   features: []
   default_features: true
   locked: true
-schema:
-  # build-time catalog read by reiny-build, see crates/reiny-build/README.md
 ```
 
+Every runtime manifest must declare `run` or a nonempty `modules` mapping.
 `run` and `modules` are mutually exclusive in one file. `build` is only
 allowed next to `run`. Without `build`, the executable must already exist in
 the provider's `bin_dir`.
@@ -212,9 +211,28 @@ the selected configuration's origin, including a caller override. An explicit
 `../shared/calibration.yaml` retains its relative tree shape; absolute asset
 paths are rejected.
 
-The optional `schema` block is the build-time type catalog that
-`reiny_build::compile()` reads. Runtime tooling keeps it intact but never
-executes anything from it.
+### Separate schema catalogs
+
+`schema.yaml` is the build-time catalog that `reiny_build::compile()` discovers
+by searching upward from the Rust package. Runtime tooling reads only
+`main.yaml`, which rejects `schema`. A catalog directory need not be a runtime
+module: shared schema libraries and the relay example's Rust packages have
+catalogs without executable definitions.
+
+```yaml
+# schema.yaml
+version: 2
+schema:
+  internals:
+    Ping: {proto: proto/ping.proto, message: ping.Ping}
+  projects:
+    ping:
+      publications: [Ping]
+```
+
+Catalog-relative proto and dependency paths keep their meaning when moving
+an existing `schema` block to a sibling `schema.yaml`. Catalogs supply payload
+types and fingerprints, never endpoint permissions or runtime connections.
 
 Build-time catalogs also require `version: 2`. Shared schema crates are named
 parts under `schema.schema.<name>`, with `crate`, a nonempty `protos` list, and
@@ -231,6 +249,11 @@ modules.
 
 ## Writing a managed executable
 
+`Cloudy::open` requires the resolved bindings supplied by `apply` / `run`, even
+for an executable with no ports. Missing bindings fail before opening the engine.
+Schema generation does not authorize publishing, subscribing or RPC. The SDK
+exposes only named data endpoints and no underlying engine/session.
+
 ```rust,ignore
 #[reiny::main]
 async fn main(cloudy: Cloudy) -> reiny::Result<()> {
@@ -242,6 +265,21 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
 }
 ```
 
+For a cycle whose first publication is volatile, register
+`cloudy.watch_input_ready("port")` before calling `ready()`. The watch replays
+readiness only for that input's exact configured source modules.
+
+Dynamic-language applications use `raw_input` / `raw_output` with the declared
+port name, actual protobuf type name and mandatory compiled fingerprint. Their
+handles participate in readiness just like typed ports.
+
+Engine bridges use complementary declared inputs and outputs on the two
+contexts. `bridge::forward(a, b, schemas)` takes the compiled fingerprints,
+opens those named routes and registers their live handles before readiness.
+Data is published under the output's declared namespace and policy; RPC checks
+request/response stamps and addresses replies under that same namespace.
+Only control-plane launch/readiness/stop routes retain the original namespaces.
+
 - `input` subscribes only to the exact source namespaces that the deployment wired.
 - `output` publishes in the module's own namespace. Two outputs with the same
   transport type in one executable are rejected.
@@ -249,22 +287,18 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
   token. `apply` waits for it.
 - A `@stop` request is acknowledged on receipt. The ack means "stop
   requested", not "process exited".
-- Managed mode needs an engine with query, liveliness and attachment support.
+- Module communication needs an engine with query, liveliness and attachment support.
   `LinkEngine` doesn't have attachments, so it's refused in managed mode.
-  Standalone link routing still works.
+  Static Link applications use their own YAML-generated named port tables.
 - A namespaced ID is capped at 32 bytes on a link and an iceoryx2 key at 224
   bytes. Longer values fail; they're never truncated.
 
-The raw `publish`, `subscribe`, `serve` and `call` APIs still exist for
-**standalone** programs that run outside a deployment.
-Their builders reject managed contexts before declaring transport resources.
-`engine()` returns an error and `session()` returns `None` in managed mode;
-`with_engine()` and standalone reopening of a managed engine are rejected.
-The owner report environment also prevents a deployment-owned process from
-opening an unbound second context on a fresh engine, even if application code
-clears its inherited report option.
-Changing a schema catalog to `version: 2` does not turn a standalone executable
-into a managed app. See the [0.8 migration guide](design/0.8.0.md).
+`Cloudy::open` requires resolved `ModuleBindings`; `apply` and `run` supply them
+to executable modules. Opening an unbound SDK context is rejected. Applications
+use only named `input`, `output`, `uses`, and `provides` for communication.
+There are no type-only publish/subscribe/RPC APIs or engine/session escape hatches.
+Do not substitute a schema catalog for an executable definition and explicit
+composition wiring.
 
 ### Named RPC and owned processes
 
@@ -289,7 +323,7 @@ The owner supplies `REINY_BUNDLE_DIR` and, when applicable, `REINY_CONFIG_DIR`.
 `config_dir()` returns the frozen configuration's origin for relative assets;
 neither API searches a development directory. See
 [`owned-child`](../examples/owned-child/README.md) for an actual delegated
-publication and RPC server with a standalone verification probe.
+publication and RPC server with a wired verification task.
 
 ## CLI lifecycle
 
