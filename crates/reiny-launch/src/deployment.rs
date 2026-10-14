@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use process_wrap::tokio::{ChildWrapper, CommandWrap};
 use reiny_core::bindings::{
-    EndpointContract, MODULE_BINDINGS_VERSION, MODULE_REPORT_VERSION, ModuleReport, PortKind,
-    PortReport, Replay, Retention,
+    EndpointAddress, EndpointContract, MODULE_BINDINGS_VERSION, MODULE_REPORT_VERSION,
+    ModuleReport, PortEndpoint, PortKind, PortReport, Replay, Retention,
 };
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +31,7 @@ const START_GRACE: Duration = Duration::from_secs(30);
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 64;
+const STATUS_VERSION: u32 = 2;
 
 /// The communication adapter implemented by the embedding CLI.
 ///
@@ -348,6 +349,10 @@ fn decode_response(stream: &mut TcpStream, owner_generation: &str) -> Result<Dep
     }
     let status = response.status.context("owner returned no status")?;
     ensure!(
+        status.version == STATUS_VERSION,
+        "unsupported deployment status version"
+    );
+    ensure!(
         status.owner_generation == owner_generation,
         "owner incarnation changed"
     );
@@ -362,6 +367,10 @@ pub fn last_status(root: &Path) -> Result<Option<DeploymentStatus>> {
         Err(error) => return Err(error.into()),
     };
     let mut status: DeploymentStatus = serde_json::from_slice(&bytes)?;
+    ensure!(
+        status.version == STATUS_VERSION,
+        "unsupported deployment status version"
+    );
     status.owner_alive = false;
     Ok(Some(status))
 }
@@ -518,7 +527,7 @@ impl<'a> Owner<'a> {
             owner_generation: generation.clone(),
         };
         let status = DeploymentStatus {
-            version: 1,
+            version: STATUS_VERSION,
             root: desired.root.clone(),
             deployment: desired.deployment.clone(),
             domain: desired.domain.clone(),
@@ -1132,7 +1141,8 @@ impl Owner<'_> {
                     "input {}/{port} has no sources",
                     node.namespace
                 );
-                for namespace in &input.sources {
+                for address in &input.sources {
+                    let namespace = &address.namespace;
                     let source = self
                         .status
                         .modules
@@ -1144,32 +1154,36 @@ impl Owner<'_> {
                                 node.namespace
                             )
                         })?;
-                    let outputs: Vec<_> = source
-                        .outputs
-                        .values()
-                        .filter(|output| type_matches(&input.contract.type_name, &output.type_name))
-                        .collect();
+                    let output = source.outputs.get(&address.port).with_context(|| {
+                        format!(
+                            "source {namespace} does not implement output {}",
+                            address.port
+                        )
+                    })?;
                     ensure!(
-                        !outputs.is_empty(),
-                        "source {namespace} does not implement {}",
-                        input.contract.type_name
+                        output.endpoint
+                            == PortEndpoint::Output {
+                                address: address.clone()
+                            },
+                        "source output identity mismatch for {namespace}/{}",
+                        address.port
                     );
-                    for output in outputs {
-                        ensure!(
-                            actual.type_name == output.type_name
-                                && actual.schema == output.schema
-                                && actual.response == output.response,
-                            "schema mismatch for {}/{port} from {namespace}",
-                            node.namespace
-                        );
-                        ensure!(
-                            actual.contract.kind == output.contract.kind
-                                && (actual.contract.replay != Replay::Last
-                                    || output.contract.retention == Retention::Last),
-                            "effective policy mismatch for {}/{port} from {namespace}",
-                            node.namespace
-                        );
-                    }
+                    ensure!(
+                        actual.type_name == output.type_name
+                            && actual.schema == output.schema
+                            && actual.response == output.response,
+                        "schema mismatch for {}/{port} from {namespace}/{}",
+                        node.namespace,
+                        address.port
+                    );
+                    ensure!(
+                        actual.contract.kind == output.contract.kind
+                            && (actual.contract.replay != Replay::Last
+                                || output.contract.retention == Retention::Last),
+                        "effective policy mismatch for {}/{port} from {namespace}/{}",
+                        node.namespace,
+                        address.port
+                    );
                 }
             }
         }
@@ -1317,7 +1331,10 @@ fn type_matches(expected: &str, actual: &str) -> bool {
 
 fn validate_report(node: &PreparedModule, report: &ModuleReport) -> Result<()> {
     ensure!(
-        report.version == MODULE_REPORT_VERSION && report.namespace == node.namespace,
+        report.version == MODULE_REPORT_VERSION
+            && report.fingerprint_version == reiny_core::SCHEMA_FINGERPRINT_VERSION
+            && report.namespace == node.namespace
+            && report.endpoint_namespace == node.bindings.endpoint_namespace,
         "readiness report identity mismatch"
     );
     ensure!(
@@ -1331,8 +1348,14 @@ fn validate_report(node: &PreparedModule, report: &ModuleReport) -> Result<()> {
             .inputs
             .get(port)
             .with_context(|| format!("missing input report {port}"))?;
-        validate_port_report(&binding.contract, actual)
-            .with_context(|| format!("invalid input report {port}"))?;
+        validate_port_report(
+            &binding.contract,
+            &PortEndpoint::Input {
+                sources: binding.sources.clone(),
+            },
+            actual,
+        )
+        .with_context(|| format!("invalid input report {port}"))?;
     }
     for (port, binding) in &node.bindings.outputs {
         crate::modules::validate_contract(&node.namespace, &binding.contract, false)?;
@@ -1340,13 +1363,30 @@ fn validate_report(node: &PreparedModule, report: &ModuleReport) -> Result<()> {
             .outputs
             .get(port)
             .with_context(|| format!("missing output report {port}"))?;
-        validate_port_report(&binding.contract, actual)
-            .with_context(|| format!("invalid output report {port}"))?;
+        validate_port_report(
+            &binding.contract,
+            &PortEndpoint::Output {
+                address: EndpointAddress {
+                    namespace: node.bindings.endpoint_namespace.clone(),
+                    port: port.clone(),
+                },
+            },
+            actual,
+        )
+        .with_context(|| format!("invalid output report {port}"))?;
     }
     Ok(())
 }
 
-fn validate_port_report(expected: &EndpointContract, actual: &PortReport) -> Result<()> {
+fn validate_port_report(
+    expected: &EndpointContract,
+    endpoint: &PortEndpoint,
+    actual: &PortReport,
+) -> Result<()> {
+    ensure!(
+        &actual.endpoint == endpoint,
+        "compiled endpoint address mismatch"
+    );
     ensure!(
         type_matches(&expected.type_name, &actual.type_name),
         "invalid type"

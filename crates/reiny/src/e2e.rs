@@ -130,7 +130,7 @@ const PATIENCE: Duration = Duration::from_secs(5);
 pub(crate) async fn wait_peers(session: &zenoh::Session, peers: usize) {
     let launches = session
         .liveliness()
-        .declare_subscriber("reiny/**/@launch")
+        .declare_subscriber("reiny/v3/**/@launch")
         .history(true)
         .wait()
         .expect("launch readiness observer");
@@ -289,7 +289,7 @@ async fn presence_latched_and_domain_isolation() {
     // --- latched (= `Qos::STATE`): send once, up front, and never re-send ---
     let (_latched_observer, latched_ready) = queryable_signal(
         beta.session().unwrap(),
-        "reiny/lab/alpha/ReinyE2eProbe".to_string(),
+        "reiny/v3/lab/alpha/@out/test/ReinyE2eProbe".to_string(),
     );
     let publisher = alpha
         .publisher::<Probe>()
@@ -315,7 +315,13 @@ async fn presence_latched_and_domain_isolation() {
 
     // --- presence: a live publisher is visible by id ---
     let live = beta.publishers::<Probe>().await.expect("publishers()");
-    assert_eq!(live, ["alpha"]);
+    assert_eq!(
+        live,
+        [crate::bindings::EndpointAddress {
+            namespace: "alpha".into(),
+            port: "test".into()
+        }]
+    );
 
     domain_isolation(&alpha, &gamma, &publisher).await;
 
@@ -323,13 +329,19 @@ async fn presence_latched_and_domain_isolation() {
     let mut watch = beta.watch_publishers::<Probe>().expect("watch_publishers");
     assert_eq!(
         timeout(PATIENCE, watch.recv()).await.expect("join event"),
-        Some(PresenceEvent::Joined("alpha".to_string())),
+        Some(PresenceEvent::Joined(crate::bindings::EndpointAddress {
+            namespace: "alpha".into(),
+            port: "test".into()
+        })),
         "history=true, so an already-declared publisher arrives first"
     );
     drop(publisher);
     assert_eq!(
         timeout(PATIENCE, watch.recv()).await.expect("leave event"),
-        Some(PresenceEvent::Left("alpha".to_string())),
+        Some(PresenceEvent::Left(crate::bindings::EndpointAddress {
+            namespace: "alpha".into(),
+            port: "test".into()
+        })),
     );
 
     // Once the publisher is gone it leaves publishers() too.
@@ -354,7 +366,7 @@ async fn domain_isolation(
     );
     let (_isolation_observer, isolated_ready) = subscriber_signal(
         alpha.session().unwrap(),
-        "reiny/other/delta/ReinyE2eProbe".to_string(),
+        "reiny/v3/other/delta/@out/test/ReinyE2eProbe".to_string(),
     );
     let mut outsider = gamma
         .subscriber::<Probe>()
@@ -389,7 +401,7 @@ async fn schema_fingerprints(
     // --- schema fingerprints: same topic, different shape, nothing arrives ---
     let (_stamped_observer, stamped_ready) = subscriber_signal(
         alpha.session().unwrap(),
-        "reiny/lab/alpha/ReinyE2eStamped".to_string(),
+        "reiny/v3/lab/alpha/@out/test/ReinyE2eStamped".to_string(),
     );
     let stamped = alpha
         .publisher::<StampedV1>()
@@ -429,7 +441,7 @@ async fn schema_discovery(alpha: &ModuleContext, beta: &ModuleContext) {
     // --- @schema: a publisher with a DESCRIPTOR announces it beside its own key ---
     let (_schema_observer, schema_ready) = queryable_signal(
         beta.session().unwrap(),
-        "reiny/lab/alpha/e2e.Described/@schema/e2e.Described".to_string(),
+        "reiny/v3/lab/alpha/@out/test/e2e.Described/@schema/e2e.Described".to_string(),
     );
     let described = alpha
         .publisher::<Described>()
@@ -439,7 +451,7 @@ async fn schema_discovery(alpha: &ModuleContext, beta: &ModuleContext) {
     let replies = beta
         .session()
         .expect("zenoh engine")
-        .get("reiny/lab/*/*/@schema/*")
+        .get("reiny/v3/lab/**/@out/*/*/@schema/*")
         .wait()
         .expect("schema get");
     let named: Vec<(String, Vec<u8>)> = replies
@@ -453,7 +465,7 @@ async fn schema_discovery(alpha: &ModuleContext, beta: &ModuleContext) {
     assert_eq!(
         named,
         [(
-            "reiny/lab/alpha/e2e.Described/@schema/e2e.Described".to_string(),
+            "reiny/v3/lab/alpha/@out/test/e2e.Described/@schema/e2e.Described".to_string(),
             b"not-a-real-descriptor-set".to_vec()
         )]
     );
@@ -462,7 +474,7 @@ async fn schema_discovery(alpha: &ModuleContext, beta: &ModuleContext) {
     let broad = beta
         .session()
         .expect("zenoh engine")
-        .get("reiny/lab/**")
+        .get("reiny/v3/lab/**/@out/*/*")
         .wait()
         .expect("broad get");
     let leaked: Vec<String> = broad
@@ -482,7 +494,7 @@ async fn receive_buffers(
     // --- latest(n): letting samples pile up unread drops the oldest (the default Fifo keeps all 5) ---
     let (_burst_observer, burst_ready) = subscriber_signal(
         alpha.session().unwrap(),
-        "reiny/lab/alpha/ReinyE2eProbe".to_string(),
+        "reiny/v3/lab/alpha/@out/test/ReinyE2eProbe".to_string(),
     );
     let burst = alpha.publisher::<Probe>().build().expect("burst publisher");
     let mut ring = beta

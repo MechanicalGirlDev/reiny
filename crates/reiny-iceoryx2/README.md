@@ -18,10 +18,14 @@ What it maps to (design: `docs/design/0.5.0.md` §5):
 
 | reiny                          | iceoryx2                                                                 |
 | ------------------------------ | ------------------------------------------------------------------------ |
-| publish `reiny/<d>/<id>/<T>`   | pub-sub service `reiny/<d>/<T>`; the source id rides in a user header    |
-| subscribe `reiny/<d>/*/<T>`    | one subscriber on that service; a named source is a header filter        |
+| publish `reiny/v3/<d>/<namespace>/@out/<port>/<T>` | pub-sub service `reiny/<d>/<T>`; the complete named key rides in a user header |
+| subscribe to a declared source endpoint | one subscriber on that service; exact namespace and port are header filters |
 | latched / services / `@schema` | request-response service `reiny/<d>/<T>/q`                               |
 | presence                       | a `reiny-alive/<key>` service held open; `watch` polls every 200 ms      |
+
+Sharing a native service by protobuf type does not connect same-type ports.
+Stream samples, RPC requests, and successful or error replies must match the
+declared endpoint target. Old key epochs are rejected.
 
 iceoryx2 is single-host. To see these launches from another machine (or from
 `reiny topic` / `reiny bag`, which stay on zenoh) run one `reiny bridge iceoryx2`.

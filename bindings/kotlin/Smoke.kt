@@ -17,6 +17,7 @@ fun main(args: Array<String>) {
                         val message = checkNotNull(subscriber.receive(1000uL))
                         check(message.payload.contentEquals(payload))
                         check(message.source == "sender")
+                        check(message.sourcePort == "out")
                         check(message.schema == 42uL)
                         receiver.shutdown()
                         check(subscriber.receive(1000uL) == null)

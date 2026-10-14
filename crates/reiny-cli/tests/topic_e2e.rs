@@ -118,7 +118,7 @@ fn reiny_with_policy(
     let bindings =
         std::env::temp_dir().join(format!("reiny-topic-bindings-{}.json", std::process::id()));
     let mut contract: reiny::bindings::ModuleBindings = serde_yaml::from_str(
-        "version: 2\nnamespace: sim\nendpoint_namespace: sim\ninputs:\n  Probe:\n    contract: {type: e2e.Probe}\n    sources: [ctrl]\n  Add:\n    contract: {type: e2e.Add, kind: rpc, response: e2e.Sum}\n    sources: [ctrl]\noutputs:\n  Cmd:\n    contract: {type: e2e.Sum, qos: sensor, retention: last}\n",
+        "version: 3\nnamespace: sim\nendpoint_namespace: sim\ninputs:\n  Probe:\n    contract: {type: e2e.Probe}\n    sources: [{namespace: ctrl, port: probe}]\n  Add:\n    contract: {type: e2e.Add, kind: rpc, response: e2e.Sum}\n    sources: [{namespace: ctrl, port: add}]\noutputs:\n  Cmd:\n    contract: {type: e2e.Sum, qos: sensor, retention: last}\n",
     ).unwrap();
     let probe = &mut contract.inputs.get_mut("Probe").unwrap().contract;
     probe.buffer = buffer;
@@ -209,10 +209,10 @@ fn topic_node_service_against_live_launch() {
     // --- playing the launch ctrl: @launch, plus Probe's publisher + presence + @schema ---
     let _launch = fab
         .liveliness()
-        .declare_token("reiny/lab/ctrl/@launch")
+        .declare_token("reiny/v3/lab/ctrl/@launch")
         .wait()
         .expect("launch token");
-    let probe_key = "reiny/lab/ctrl/e2e.Probe";
+    let probe_key = "reiny/v3/lab/ctrl/@out/probe/e2e.Probe";
     let probe_pub = Arc::new(fab.declare_publisher(probe_key).wait().expect("probe pub"));
     let _probe_token = fab
         .liveliness()
@@ -222,7 +222,7 @@ fn topic_node_service_against_live_launch() {
     let _probe_schema = schema_queryable(&fab, probe_key, "e2e.Probe");
 
     // --- the service Add: a queryable + @service + @schema (two: the request and the response) ---
-    let add_key = "reiny/lab/ctrl/e2e.Add";
+    let add_key = "reiny/v3/lab/ctrl/@out/add/e2e.Add";
     let _add_token = fab
         .liveliness()
         .declare_token(format!("{add_key}/@service"))
@@ -261,7 +261,7 @@ fn topic_node_service_against_live_launch() {
         let live = Arc::clone(&live);
         let publisher = Arc::clone(&probe_pub);
         fab.liveliness()
-            .declare_subscriber("reiny/lab/sim/@ready")
+            .declare_subscriber("reiny/v3/lab/sim/@ready")
             .callback(move |sample| {
                 if sample.kind() != zenoh::sample::SampleKind::Put || !live.load(Ordering::SeqCst) {
                     return;
@@ -296,7 +296,7 @@ fn topic_node_service_against_live_launch() {
     };
 
     // --- playing the launch gui: it only subscribes to Cmd (@sub + @schema; there is no publisher) ---
-    let cmd_key = "reiny/lab/gui/e2e.Sum";
+    let cmd_key = "reiny/v3/lab/gui/@in/command/e2e.Sum";
     let _cmd_sub_token = fab
         .liveliness()
         .declare_token(format!("{cmd_key}/@sub"))
@@ -305,7 +305,7 @@ fn topic_node_service_against_live_launch() {
     let _cmd_schema = schema_queryable(&fab, cmd_key, "e2e.Sum");
     let (cmd_seen, cmd_received) = std::sync::mpsc::channel();
     let _cmd_sub = {
-        fab.declare_subscriber("reiny/lab/sim/e2e.Sum")
+        fab.declare_subscriber("reiny/v3/lab/sim/@out/Cmd/e2e.Sum")
             .callback(move |s| {
                 if Sum::decode(s.payload().to_bytes().as_ref()).is_ok_and(|v| v.sum == 7) {
                     let _ = cmd_seen.send(());
@@ -320,13 +320,13 @@ fn topic_node_service_against_live_launch() {
     assert!(out.lines().any(|l| l.trim() == "ctrl"), "node list: {out}");
     let out = stdout(&reiny(&["node", "info", "ctrl"]));
     assert!(
-        out.contains("pub : e2e.Probe") && out.contains("srv : e2e.Add"),
+        out.contains("pub : probe (e2e.Probe)") && out.contains("srv : add (e2e.Add)"),
         "node info: {out}"
     );
     // A launch that only listens is still a launch, and `sub :` is the line that says so.
     let out = stdout(&reiny(&["node", "info", "gui"]));
     assert!(
-        out.contains("sub : e2e.Sum") && out.contains("pub : -"),
+        out.contains("sub : command (e2e.Sum)") && out.contains("pub : -"),
         "node info gui: {out}"
     );
 
@@ -341,9 +341,17 @@ fn topic_node_service_against_live_launch() {
             .collect::<Vec<_>>()
     };
     // TYPE_NAME  PUB  SUB  SRV
-    assert_eq!(row("e2e.Probe"), ["e2e.Probe", "ctrl", "-", "-"], "{out}");
-    assert_eq!(row("e2e.Add"), ["e2e.Add", "-", "-", "ctrl"], "{out}");
-    assert_eq!(row("e2e.Sum"), ["e2e.Sum", "-", "gui", "-"], "{out}");
+    assert_eq!(
+        row("e2e.Probe"),
+        ["e2e.Probe", "ctrl:probe", "-", "-"],
+        "{out}"
+    );
+    assert_eq!(row("e2e.Add"), ["e2e.Add", "-", "-", "ctrl:add"], "{out}");
+    assert_eq!(
+        row("e2e.Sum"),
+        ["e2e.Sum", "-", "gui:command", "-"],
+        "{out}"
+    );
 
     // --- topic hz: a Hz appears on ctrl's row ---
     let out = stdout(&reiny(&["topic", "hz", "Probe", "--duration", "1.5"]));
@@ -403,7 +411,7 @@ fn topic_node_service_against_live_launch() {
         reiny::bindings::ReceiveBuffer::Latest(1),
         reiny::bindings::Replay::Last,
     ));
-    let retained = out.trim().strip_prefix("ctrl  ").unwrap();
+    let retained = out.trim().strip_prefix("ctrl:probe  ").unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(retained).unwrap(),
         serde_json::json!({"seq": 42, "name": "retained"})
@@ -414,7 +422,7 @@ fn topic_node_service_against_live_launch() {
         let (ready, seen) = std::sync::mpsc::channel();
         let _ready = fab
             .liveliness()
-            .declare_subscriber("reiny/lab/sim/@ready")
+            .declare_subscriber("reiny/v3/lab/sim/@ready")
             .callback(move |sample| {
                 if sample.kind() == zenoh::sample::SampleKind::Put {
                     ready.send(()).unwrap();
@@ -428,7 +436,7 @@ fn topic_node_service_against_live_launch() {
         });
         seen.recv_timeout(Duration::from_secs(10))
             .expect("CLI readiness");
-        let replies = fab.get("reiny/lab/sim/@stop").wait().unwrap();
+        let replies = fab.get("reiny/v3/lab/sim/@stop").wait().unwrap();
         let reply = replies
             .recv_timeout(Duration::from_secs(5))
             .unwrap()
@@ -478,7 +486,7 @@ fn topic_node_service_against_live_launch() {
         "sim",
     ]));
     assert!(
-        out.contains("reiny/lab/sim/e2e.Sum: sent 1") && out.contains("e2e.Sum"),
+        out.contains("reiny/v3/lab/sim/@out/Cmd/e2e.Sum: sent 1") && out.contains("e2e.Sum"),
         "topic pub: {out}"
     );
     cmd_received

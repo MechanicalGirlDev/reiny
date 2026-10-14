@@ -83,7 +83,10 @@ fn input(b: &mut ModuleBindings, name: &str, source: &str, contract: EndpointCon
         name.into(),
         InputBinding {
             contract,
-            sources: vec![source.into()],
+            sources: vec![crate::bindings::EndpointAddress {
+                namespace: source.into(),
+                port: name.into(),
+            }],
         },
     );
 }
@@ -168,7 +171,7 @@ async fn named_streams_and_rpc_follow_sources_policies_and_readiness() {
     });
     let intruder = left
         .publisher(
-            &Key::topic(DOMAIN, Some("undeclared"), Probe::TYPE_NAME),
+            &Key::output(DOMAIN, "undeclared", "state", Probe::TYPE_NAME),
             &crate::Qos::DEFAULT,
         )
         .expect("raw transport fixture");
@@ -230,7 +233,7 @@ async fn named_streams_and_rpc_follow_sources_policies_and_readiness() {
     assert_eq!(response.value, 11);
     assert_eq!(
         left.alive(
-            &Key::topic(DOMAIN, Some("bridge"), Probe::TYPE_NAME),
+            &Key::output(DOMAIN, "bridge", "state", Probe::TYPE_NAME),
             PATIENCE
         )
         .await
@@ -290,7 +293,7 @@ async fn rpc_bridge_rejects_invalid_request_and_response_fingerprints() {
     let right = Arc::new(Local::new());
     let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = count.clone();
-    let target = Key::topic(DOMAIN, Some("native"), Add::TYPE_NAME);
+    let target = Key::output(DOMAIN, "native", "adder", Add::TYPE_NAME);
     let reply_key = target.clone();
     let _server = left
         .respond(
@@ -316,7 +319,7 @@ async fn rpc_bridge_rejects_invalid_request_and_response_fingerprints() {
     let _bridge = forward(&a, &b, &schemas()).expect("RPC bridge");
     a.ready().expect("caller ready");
     b.ready().expect("service ready");
-    let endpoint = Key::topic(DOMAIN, Some("bridge"), Add::TYPE_NAME);
+    let endpoint = Key::output(DOMAIN, "bridge", "adder", Add::TYPE_NAME);
 
     // When malformed requests and then a valid request with a malformed reply cross the route.
     for stamp in [None, Some(vec![1]), Some(0xffff_u64.to_le_bytes().to_vec())] {
@@ -392,4 +395,55 @@ async fn ambiguous_rpc_destinations_fail_before_creating_handles() {
     );
     assert!(a.ready().is_err());
     assert!(b.ready().is_err());
+}
+
+#[tokio::test]
+async fn same_type_bridge_routes_pair_declared_names_not_first_matching_types() {
+    let left = Arc::new(Local::new());
+    let right = Arc::new(Local::new());
+    let mut source = bindings("native");
+    let mut destination = bindings("client");
+    let mut a = bindings("bridge");
+    let mut b = bindings("bridge");
+    for name in ["first", "second"] {
+        output(&mut source, name, contract("Probe"));
+        input(&mut a, name, "native", contract("Probe"));
+        output(&mut b, name, contract("Probe"));
+        input(&mut destination, name, "bridge", contract("Probe"));
+    }
+    let source = open(left.clone(), source).await;
+    let destination = open(right.clone(), destination).await;
+    let a = open(left, a).await;
+    let b = open(right, b).await;
+    let first = source.output::<Probe>("first").expect("first");
+    let second = source.output::<Probe>("second").expect("second");
+    let mut incoming_first = destination.input::<Probe>("first").expect("first input");
+    let mut incoming_second = destination.input::<Probe>("second").expect("second input");
+    let _bridge = forward(&a, &b, &schemas()).expect("two named bridge routes");
+    second.send(Probe { value: 22 }).await.expect("second send");
+    first.send(Probe { value: 11 }).await.expect("first send");
+    let first = timeout(PATIENCE, incoming_first.recv_envelope())
+        .await
+        .expect("first deadline")
+        .expect("first");
+    let second = timeout(PATIENCE, incoming_second.recv_envelope())
+        .await
+        .expect("second deadline")
+        .expect("second");
+    assert_eq!(
+        (
+            first.source.as_str(),
+            first.source_port.as_str(),
+            first.value.value
+        ),
+        ("bridge", "first", 11)
+    );
+    assert_eq!(
+        (
+            second.source.as_str(),
+            second.source_port.as_str(),
+            second.value.value
+        ),
+        ("bridge", "second", 22)
+    );
 }

@@ -33,15 +33,22 @@ with that language's Protobuf implementation. The FFI sends those wire bytes
 unchanged, including empty payloads and embedded NULs. It does not JSON-encode
 messages or generate your application-specific Protobuf classes.
 
-Every session requires an absolute path to prepared version-2 module-bindings
+Every session requires an absolute path to prepared version-3 module-bindings
 JSON. Its namespace must equal the session id. The contract owns port names,
 endpoint namespaces, exact input sources, and endpoint policies.
 Subscriptions receive only their declared sources in the session domain;
 there is no caller source override or wildcard subscription.
-`Message` includes the original bytes, source id, optional schema fingerprint,
+`Message` includes the original bytes, source namespace, exact `source_port`, optional schema fingerprint,
 and optional Unix-nanosecond engine timestamp. Port registration requires the
 compiled schema fingerprint; it cannot be omitted. The SDK enforces the managed
 contract and schema while leaving Protobuf encoding and decoding to the caller.
+
+Input sources are `{ "namespace": "sender", "port": "out" }` pairs.
+Multiple outputs may share one complete protobuf name; the named port remains
+separate provenance. The C ABI exposes `reiny_message_source_port`, C++ exposes
+`source_port()`, Python and Ruby expose `source_port`, and JavaScript, TypeScript,
+Kotlin, and Swift expose `sourcePort` (C#: `SourcePort`). Regenerate UniFFI
+bindings together with the native library after this interface change.
 
 The foreign API covers managed session creation, named binary publish/subscribe,
 synchronous readiness, and cooperative shutdown. Register all declared ports,
@@ -118,6 +125,7 @@ publisher.send(b"\x0a\x03\x00\x01\xff")  # Ping { bytes data = 1; }
 message = subscription.receive(1000)
 assert message is not None
 assert message.source == "sender"
+assert message.source_port == "out"
 ```
 
 For cross-process communication, use

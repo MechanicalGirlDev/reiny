@@ -5,8 +5,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use reiny_core::bindings::{
-    EndpointContract, MODULE_REPORT_VERSION, ModuleBindings, ModuleReport, PortKind, PortReport,
-    QosProfile, ReceiveBuffer, Replay, ResponseReport, Retention,
+    EndpointAddress, EndpointContract, MODULE_REPORT_VERSION, ModuleBindings, ModuleReport,
+    PortEndpoint, PortKind, PortReport, QosProfile, ReceiveBuffer, Replay, ResponseReport,
+    Retention,
 };
 
 use crate::engine::{Guard, Key, READY_CHUNK, STOP_CHUNK};
@@ -117,7 +118,11 @@ fn compiled_type<T: MessageType>(declared: &str) -> Result<ResponseReport> {
 }
 
 impl Registration {
-    fn of<T: MessageType>(contract: &EndpointContract, live: &Arc<()>) -> Result<Self> {
+    fn of<T: MessageType>(
+        contract: &EndpointContract,
+        endpoint: PortEndpoint,
+        live: &Arc<()>,
+    ) -> Result<Self> {
         let compiled = compiled_type::<T>(&contract.type_name)?;
         Ok(Self {
             contract: PortReport {
@@ -125,14 +130,19 @@ impl Registration {
                 schema: compiled.schema,
                 contract: contract.clone(),
                 response: None,
+                endpoint,
             },
             transport_type: T::TYPE_NAME.to_string(),
             live: Arc::downgrade(live),
         })
     }
 
-    fn rpc<S: Service>(contract: &EndpointContract, live: &Arc<()>) -> Result<Self> {
-        let mut registration = Self::of::<S>(contract, live)?;
+    fn rpc<S: Service>(
+        contract: &EndpointContract,
+        endpoint: PortEndpoint,
+        live: &Arc<()>,
+    ) -> Result<Self> {
+        let mut registration = Self::of::<S>(contract, endpoint, live)?;
         let response = contract
             .response
             .as_deref()
@@ -154,7 +164,7 @@ impl ModuleContext {
                 caps.query && caps.liveliness && caps.attachment,
                 "managed modules require query, liveliness and schema attachments"
             );
-            let key = Key::topic(&self.domain, Some(&self.id), STOP_CHUNK);
+            let key = Key::module(&self.domain, Some(&self.id), STOP_CHUNK);
             let reply_key = key.clone();
             let shutdown = self.shutdown.clone();
             self.module.stop = Some(self.engine.respond(
@@ -179,6 +189,31 @@ impl ModuleContext {
             .bindings
             .as_ref()
             .map_or(&self.id, |bindings| &bindings.endpoint_namespace)
+    }
+
+    fn port_endpoint(&self, name: &str, input: bool) -> Result<PortEndpoint> {
+        let bindings = self
+            .module
+            .bindings
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("module bindings are required"))?;
+        if input {
+            Ok(PortEndpoint::Input {
+                sources: bindings
+                    .inputs
+                    .get(name)
+                    .ok_or_else(|| anyhow::anyhow!("undefined input '{name}'"))?
+                    .sources
+                    .clone(),
+            })
+        } else {
+            Ok(PortEndpoint::Output {
+                address: EndpointAddress {
+                    namespace: bindings.endpoint_namespace.clone(),
+                    port: name.to_owned(),
+                },
+            })
+        }
     }
 
     fn named_contract(&self, name: &str, input: bool, kind: PortKind) -> Result<&EndpointContract> {
@@ -234,7 +269,7 @@ impl ModuleContext {
         let contract = self.named_contract(name, true, PortKind::Stream)?;
         let mut ports = self.lock_ports(name, true)?;
         let live = Arc::new(());
-        let registration = Registration::of::<T>(contract, &live)?;
+        let registration = Registration::of::<T>(contract, self.port_endpoint(name, true)?, &live)?;
         let sources = &self
             .module
             .bindings
@@ -249,7 +284,7 @@ impl ModuleContext {
         if let ReceiveBuffer::Latest(depth) = contract.buffer {
             builder = builder.latest(depth);
         }
-        let mut subscriber = builder.build_named()?;
+        let mut subscriber = builder.build_named(name)?;
         subscriber.managed = Some(ManagedPort::new(self, live));
         ports.inputs.insert(name.to_string(), registration);
         Ok(subscriber)
@@ -272,7 +307,10 @@ impl ModuleContext {
         let keys: Vec<_> = input
             .sources
             .iter()
-            .map(|source| Key::topic(&self.domain, Some(source), READY_CHUNK))
+            .map(|source| source.namespace.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|source| Key::module(&self.domain, Some(source), READY_CHUNK))
             .collect();
         crate::RawPresence::many(self, &keys)
     }
@@ -281,18 +319,19 @@ impl ModuleContext {
     pub fn output<T: prost::Message + MessageType>(&self, name: &str) -> Result<Publisher<T>> {
         let contract = self.named_contract(name, false, PortKind::Stream)?;
         let mut ports = self.lock_ports(name, false)?;
-        check_output_type::<T>(&ports)?;
         let live = Arc::new(());
-        let registration = Registration::of::<T>(contract, &live)?;
+        let registration =
+            Registration::of::<T>(contract, self.port_endpoint(name, false)?, &live)?;
         let mut qos = match contract.qos {
-            QosProfile::Reliable => Qos::DEFAULT,
+            QosProfile::Default => Qos::DEFAULT,
+            QosProfile::Command => Qos::COMMAND,
             QosProfile::Sensor => Qos::SENSOR,
         };
         qos.durability = match contract.retention {
             Retention::Volatile => Durability::Volatile,
             Retention::Last => Durability::TransientLocal,
         };
-        let mut publisher = self.publisher::<T>().qos(qos).build_named()?;
+        let mut publisher = self.publisher::<T>().qos(qos).build_named(name)?;
         publisher.managed = Some(ManagedPort::new(self, live));
         ports.outputs.insert(name.to_string(), registration);
         Ok(publisher)
@@ -303,7 +342,8 @@ impl ModuleContext {
         let contract = self.named_contract(name, true, PortKind::Rpc)?;
         let mut ports = self.lock_ports(name, true)?;
         let live = Arc::new(());
-        let registration = Registration::rpc::<S>(contract, &live)?;
+        let registration =
+            Registration::rpc::<S>(contract, self.port_endpoint(name, true)?, &live)?;
         let sources = &self
             .module
             .bindings
@@ -312,7 +352,7 @@ impl ModuleContext {
             .inputs[name]
             .sources;
         anyhow::ensure!(sources.len() == 1, "RPC requires exactly one target");
-        let mut caller = self.caller::<S>().to(&sources[0]).build_named();
+        let mut caller = self.caller::<S>().target(&sources[0]).build_named();
         caller.managed = Some(ManagedPort::new(self, live));
         ports.inputs.insert(name.to_string(), registration);
         Ok(caller)
@@ -322,10 +362,10 @@ impl ModuleContext {
     pub fn rpc_server<S: Service>(&self, name: &str) -> Result<RpcServer<S>> {
         let contract = self.named_contract(name, false, PortKind::Rpc)?;
         let mut ports = self.lock_ports(name, false)?;
-        check_output_type::<S>(&ports)?;
         let live = Arc::new(());
-        let registration = Registration::rpc::<S>(contract, &live)?;
-        let mut server = RpcServer::declare(self)?;
+        let registration =
+            Registration::rpc::<S>(contract, self.port_endpoint(name, false)?, &live)?;
+        let mut server = RpcServer::declare(self, name)?;
         server.managed = Some(ManagedPort::new(self, live));
         ports.outputs.insert(name.to_string(), registration);
         Ok(server)
@@ -349,6 +389,8 @@ impl ModuleContext {
         let mut report = ModuleReport {
             version: MODULE_REPORT_VERSION,
             namespace: self.id.clone(),
+            endpoint_namespace: self.endpoint_namespace().to_owned(),
+            fingerprint_version: reiny_core::SCHEMA_FINGERPRINT_VERSION,
             inputs: BTreeMap::new(),
             outputs: BTreeMap::new(),
         };
@@ -392,34 +434,14 @@ impl ModuleContext {
                 }
             }
         }
-        let mut transport_types = BTreeSet::new();
-        for port in report.outputs.values() {
-            let type_name = &port.type_name;
-            anyhow::ensure!(
-                transport_types.insert(type_name),
-                "duplicate output transport type '{type_name}'"
-            );
-        }
         if let Some(path) = &self.module.report_path {
             config::write_report(path, &report)?;
         }
-        ports.ready = Some(self.engine.declare_alive(&Key::topic(
+        ports.ready = Some(self.engine.declare_alive(&Key::module(
             &self.domain,
             Some(&self.id),
             READY_CHUNK,
         ))?);
         Ok(())
     }
-}
-
-fn check_output_type<T: MessageType>(ports: &Ports) -> Result<()> {
-    anyhow::ensure!(
-        ports
-            .outputs
-            .values()
-            .all(|port| port.transport_type != T::TYPE_NAME),
-        "duplicate output transport type '{}'",
-        T::TYPE_NAME
-    );
-    Ok(())
 }

@@ -21,7 +21,11 @@ async fn main() -> reiny::Result<()> {
         }),
     )
     .await??;
-    if state.source != endpoint || state.value.value != 42 || response.sum != 43 {
+    if state.source != endpoint
+        || state.source_port != "state"
+        || state.value.value != 42
+        || response.sum != 43
+    {
         return Err(std::io::Error::other("delegated endpoint result differs").into());
     }
     println!("OWNED_CHILD_QA_OK state=42 reply=43 source={endpoint}");

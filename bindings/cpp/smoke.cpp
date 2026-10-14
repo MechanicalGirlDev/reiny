@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
         pub.send(binary);
         auto message = sub.receive(1000);
         if (!message || message->payload().bytes() != binary ||
-            message->source() != "sender" || message->schema() != 42)
+            message->source() != "sender" || message->source_port() != "out" || message->schema() != 42)
             throw std::runtime_error("message mismatch");
         auto retained = message->payload();
         message.reset();

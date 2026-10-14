@@ -91,7 +91,7 @@ fn bus_args(domain: &str) -> Vec<String> {
 
 fn prepare_recording_bindings(path: &std::path::Path) -> reiny::bindings::ModuleBindings {
     let bindings: reiny::bindings::ModuleBindings = serde_yaml::from_str(
-        "version: 2\nnamespace: bag\nendpoint_namespace: bag\ninputs:\n  probe:\n    contract: {type: bag.Probe}\n    sources: [ctrl]\n  config:\n    contract: {type: bag.Config, replay: last}\n    sources: [cfg]\noutputs:\n  probe:\n    contract: {type: bag.Probe}\n  config:\n    contract: {type: bag.Config, retention: last}\n",
+        "version: 3\nnamespace: bag\nendpoint_namespace: bag\ninputs:\n  probe:\n    contract: {type: bag.Probe}\n    sources: [{namespace: ctrl, port: probe}]\n  config:\n    contract: {type: bag.Config, replay: last}\n    sources: [{namespace: cfg, port: config}]\noutputs:\n  probe:\n    contract: {type: bag.Probe}\n  config:\n    contract: {type: bag.Config, retention: last}\n",
     ).unwrap();
     let mut recording_bindings = bindings.clone();
     recording_bindings.outputs.clear();
@@ -114,7 +114,7 @@ fn record_info_play_round_trip_and_live_guard() {
 
     // --- set up what the launch offers ---
     // 1) The live type ctrl/Probe: a publisher plus a liveliness token (for presence and the safety catch).
-    let probe_key = "reiny/lab/ctrl/bag.Probe";
+    let probe_key = "reiny/v3/lab/ctrl/@out/probe/bag.Probe";
     let probe_pub = fab.declare_publisher(probe_key).wait().expect("probe pub");
     let _probe_token = fab
         .liveliness()
@@ -122,7 +122,7 @@ fn record_info_play_round_trip_and_live_guard() {
         .wait()
         .expect("probe token");
     // 2) The latched cfg/Config: a queryable answering with the most recent value (record's snapshot picks it up).
-    let cfg_key = "reiny/lab/cfg/bag.Config";
+    let cfg_key = "reiny/v3/lab/cfg/@out/config/bag.Config";
     let _cfg_token = fab.liveliness().declare_token(cfg_key).wait().unwrap();
     let cfg_fp = reiny_build::message_fingerprint(&descriptor(), "bag.Config")
         .unwrap()
@@ -213,13 +213,19 @@ fn record_info_play_round_trip_and_live_guard() {
     )
     .unwrap();
     let collected = fab
-        .declare_subscriber("reiny/replay/*/*")
+        .declare_subscriber("reiny/v3/replay/**/@out/*/*")
         .wait()
         .expect("replay sub");
     let play = Command::new(BIN)
         .args(["bag", "play"])
         .arg(&bag)
         .args(bus_args("replay"))
+        .args([
+            "--map",
+            "reiny/v3/lab/ctrl/@out/probe/bag.Probe=probe",
+            "--map",
+            "reiny/v3/lab/cfg/@out/config/bag.Config=config",
+        ])
         .args(["--as", "bag", "--rate", "8"])
         .output()
         .expect("play");
@@ -238,7 +244,7 @@ fn record_info_play_round_trip_and_live_guard() {
             .unwrap()
             .expect("each replay message");
         let key = sample.key_expr().as_str().to_string();
-        if key == "reiny/replay/bag/bag.Probe" {
+        if key == "reiny/v3/replay/bag/@out/probe/bag.Probe" {
             probe_values.push(
                 Probe::decode(sample.payload().to_bytes().as_ref())
                     .unwrap()
@@ -261,6 +267,12 @@ fn record_info_play_round_trip_and_live_guard() {
         .args(["bag", "play"])
         .arg(&bag)
         .args(bus_args("lab"))
+        .args([
+            "--map",
+            "reiny/v3/lab/ctrl/@out/probe/bag.Probe=probe",
+            "--map",
+            "reiny/v3/lab/cfg/@out/config/bag.Config=config",
+        ])
         .output()
         .expect("guarded play");
     assert!(
@@ -279,6 +291,12 @@ fn record_info_play_round_trip_and_live_guard() {
         .arg(&bag)
         .args(bus_args("lab"))
         .args(["--force", "--rate", "8"])
+        .args([
+            "--map",
+            "reiny/v3/lab/ctrl/@out/probe/bag.Probe=probe",
+            "--map",
+            "reiny/v3/lab/cfg/@out/config/bag.Config=config",
+        ])
         .output()
         .expect("forced play");
     assert!(

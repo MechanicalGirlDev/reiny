@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use prost::Message;
-use reiny_core::{MessageType, PortDirection, PortType, Service, StaticPort};
+use reiny_core::{MessageType, Service, StaticPort};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -32,10 +32,16 @@ impl HostLink {
 /// A type the peer declared in its Hello, with its name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerType {
-    /// See [`wire::type_hash`].
+    /// See [`wire::endpoint_hash`].
     pub hash: u32,
     /// `MessageType::TYPE_NAME`.
     pub name: String,
+    /// Declared port name, independent of its payload type.
+    pub port: String,
+    /// Response FQN and fingerprint for an RPC port.
+    pub response: Option<(String, u64)>,
+    /// Exact declared source endpoint pairs.
+    pub sources: Vec<(String, String)>,
     /// The OR of [`wire::flags`].
     pub flags: u8,
     /// The peer's `MessageType::SCHEMA_FINGERPRINT`.
@@ -56,8 +62,14 @@ pub enum HostEvent {
     Disconnected,
     /// Data of a subscribed type. Turn it into a type with [`HostEvent::decode`].
     Data {
-        /// The type hash.
+        /// The sending output endpoint hash.
         hash: u32,
+        /// The payload type name.
+        name: String,
+        /// The addressed endpoint namespace.
+        namespace: String,
+        /// The addressed output/server port.
+        port: String,
         /// The negotiated message fingerprint.
         schema: u64,
         /// The running counter.
@@ -67,8 +79,14 @@ pub enum HostEvent {
     },
     /// A Request for a served type. Pass `seq` to [`Host::reply`] / [`Host::reply_err`].
     Request {
-        /// The request type's hash.
+        /// The destination server endpoint hash.
         hash: u32,
+        /// The payload type name.
+        name: String,
+        /// The addressed endpoint namespace.
+        namespace: String,
+        /// The addressed output/server port.
+        port: String,
         /// The negotiated request fingerprint.
         schema: u64,
         /// The correlation id.
@@ -79,22 +97,22 @@ pub enum HostEvent {
 }
 
 impl HostEvent {
-    /// Decode a Data / Request as the type `T`. `None` if the type hash differs.
+    /// Decode against the negotiated FQN and fingerprint of this named endpoint.
     #[must_use]
     pub fn decode<T: MessageType + Message + Default>(&self) -> Option<T> {
         match self {
             Self::Data {
-                hash,
+                name,
                 schema,
                 payload,
                 ..
             }
             | Self::Request {
-                hash,
+                name,
                 schema,
                 payload,
                 ..
-            } if *hash == wire::type_hash(T::TYPE_NAME) && *schema == T::SCHEMA_FINGERPRINT => {
+            } if name == T::TYPE_NAME && *schema == T::SCHEMA_FINGERPRINT => {
                 T::decode(payload.as_slice()).ok()
             }
             _ => None,
@@ -134,7 +152,32 @@ impl fmt::Display for CallError {
 
 impl std::error::Error for CallError {}
 
-type Pending = Arc<Mutex<HashMap<(u32, u8), oneshot::Sender<Result<Vec<u8>, String>>>>>;
+struct PendingCall {
+    token: Arc<()>,
+    reply: oneshot::Sender<Result<Vec<u8>, String>>,
+}
+type Pending = Arc<Mutex<HashMap<(u32, u8), PendingCall>>>;
+struct CallReservation {
+    link: Arc<Mutex<HostLink>>,
+    pending: Pending,
+    hash: u32,
+    seq: u8,
+    token: Arc<()>,
+}
+impl Drop for CallReservation {
+    fn drop(&mut self) {
+        // Same lock order as request registration and receive conversion.
+        let mut link = lock(&self.link);
+        let mut pending = lock(&self.pending);
+        if pending
+            .get(&(self.hash, self.seq))
+            .is_some_and(|call| Arc::ptr_eq(&call.token, &self.token))
+        {
+            pending.remove(&(self.hash, self.seq));
+            link.cancel_request(self.hash, self.seq);
+        }
+    }
+}
 type Peer = Arc<Mutex<Option<(String, Vec<PeerType>)>>>;
 
 /// The host side of one link. Dropping it stops the driver too.
@@ -214,26 +257,10 @@ impl Host {
         req: &S,
         timeout: Duration,
     ) -> Result<S::Response, CallError> {
-        {
-            let link = lock(&self.link);
-            link.check_port::<S>(
-                name,
-                PortDirection::RpcClient,
-                Some(PortType {
-                    ty: S::Response::TYPE_NAME,
-                    schema: S::Response::SCHEMA_FINGERPRINT,
-                }),
-            )
+        let hash = lock(&self.link)
+            .request_hash::<S>(name)
             .map_err(CallError::Link)?;
-            if link.peer_types().any(|t| {
-                t.hash == wire::type_hash(S::TYPE_NAME) && t.schema != S::SCHEMA_FINGERPRINT
-            }) {
-                return Err(CallError::Link(Error::SchemaMismatch));
-            }
-        }
-        let (schema, bytes) = self
-            .call_raw(wire::type_hash(S::TYPE_NAME), req.encode_to_vec(), timeout)
-            .await?;
+        let (schema, bytes) = self.call_raw(hash, req.encode_to_vec(), timeout).await?;
         if schema != S::Response::SCHEMA_FINGERPRINT {
             return Err(CallError::Link(Error::SchemaMismatch));
         }
@@ -248,6 +275,7 @@ impl Host {
         timeout: Duration,
     ) -> Result<(u64, Vec<u8>), CallError> {
         let (tx, rx) = oneshot::channel();
+        let token = Arc::new(());
         let seq = {
             // Queuing the request and registering it in `pending` happen under the same lock — if
             // the driver got to send it and take the reply in between, the reply would arrive
@@ -257,8 +285,22 @@ impl Host {
                 Error::NoPeerService => CallError::NoPeerService,
                 e => CallError::Link(e),
             })?;
-            lock(&self.pending).insert((hash, seq), tx);
+            let previous = lock(&self.pending).insert(
+                (hash, seq),
+                PendingCall {
+                    token: Arc::clone(&token),
+                    reply: tx,
+                },
+            );
+            debug_assert!(previous.is_none(), "Link reserved a live correlation id");
             seq
+        };
+        let _reservation = CallReservation {
+            link: Arc::clone(&self.link),
+            pending: Arc::clone(&self.pending),
+            hash,
+            seq,
+            token,
         };
         self.wake.notify_one();
         match tokio::time::timeout(timeout, rx).await {
@@ -272,10 +314,7 @@ impl Host {
             }
             Ok(Ok(Err(message))) => Err(CallError::Remote(message)),
             Ok(Err(_)) => Err(CallError::Closed),
-            Err(_) => {
-                lock(&self.pending).remove(&(hash, seq));
-                Err(CallError::Timeout)
-            }
+            Err(_) => Err(CallError::Timeout),
         }
     }
 
@@ -459,6 +498,13 @@ fn convert(l: &HostLink, ev: Event, pending: &Pending, peer: &Peer) -> Option<Ho
                 .map(|e| PeerType {
                     hash: e.hash,
                     name: e.name.to_string(),
+                    port: e.port.to_string(),
+                    response: e.response.map(|r| (r.name.to_string(), r.schema)),
+                    sources: e
+                        .sources
+                        .iter()
+                        .map(|s| (s.namespace.to_string(), s.port.to_string()))
+                        .collect(),
                     flags: e.flags,
                     schema: e.schema,
                 })
@@ -469,29 +515,36 @@ fn convert(l: &HostLink, ev: Event, pending: &Pending, peer: &Peer) -> Option<Ho
         }
         Event::Disconnected => {
             *lock(peer) = None;
+            lock(pending).clear();
             Some(HostEvent::Disconnected)
         }
         Event::Data(f) => Some(HostEvent::Data {
             hash: f.hash,
-            schema: l.frame_schema(&f)?,
+            name: l.frame_contract(&f)?.0.to_string(),
+            namespace: l.frame_address(&f)?.namespace.to_string(),
+            port: l.frame_address(&f)?.port.to_string(),
+            schema: l.frame_contract(&f)?.1,
             seq: f.seq,
             payload: l.payload(&f).to_vec(),
         }),
         Event::Request(f) => Some(HostEvent::Request {
             hash: f.hash,
-            schema: l.frame_schema(&f)?,
+            name: l.frame_contract(&f)?.0.to_string(),
+            namespace: l.frame_address(&f)?.namespace.to_string(),
+            port: l.frame_address(&f)?.port.to_string(),
+            schema: l.frame_contract(&f)?.1,
             seq: f.seq,
             payload: l.payload(&f).to_vec(),
         }),
         Event::Reply(f) => {
-            if let Some(tx) = lock(pending).remove(&(f.hash, f.seq)) {
-                let _ = tx.send(Ok(l.payload(&f).to_vec()));
+            if let Some(call) = lock(pending).remove(&(f.hash, f.seq)) {
+                let _ = call.reply.send(Ok(l.payload(&f).to_vec()));
             }
             None
         }
         Event::Error(f) => {
-            if let Some(tx) = lock(pending).remove(&(f.hash, f.seq)) {
-                let _ = tx.send(Err(l.error_message(&f).to_string()));
+            if let Some(call) = lock(pending).remove(&(f.hash, f.seq)) {
+                let _ = call.reply.send(Err(l.error_message(&f).to_string()));
             }
             None
         }
@@ -528,6 +581,9 @@ mod tests {
     fn data(hash: u32, payload: Vec<u8>) -> HostEvent {
         HostEvent::Data {
             hash,
+            name: A::TYPE_NAME.into(),
+            namespace: "sender".into(),
+            port: "state".into(),
             schema: A::SCHEMA_FINGERPRINT,
             seq: 0,
             payload,
@@ -545,7 +601,10 @@ mod tests {
 
         // A Request decodes the same way; the other two events carry no payload at all.
         let req = HostEvent::Request {
-            hash: wire::type_hash(A::TYPE_NAME),
+            hash: wire::endpoint_hash("sender", "state"),
+            name: A::TYPE_NAME.into(),
+            namespace: "sender".into(),
+            port: "state".into(),
             schema: A::SCHEMA_FINGERPRINT,
             seq: 3,
             payload: A { v: 1 }.encode_to_vec(),
@@ -573,7 +632,10 @@ mod tests {
     #[test]
     fn decode_rejects_another_fingerprint_for_the_same_type_hash() {
         let ev = HostEvent::Data {
-            hash: wire::type_hash(A::TYPE_NAME),
+            hash: wire::endpoint_hash("sender", "state"),
+            name: A::TYPE_NAME.into(),
+            namespace: "sender".into(),
+            port: "state".into(),
             schema: A::SCHEMA_FINGERPRINT + 1,
             seq: 0,
             payload: A { v: 7 }.encode_to_vec(),

@@ -148,17 +148,27 @@ named endpoints and call `ready()`.
 ## App-owned endpoint contracts
 
 Stream definitions require `type` on executable inputs and outputs. Output
-policies are `qos: reliable` (default) or `sensor`, and `retention: volatile`
+policies are `qos: default` (backend congestion default), `command` (block under
+congestion), or `sensor` (drop under congestion), and `retention: volatile`
 (default) or `last`. Input policies are `replay: live` (default) or `last`,
 and `buffer: fifo` (default) or `{ latest: 4 }`, with a positive depth.
 Policies belong to the app definition, never to its invocation.
+Congestion control does not guarantee delivery or retransmission. Local and
+Link accept only `default`; Zenoh and iceoryx2 also support `command` and
+`sensor`. Zenoh's default publishing policy drops under congestion unless
+overridden by backend configuration. Iceoryx2 uses its configured publisher
+backpressure default (normally retry until buffer space is available).
+Local queues sends without a bound; Link reports a full send buffer as an
+error. Receive buffering and retained history remain separate from congestion.
+The former `reliable` profile spelling is rejected. RPC permits only the
+`default` profile; its request/response behavior is not a stream QoS policy.
 
 ```yaml
 in:
   readings: { type: sensor.Reading, replay: last, buffer: { latest: 4 } }
   calculate: { kind: rpc, type: math.Request, response: math.Response }
 out:
-  status: { type: robot.Status, qos: reliable, retention: last }
+  status: { type: robot.Status, qos: default, retention: last }
   calculate: { kind: rpc, type: math.Request, response: math.Response }
 ```
 

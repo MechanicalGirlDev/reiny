@@ -61,8 +61,8 @@ pub(crate) fn run(args: ServiceArgs) -> Result<()> {
     }
 }
 
-/// The (request fqn, response fqn) pair from the descriptors a server's key `reiny/<d>/<id>/<Req>`
-/// announces: the request is the one whose full protobuf name matches the type segment, the response is the other.
+/// The (request fqn, response fqn) pair from the descriptors on one named server's key.
+/// The request's full protobuf name matches the type segment; the response is the other.
 type Named = (String, Vec<u8>);
 
 fn split_schemas<'a>(ty: &str, named: &'a [Named]) -> (Option<&'a Named>, Option<&'a Named>) {
@@ -93,7 +93,10 @@ fn list(bus: &BusArgs) -> Result<()> {
         let Some(p) = KeyParts::parse_with_chunk(k, SERVICE_CHUNK) else {
             continue;
         };
-        let base = format!("{KEY_ROOT}/{}/{}/{}", p.domain, p.source, p.ty);
+        let base = format!(
+            "{KEY_ROOT}/{}/{}/@out/{}/{}",
+            p.domain, p.source, p.port, p.ty
+        );
         let response = schemas
             .get(&base)
             .and_then(|named| split_schemas(p.ty, named).1)
@@ -104,7 +107,7 @@ fn list(bus: &BusArgs) -> Result<()> {
         if row.0 == "?" && response != "?" {
             row.0 = response;
         }
-        row.1.push(p.source.to_string());
+        row.1.push(format!("{}:{}", p.source, p.port));
     }
     let w_ty = rows.keys().map(String::len).max().unwrap_or(0).max(4);
     let w_resp = rows
@@ -157,7 +160,11 @@ fn call(args: &CallArgs) -> Result<()> {
     );
     let req_codec = Codec::from_file_set(req_set, req_fqn)?;
     let resp_codec = Codec::from_file_set(resp_set, resp_fqn)?;
-    let mut report = stream_report(&contract, req_codec.fingerprint);
+    let mut report = stream_report(
+        &contract,
+        req_codec.fingerprint,
+        &bindings.inputs[&args.ty].sources,
+    );
     report.response = Some(reiny::bindings::ResponseReport {
         type_name: resp_fqn.clone(),
         schema: resp_codec.fingerprint,
@@ -186,6 +193,10 @@ fn call(args: &CallArgs) -> Result<()> {
     };
     match reply.result() {
         Ok(sample) => {
+            anyhow::ensure!(
+                sample.key_expr().as_str() == key,
+                "service reply came from a different endpoint"
+            );
             println!(
                 "{}",
                 decode_reply(

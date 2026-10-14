@@ -25,7 +25,12 @@ fn one_named_schema_part_assigns_ownership_and_compiles_its_protos() {
         let out_dir = f.path("out");
         std::fs::create_dir_all(&out_dir).unwrap();
         let fds = compile_protos(&plan, &out_dir, |_| {}).unwrap();
-        let scan = scan_descriptors(&fds, &plan.own_names);
+        let names = plan
+            .entries
+            .iter()
+            .map(|entry| entry.fq_name())
+            .collect::<Vec<_>>();
+        let scan = scan_descriptors(&fds, &plan.own_names, &names).unwrap();
         let out = render_generated(&plan.entries, None, &scan.fingerprints, &[]).unwrap();
         assert!(out.contains("const SCHEMA_FINGERPRINT: u64"));
         assert!(out.contains("message: \"ping.Ping\""));
@@ -138,7 +143,12 @@ fn codegen_preserves_full_names_and_package_less_names() {
     let out = fixture.path("out");
     std::fs::create_dir_all(&out).unwrap();
     let descriptor = compile_protos(&plan, &out, |_| {}).unwrap();
-    let scan = scan_descriptors(&descriptor, &plan.own_names);
+    let names = plan
+        .entries
+        .iter()
+        .map(|entry| entry.fq_name())
+        .collect::<Vec<_>>();
+    let scan = scan_descriptors(&descriptor, &plan.own_names, &names).unwrap();
     let generated = render_generated(&plan.entries, None, &scan.fingerprints, &[]).unwrap();
     // Then each generated impl carries its exact protobuf name and fingerprint.
     for name in ["first.Value", "second.Value", "Value"] {
@@ -147,9 +157,37 @@ fn codegen_preserves_full_names_and_package_less_names() {
             "{generated}"
         );
         assert!(scan.fingerprints.contains_key(name));
+        assert_eq!(
+            Some(scan.fingerprints[name]),
+            message_fingerprint(&prost::Message::encode_to_vec(&descriptor), name).unwrap()
+        );
     }
     assert_eq!(
         generated.matches("impl ::reiny::MessageType for").count(),
         3
     );
+}
+
+#[cfg(feature = "compile")]
+#[test]
+fn codegen_only_fingerprints_reachable_catalog_definitions() {
+    let fixture = Fixture::new("unreachable-extensions");
+    fixture.write(
+        "types.proto",
+        "syntax = \"proto2\"; package qa; message Root { optional uint32 value = 1; } message Unused { extensions 100 to max; }\n",
+    );
+    fixture.write(
+        "schema.yaml",
+        "version: 3\nschema:\n  shared_types:\n    Root: {proto: types.proto, message: qa.Root}\n  projects: {app: {types: [Root]}}\n",
+    );
+    let resolution = resolve_for(fixture.root(), "app").unwrap();
+    let plan = compile_plan(&resolution).unwrap();
+    let out = fixture.path("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let descriptor = compile_protos(&plan, &out, |_| {}).unwrap();
+    let scan = scan_descriptors(&descriptor, &plan.own_names, &["qa.Root".into()]).unwrap();
+    let generated = render_generated(&plan.entries, None, &scan.fingerprints, &[]).unwrap();
+    assert_eq!(scan.fingerprints.len(), 1);
+    assert!(generated.contains("impl ::reiny::MessageType for"));
+    assert!(message_fingerprint(&prost::Message::encode_to_vec(&descriptor), "qa.Unused").is_err());
 }

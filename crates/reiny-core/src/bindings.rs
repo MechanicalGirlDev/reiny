@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 /// Version of reusable module definitions and invocation manifests.
 pub const MODULE_MANIFEST_VERSION: u32 = 3;
 /// Version of resolved runtime module bindings.
-pub const MODULE_BINDINGS_VERSION: u32 = 2;
+pub const MODULE_BINDINGS_VERSION: u32 = 3;
 /// Version of compiled runtime module reports.
-pub const MODULE_REPORT_VERSION: u32 = 2;
+pub const MODULE_REPORT_VERSION: u32 = 3;
 
 /// The operation implemented by an endpoint.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,7 +21,7 @@ pub enum PortKind {
     /// Typed publication or subscription.
     #[default]
     Stream,
-    /// Typed request/response, addressed by its request type.
+    /// Typed request/response, addressed by its declared server endpoint.
     Rpc,
 }
 
@@ -29,9 +29,11 @@ pub enum PortKind {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QosProfile {
-    /// Wait under congestion.
+    /// Use the backend's default congestion policy.
     #[default]
-    Reliable,
+    Default,
+    /// Wait for congestion to clear, without promising delivery.
+    Command,
     /// Low latency with samples discarded under congestion.
     Sensor,
 }
@@ -161,14 +163,32 @@ pub struct ModuleBindings {
     pub executables: Vec<String>,
 }
 
+/// The exact identity of a declared output endpoint.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndpointAddress {
+    /// Canonical publication/server namespace.
+    pub namespace: String,
+    /// Declared output port name, independent of its message type.
+    pub port: String,
+}
+
+impl EndpointAddress {
+    /// Validate an exact namespace and ordinary port name.
+    pub fn validate(&self) -> Result<(), BindingError> {
+        validate_namespace(&self.namespace)?;
+        validate_port_name(&self.port)
+    }
+}
+
 /// One resolved input port.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InputBinding {
     /// Expected protobuf message name (qualified when necessary).
     pub contract: EndpointContract,
-    /// Exact namespaces of the declared publishers. RPC permits exactly one.
-    pub sources: Vec<String>,
+    /// Exact declared output endpoints. RPC permits exactly one.
+    pub sources: Vec<EndpointAddress>,
 }
 
 /// One declared output port.
@@ -185,18 +205,40 @@ pub struct OutputBinding {
 pub struct ModuleReport {
     /// Runtime report format version.
     pub version: u32,
+    /// Version of the compiled schema fingerprint algorithm.
+    pub fingerprint_version: u16,
     /// Canonical executable module namespace.
     pub namespace: String,
+    /// Host identity retained by delegated owned children.
+    pub endpoint_namespace: String,
     /// Actual input contracts, indexed by declared port name.
     pub inputs: BTreeMap<String, PortReport>,
     /// Actual output contracts, indexed by declared port name.
     pub outputs: BTreeMap<String, PortReport>,
 }
 
+/// The exact endpoints implemented by a compiled port.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "direction", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PortEndpoint {
+    /// A receiver or RPC caller's declared output sources.
+    Input {
+        /// Exact source output endpoints.
+        sources: Vec<EndpointAddress>,
+    },
+    /// A publisher or RPC server's concrete output identity.
+    Output {
+        /// Declared output endpoint.
+        address: EndpointAddress,
+    },
+}
+
 /// A verified type implemented by a named port.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortReport {
+    /// Exact address or sources, independent of the message type.
+    pub endpoint: PortEndpoint,
     /// Descriptor message name, or the transport type when no descriptor exists.
     #[serde(rename = "type")]
     pub type_name: String,
@@ -241,6 +283,7 @@ fn require(condition: bool, message: &'static str) -> Result<(), BindingError> {
 
 fn segment(value: &str) -> bool {
     !value.is_empty()
+        && !matches!(value, "." | "..")
         && !value.contains(['/', '*', '?', '#', '$', '@'])
         && !value.contains(char::is_whitespace)
 }
@@ -264,6 +307,11 @@ pub fn validate_namespace(value: &str) -> Result<(), BindingError> {
     )
 }
 
+/// Validate one exact declared endpoint name.
+pub fn validate_port_name(value: &str) -> Result<(), BindingError> {
+    require(segment(value), "invalid endpoint name")
+}
+
 impl EndpointContract {
     /// Validate a concrete endpoint's type, operation and direction-owned policies.
     ///
@@ -276,7 +324,7 @@ impl EndpointContract {
             "latest buffer depth must be positive",
         )?;
         require(
-            !input || (self.qos == QosProfile::Reliable && self.retention == Retention::Volatile),
+            !input || (self.qos == QosProfile::Default && self.retention == Retention::Volatile),
             "qos and retention belong to outputs",
         )?;
         require(
@@ -293,7 +341,7 @@ impl EndpointContract {
                     "RPC requires a valid response type",
                 )?;
                 require(
-                    self.qos == QosProfile::Reliable
+                    self.qos == QosProfile::Default
                         && self.retention == Retention::Volatile
                         && self.replay == Replay::Live
                         && self.buffer == ReceiveBuffer::Fifo,
@@ -337,49 +385,34 @@ impl ModuleBindings {
             )?;
         }
         let mut addresses = BTreeMap::new();
-        let mut output_types = BTreeSet::new();
-        for (name, contract, sources, input) in self
-            .inputs
-            .iter()
-            .map(|(name, port)| (name, &port.contract, port.sources.as_slice(), true))
-            .chain(self.outputs.iter().map(|(name, port)| {
-                (
-                    name,
-                    &port.contract,
-                    core::slice::from_ref(&self.endpoint_namespace),
-                    false,
-                )
-            }))
-        {
-            require(segment(name), "invalid endpoint name")?;
-            contract.validate(input)?;
-            if input {
-                require(!sources.is_empty(), "input requires exact sources")?;
-                require(
-                    contract.kind != PortKind::Rpc || sources.len() == 1,
-                    "RPC input requires exactly one source",
-                )?;
-                let mut unique = BTreeSet::new();
-                for source in sources {
-                    validate_namespace(source)?;
-                    require(unique.insert(source), "duplicate input source")?;
-                }
-            } else {
-                require(
-                    output_types.insert(&contract.type_name),
-                    "duplicate output type in module bindings",
-                )?;
-            }
-            for source in sources {
-                let type_name = &contract.type_name;
-                let address = (source, type_name, contract.kind == PortKind::Rpc);
-                if let Some(previous) = addresses.insert(address, &contract.type_name) {
+        for (name, port) in &self.inputs {
+            validate_port_name(name)?;
+            port.contract.validate(true)?;
+            require(!port.sources.is_empty(), "input requires exact sources")?;
+            require(
+                port.contract.kind != PortKind::Rpc || port.sources.len() == 1,
+                "RPC input requires exactly one source",
+            )?;
+            let mut unique = BTreeSet::new();
+            for source in &port.sources {
+                source.validate()?;
+                require(unique.insert(source), "duplicate input source")?;
+                let contract = (
+                    &port.contract.type_name,
+                    &port.contract.response,
+                    port.contract.kind == PortKind::Rpc,
+                );
+                if let Some(previous) = addresses.insert(source, contract) {
                     require(
-                        previous == &contract.type_name,
-                        "endpoint types collide on one wire address",
+                        previous == contract,
+                        "incompatible contracts for one source endpoint",
                     )?;
                 }
             }
+        }
+        for (name, port) in &self.outputs {
+            validate_port_name(name)?;
+            port.contract.validate(false)?;
         }
         self.validate_delegations()
     }
@@ -432,7 +465,10 @@ mod tests {
                         type_name: "robot.State".into(),
                         ..EndpointContract::default()
                     },
-                    sources: alloc::vec!["robot/sensor".into()],
+                    sources: alloc::vec![EndpointAddress {
+                        namespace: "robot/sensor".into(),
+                        port: "state".into(),
+                    }],
                 },
             )]),
             outputs: BTreeMap::from([(
@@ -485,8 +521,11 @@ mod tests {
                     .get_mut("state")
                     .unwrap()
                     .sources
-                    .push("robot/sensor".into()),
-                5 => bindings.inputs.get_mut("state").unwrap().sources[0] = "**".into(),
+                    .push(EndpointAddress {
+                        namespace: "robot/sensor".into(),
+                        port: "state".into(),
+                    }),
+                5 => bindings.inputs.get_mut("state").unwrap().sources[0].namespace = "**".into(),
                 6 => {
                     bindings.inputs.get_mut("state").unwrap().contract.buffer =
                         ReceiveBuffer::Latest(0);
@@ -500,7 +539,7 @@ mod tests {
                 10 => bindings.inputs.get_mut("state").unwrap().contract.kind = PortKind::Rpc,
                 11 => {
                     let duplicate = bindings.outputs["command"].clone();
-                    bindings.outputs.insert("duplicate".into(), duplicate);
+                    bindings.outputs.insert("@duplicate".into(), duplicate);
                 }
                 12 => bindings.executables.push("worker".into()),
                 13 => bindings.executables[0] = "..".into(),
@@ -541,11 +580,47 @@ mod tests {
         let mut bindings = bindings();
         let mut other = bindings.inputs["state"].clone();
         other.contract.type_name = "other.State".into();
+        other.sources[0].port = "other".into();
         bindings.inputs.insert("other".into(), other);
-        // When exact full names determine wire addresses.
+        // When the same namespace exposes distinct named output addresses.
         let result = bindings.validate();
         // Then both contracts are independently valid.
         result.unwrap();
+    }
+
+    #[test]
+    fn legacy_binding_versions_are_rejected() {
+        for version in [1, 2] {
+            let mut bindings = bindings();
+            bindings.version = version;
+            assert!(bindings.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn distinct_same_type_output_ports_and_fan_in_are_valid() {
+        let mut bindings = bindings();
+        bindings
+            .outputs
+            .insert("other".into(), bindings.outputs["command"].clone());
+        let input = bindings.inputs.get_mut("state").unwrap();
+        input.sources.push(EndpointAddress {
+            namespace: "robot/sensor".into(),
+            port: "other".into(),
+        });
+        bindings.validate().unwrap();
+    }
+
+    #[test]
+    fn source_port_and_source_contract_conflicts_are_rejected() {
+        let mut bindings = bindings();
+        let mut other = bindings.inputs["state"].clone();
+        other.contract.type_name = "other.State".into();
+        bindings.inputs.insert("other".into(), other);
+        assert!(bindings.validate().is_err());
+        bindings.inputs.remove("other");
+        bindings.inputs.get_mut("state").unwrap().sources[0].port = "../state".into();
+        assert!(bindings.validate().is_err());
     }
 
     #[test]
@@ -560,7 +635,10 @@ mod tests {
             .get_mut("state")
             .unwrap()
             .sources
-            .push("robot/other".into());
+            .push(EndpointAddress {
+                namespace: "robot/other".into(),
+                port: "state".into(),
+            });
         assert!(bindings.validate().is_err());
         bindings.inputs.get_mut("state").unwrap().sources.pop();
         bindings.inputs.get_mut("state").unwrap().contract.qos = QosProfile::Sensor;

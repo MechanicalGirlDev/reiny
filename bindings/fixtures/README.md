@@ -1,8 +1,10 @@
 # Prepared smoke bindings
 
-These static version-2 contracts match `reiny-core::bindings::ModuleBindings`.
+These static version-3 contracts match `reiny-core::bindings::ModuleBindings`.
 The smokes use type `Binary` and register its compiled schema fingerprint as 42;
 fingerprints belong in registration/reports, not the prepared endpoint contract.
+Each input source names both its namespace and its `out` port. Smoke assertions
+check that the received source port is preserved independently of type `Binary`.
 
 `sender` and `other` each publish `out`. `receiver` subscribes on `in` only to
 `sender`. `receiver-multi` registers `all` (sender and other) and `filtered`

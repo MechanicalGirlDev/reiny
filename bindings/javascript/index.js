@@ -31,6 +31,7 @@ export function loadLibrary(path = process.env.REINY_FFI_LIBRARY) {
     subscription_receive: "int32_t reiny_subscription_receive(uint64_t subscription, uint64_t timeout, _Out_ uint64_t *out)",
     message_payload: "int32_t reiny_message_payload(uint64_t message, _Out_ uint64_t *out)",
     message_source: "int32_t reiny_message_source(uint64_t message, _Out_ uint64_t *out)",
+    message_source_port: "int32_t reiny_message_source_port(uint64_t message, _Out_ uint64_t *out)",
     message_schema: "int32_t reiny_message_schema(uint64_t message, _Out_ uint8_t *has, _Out_ uint64_t *value)",
     message_timestamp: "int32_t reiny_message_timestamp(uint64_t message, _Out_ uint8_t *has, _Out_ uint64_t *value)",
     buffer_len: "int32_t reiny_buffer_len(uint64_t buffer, _Out_ size_t *out)",
@@ -151,6 +152,7 @@ export class Subscription extends Resource {
       return {
         payload: buffer(output("message_payload", message)),
         source: new TextDecoder().decode(buffer(output("message_source", message))),
+        sourcePort: new TextDecoder().decode(buffer(output("message_source_port", message))),
         schema: optionalValue("message_schema", message),
         timestamp: optionalValue("message_timestamp", message),
       };

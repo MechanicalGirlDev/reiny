@@ -1,7 +1,7 @@
 //! Typed publishers / subscribers, their builders, and presence.
 //!
-//! The key shape is `reiny/<domain>/<id>/<TYPE_NAME>` (publish) and `reiny/<domain>/*/<TYPE_NAME>` (subscribe);
-//! [`ModuleContext::key_for`](crate::ModuleContext) is the single place that assembles it. Getting on and off the bus
+//! Concrete routes include the namespace, declared output name and payload FQN.
+//! Inputs retain every exact configured source endpoint. Getting on and off the bus
 //! goes through an [`Engine`](crate::engine::Engine) — what lives here is encode / decode, the
 //! fingerprint check, latched's "presence first, then get", latest-wins and the receive buffers (Fifo /
 //! Ring), and the same implementation runs on every engine.
@@ -41,6 +41,8 @@ pub struct Envelope<T> {
     pub value: T,
     /// The sending launch's id (the key's `<id>` segment).
     pub source: String,
+    /// The sending output's declared port name.
+    pub source_port: String,
     /// The send time (unix ns). Present only when the engine has one (zenoh, with timestamping on).
     pub timestamp: Option<u64>,
 }
@@ -53,6 +55,8 @@ pub struct RawEnvelope {
     pub payload: Vec<u8>,
     /// The sending launch's id (the key's `<id>` segment).
     pub source: String,
+    /// The sending output's declared port name.
+    pub source_port: String,
     /// The sender's [`MessageType::SCHEMA_FINGERPRINT`]. `None` when it sent none, or the engine carries no attachments.
     pub schema: Option<u64>,
     /// The send time (unix ns). Present only when the engine has one (zenoh, with timestamping on).
@@ -117,10 +121,10 @@ impl<'a, T> PublisherBuilder<'a, T> {
         T: Message + MessageType,
     {
         self.cloudy.ensure_standalone()?;
-        self.build_named()
+        self.build_named("test")
     }
 
-    pub(crate) fn build_named(self) -> Result<Publisher<T>>
+    pub(crate) fn build_named(self, name: &str) -> Result<Publisher<T>>
     where
         T: Message + MessageType,
     {
@@ -148,9 +152,12 @@ impl<'a, T> PublisherBuilder<'a, T> {
                 T::TYPE_NAME
             );
         }
-        let key = self
-            .cloudy
-            .key_for(Some(self.cloudy.endpoint_namespace()), T::TYPE_NAME);
+        let key = Key::output(
+            self.cloudy.domain(),
+            self.cloudy.endpoint_namespace(),
+            name,
+            T::TYPE_NAME,
+        );
         let core = PublisherCore::declare(self.cloudy, &key, &self.qos, T::SCHEMA_FINGERPRINT)?;
         // `@schema` is for diagnostics, so on an engine without query it is silently skipped rather than
         // being an error (every `reiny-build` generated type carries a DESCRIPTOR).
@@ -198,6 +205,8 @@ pub(crate) fn declare_schema(
 pub struct RawDescriptor {
     /// The announcing launch's id (a publisher, subscriber or server of the type).
     pub source: String,
+    /// The announcing endpoint's declared port name.
+    pub source_port: String,
     /// The fully qualified message name (e.g. `hs.RobotState`).
     pub message: String,
     /// The encoded `FileDescriptorSet` holding `message` and its imports, verbatim.
@@ -262,6 +271,11 @@ impl PublisherCore {
         qos: &Qos,
         schema: u64,
     ) -> Result<Self> {
+        anyhow::ensure!(
+            qos.congestion_control == crate::CongestionControl::BackendDefault
+                || cloudy.engine.caps().congestion_control,
+            "publisher of {key}: this engine does not support explicit congestion control"
+        );
         let raw = cloudy.engine.publisher(key, qos)?;
         let last = Arc::new(Mutex::new(None));
         let queryable = if qos.durability == Durability::TransientLocal {
@@ -291,7 +305,8 @@ impl PublisherCore {
 impl<T: Message + MessageType> Publisher<T> {
     /// Encode the message and publish it. With a `T::SCHEMA_FINGERPRINT`, the fingerprint rides in the attachment.
     ///
-    /// Under `Reliable` (the default) polling the future blocks while the send path is congested.
+    /// Under `Block`, polling the future blocks while the send path is congested.
+    /// This is congestion control, not guaranteed delivery.
     /// The future is lazy, even though no engine today has an await point in here.
     pub async fn send(&self, message: T) -> Result<()> {
         std::future::ready(self.core.send(message.encode_to_vec())).await
@@ -306,7 +321,7 @@ impl<T: Message + MessageType> Publisher<T> {
 #[must_use = "a builder does nothing until .build()"]
 pub(crate) struct SubscriberBuilder<'a, T> {
     cloudy: &'a ModuleContext,
-    from: Vec<Option<String>>,
+    from: Vec<Option<crate::bindings::EndpointAddress>>,
     latched: bool,
     latest: Option<usize>,
     _marker: PhantomData<T>,
@@ -327,11 +342,14 @@ impl<'a, T> SubscriberBuilder<'a, T> {
     /// subscriber wants to pick which one it listens to.
     #[cfg(test)]
     pub(crate) fn from(mut self, id: impl Into<String>) -> Self {
-        self.from = vec![Some(id.into())];
+        self.from = vec![Some(crate::bindings::EndpointAddress {
+            namespace: id.into(),
+            port: "test".into(),
+        })];
         self
     }
 
-    pub(crate) fn sources(mut self, sources: &[String]) -> Self {
+    pub(crate) fn sources(mut self, sources: &[crate::bindings::EndpointAddress]) -> Self {
         self.from = sources.iter().cloned().map(Some).collect();
         self
     }
@@ -367,10 +385,10 @@ impl<'a, T> SubscriberBuilder<'a, T> {
         T: Message + Default + MessageType,
     {
         self.cloudy.ensure_standalone()?;
-        self.build_named()
+        self.build_named("test")
     }
 
-    pub(crate) fn build_named(self) -> Result<Subscriber<T>>
+    pub(crate) fn build_named(self, name: &str) -> Result<Subscriber<T>>
     where
         T: Message + Default + MessageType,
     {
@@ -384,11 +402,15 @@ impl<'a, T> SubscriberBuilder<'a, T> {
         let engine = &self.cloudy.engine;
         let caps = engine.caps();
 
-        // Our own presence: `reiny/<domain>/<our id>/<T>/@sub`, whatever source the subscription
-        // itself names. The question it answers is "who listens to this type", not "who listens to
-        // whom". Unlike a publisher's token this one is skipped rather than refused on an engine
+        // Input presence identifies our declared input name rather than any output it consumes.
+        // Unlike a publisher's token this one is skipped rather than refused on an engine
         // without liveliness — it changes nothing about how the subscription behaves.
-        let mine = self.cloudy.key_for(Some(self.cloudy.id()), T::TYPE_NAME);
+        let mine = Key::input(
+            self.cloudy.domain(),
+            self.cloudy.endpoint_namespace(),
+            name,
+            T::TYPE_NAME,
+        );
         let sub_token = if caps.liveliness {
             Some(engine.declare_alive(&mine.with_chunk(SUB_CHUNK))?)
         } else {
@@ -668,6 +690,7 @@ impl RawSubscriber {
             }
             return Some(RawEnvelope {
                 schema,
+                source_port: sample.key.port()?.to_owned(),
                 source: sample.key.source.unwrap_or_default(),
                 payload: sample.payload,
                 timestamp: sample.timestamp,
@@ -701,9 +724,11 @@ pub(crate) struct Core {
     /// Whether the presence stream has ended. True from the start when not latched.
     presence_done: bool,
     /// The publisher ids already asked for their most recent value (forgotten on leave, re-asked on return).
-    queried: HashSet<String>,
+    queried: HashSet<Key>,
     /// The sources a live sample has already been delivered from. A latched reply arriving later is dropped.
-    seen: HashSet<String>,
+    seen: HashSet<Key>,
+    /// Exact admitted routes, also checked on retained query replies.
+    keys: Vec<Key>,
     shutdown: Shutdown,
 }
 
@@ -712,12 +737,13 @@ impl Core {
     pub(crate) fn declare(
         cloudy: &ModuleContext,
         ty: &str,
-        from: &[Option<String>],
+        from: &[Option<crate::bindings::EndpointAddress>],
         latched: bool,
         latest: Option<usize>,
     ) -> Result<Self> {
         for source in from.iter().flatten() {
-            crate::managed::config::validate_namespace(source)?;
+            crate::managed::config::validate_namespace(&source.namespace)?;
+            crate::validate_segment("source port", &source.port)?;
         }
         let engine = &cloudy.engine;
         let caps = engine.caps();
@@ -733,7 +759,10 @@ impl Core {
         }
         let keys: Vec<_> = from
             .iter()
-            .map(|source| cloudy.key_for(source.as_deref(), ty))
+            .map(|source| match source {
+                Some(source) => Key::output(cloudy.domain(), &source.namespace, &source.port, ty),
+                None => cloudy.key_for(None, ty),
+            })
             .collect();
 
         // reiny owns the receive buffer. The engine's callback only pushes onto it (and counts).
@@ -795,6 +824,7 @@ impl Core {
             presence_done: !latched,
             queried: HashSet::new(),
             seen: HashSet::new(),
+            keys,
             shutdown: cloudy.shutdown_handle(),
         })
     }
@@ -812,6 +842,7 @@ impl Core {
             queried,
             seen,
             shutdown,
+            keys,
             ..
         } = self;
         loop {
@@ -822,7 +853,7 @@ impl Core {
                 event = recv_presence(presence.as_mut()), if !*presence_done => {
                     match event {
                         Some(engine::Presence::Joined(k)) => {
-                            if queried.insert(k.source.clone().unwrap_or_default()) {
+                            if k.chunk.is_none() && queried.insert(k.clone()) {
                                 let params = QueryParams { payload: None, attachment: None, timeout: LATCHED_TIMEOUT };
                                 match engine.query(&k, params) {
                                     Ok(replies) => {
@@ -833,7 +864,7 @@ impl Core {
                                 }
                             }
                         }
-                        Some(engine::Presence::Left(k)) => { queried.remove(&k.source.unwrap_or_default()); }
+                        Some(engine::Presence::Left(k)) => { queried.remove(&k); seen.remove(&k); }
                         None => *presence_done = true,
                     }
                 }
@@ -846,16 +877,22 @@ impl Core {
                     };
                     let Ok(sample) = reply else { continue };
                     // latest-wins: drop a late reply from a source whose live samples we already delivered.
-                    if seen.contains(sample.key.source.as_deref().unwrap_or_default()) {
+                    if !keys.iter().any(|key| key.matches(&sample.key))
+                        || sample.key.chunk.is_some()
+                        || seen.contains(&sample.key) {
                         continue;
                     }
                     return Some(sample);
                 }
                 sample = chan.recv() => {
                     let sample = sample?; // channel closed
+                    if sample.key.chunk.is_some()
+                        || !keys.iter().any(|key| key.matches(&sample.key)) {
+                        continue;
+                    }
                     // Only remembered while watching for latched (so a late "most recent" can be dropped).
                     if !*presence_done {
-                        seen.insert(sample.key.source.clone().unwrap_or_default());
+                        seen.insert(sample.key.clone());
                     }
                     return Some(sample);
                 }
@@ -877,6 +914,7 @@ fn unwrap_sample<T: Message + Default + MessageType>(
     Some(Envelope {
         value,
         source,
+        source_port: sample.key.port()?.to_owned(),
         timestamp: sample.timestamp,
     })
 }
@@ -912,7 +950,7 @@ fn schema_matches<T: MessageType>(
     if theirs == Some(mine) {
         return true;
     }
-    if warned.insert(source.to_string()) {
+    if warned.insert(sample.key.to_string()) {
         tracing::warn!(
             ty = T::TYPE_NAME,
             source,
@@ -947,10 +985,10 @@ fn decode<T: Message + Default + MessageType>(sample: &Sample) -> Option<T> {
 /// A publisher joining or leaving.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PresenceEvent {
-    /// This launch id declared a publisher of that type (existing ones arrive first).
-    Joined(String),
+    /// This named endpoint appeared (existing endpoints arrive first).
+    Joined(crate::bindings::EndpointAddress),
     /// The publisher was dropped, or the whole process went away.
-    Left(String),
+    Left(crate::bindings::EndpointAddress),
 }
 
 /// The event stream [`ModuleContext::watch_publishers`] returns.
@@ -969,10 +1007,25 @@ impl<T> Presence<T> {
 
     /// Wait for the next event. `None` on shutdown or once the channel ends.
     pub async fn recv(&mut self) -> Option<PresenceEvent> {
-        Some(match self.raw.recv().await? {
-            engine::Presence::Joined(k) => PresenceEvent::Joined(k.source.unwrap_or_default()),
-            engine::Presence::Left(k) => PresenceEvent::Left(k.source.unwrap_or_default()),
-        })
+        loop {
+            let event = self.raw.recv().await?;
+            let (joined, key) = match event {
+                engine::Presence::Joined(key) => (true, key),
+                engine::Presence::Left(key) => (false, key),
+            };
+            let Some(port) = key.port().map(str::to_owned) else {
+                continue;
+            };
+            let Some(namespace) = key.source else {
+                continue;
+            };
+            let address = crate::bindings::EndpointAddress { namespace, port };
+            return Some(if joined {
+                PresenceEvent::Joined(address)
+            } else {
+                PresenceEvent::Left(address)
+            });
+        }
     }
 }
 
@@ -1039,7 +1092,7 @@ mod tests {
 
     fn sample(payload: Vec<u8>, attachment: Option<Vec<u8>>) -> Sample {
         Sample {
-            key: Key::topic("lab", Some("src"), State::TYPE_NAME),
+            key: Key::output("lab", "src", "test", State::TYPE_NAME),
             payload,
             attachment,
             timestamp: None,
@@ -1122,7 +1175,9 @@ mod tests {
             assert!(unwrap_sample::<State>(&bad, "src".into(), &mut warned).is_none());
         }
         assert_eq!(warned.len(), 1);
-        assert!(unwrap_sample::<State>(&bad, "other".into(), &mut warned).is_none());
+        let mut other = bad.clone();
+        other.key.source = Some("other".into());
+        assert!(unwrap_sample::<State>(&other, "other".into(), &mut warned).is_none());
         assert_eq!(warned.len(), 2, "each source is warned about separately");
     }
 

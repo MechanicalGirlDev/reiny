@@ -150,9 +150,14 @@ fn publish(args: &PubArgs) -> Result<()> {
     )?;
     let (session, _) = args.bus.open()?;
 
-    let pattern = format!("{KEY_ROOT}/{domain}/**/{}", topic_type(&contract));
-    let (fqn, file_set) = collect_schemas(&session, &pattern)
+    let mut descriptors = ["@out", "@in"].into_iter().flat_map(|slot| {
+        collect_schemas(
+            &session,
+            &format!("{KEY_ROOT}/{domain}/**/{slot}/*/{}", topic_type(&contract)),
+        )
         .into_values()
+    });
+    let (fqn, file_set) = descriptors
         .find(|(fqn, _)| *fqn == contract.type_name)
         .with_context(|| {
             format!(
@@ -278,8 +283,9 @@ fn echo(args: &EchoArgs) -> Result<()> {
         }) {
             Ok(Some(sample)) => {
                 let key = format!(
-                    "{KEY_ROOT}/{domain}/{}/{}",
+                    "{KEY_ROOT}/{domain}/{}/@out/{}/{}",
                     sample.source,
+                    sample.source_port,
                     topic_type(&contract)
                 );
                 if !keys.contains(&key) {
@@ -289,7 +295,7 @@ fn echo(args: &EchoArgs) -> Result<()> {
                     .get(&key)
                     .context("sample came from an undeclared source")?;
                 let text = echo_text(codec, &sample.payload, sample.schema, args.raw)?;
-                println!("{}  {text}", sample.source);
+                println!("{}:{}  {text}", sample.source, sample.source_port);
                 shown += 1;
             }
             Ok(None) => break,
@@ -344,7 +350,7 @@ fn list(args: &ListArgs) -> Result<()> {
                     let row = rows
                         .entry((p.domain.to_string(), p.ty.to_string()))
                         .or_default();
-                    pick(row).push(p.source.to_string());
+                    pick(row).push(format!("{}:{}", p.source, p.port));
                 }
             }
         };
@@ -356,9 +362,7 @@ fn list(args: &ListArgs) -> Result<()> {
     collect(
         alive_keys(
             &session,
-            &reiny::engine::Key::all(&domain)
-                .with_chunk(SUB_CHUNK)
-                .to_string(),
+            &format!("{KEY_ROOT}/{domain}/**/@in/*/*/{SUB_CHUNK}"),
         )?,
         Some(SUB_CHUNK),
         |r| &mut r.subs,
@@ -488,8 +492,9 @@ fn rate(args: &RateArgs, mode: Mode) -> Result<()> {
         }) {
             Ok(Some(sample)) => {
                 let key = format!(
-                    "{KEY_ROOT}/{domain}/{}/{}",
+                    "{KEY_ROOT}/{domain}/{}/@out/{}/{}",
                     sample.source,
+                    sample.source_port,
                     topic_type(&contract)
                 );
                 if !keys.contains(&key) {
@@ -499,11 +504,10 @@ fn rate(args: &RateArgs, mode: Mode) -> Result<()> {
                     .get(&key)
                     .context("sample came from an undeclared source")?;
                 verify_fingerprint(*expected, sample.schema)?;
-                series.entry(sample.source).or_default().push(
-                    Instant::now(),
-                    sample.payload.len(),
-                    window,
-                );
+                series
+                    .entry(format!("{}:{}", sample.source, sample.source_port))
+                    .or_default()
+                    .push(Instant::now(), sample.payload.len(), window);
             }
             Ok(None) => break,
             Err(_) => {}
@@ -694,8 +698,7 @@ pub(crate) fn run_node(args: NodeArgs) -> Result<()> {
 fn node_list(args: &ListArgs) -> Result<()> {
     let (session, domain) = args.bus.open()?;
     let mut ids: BTreeSet<String> = BTreeSet::new();
-    // A 0.5 launch announces `@launch`. Older ones (`@grain`, or no token at all) are picked up
-    // from their publisher / server tokens instead.
+    // Module control presence and endpoint presence share the same namespace.
     for pattern in [
         format!("{KEY_ROOT}/{domain}/**/{LAUNCH_CHUNK}"),
         reiny::engine::Key::all(&domain).to_string(),
@@ -726,17 +729,23 @@ fn node_info(id: &str, bus: &BusArgs) -> Result<()> {
         &format!("{KEY_ROOT}/{domain}/{id}/{LAUNCH_CHUNK}"),
     )?
     .is_empty();
-    let pubs: Vec<String> = alive_keys(&session, &format!("{KEY_ROOT}/{domain}/{id}/*"))?
+    let pubs: Vec<String> = alive_keys(&session, &format!("{KEY_ROOT}/{domain}/{id}/@out/*/*"))?
         .iter()
-        .filter_map(|k| KeyParts::parse(k).map(|p| p.ty.to_string()))
+        .filter_map(|k| KeyParts::parse(k).map(|p| format!("{} ({})", p.port, p.ty)))
         .collect();
     let chunked = |chunk: &'static str| -> Result<Vec<String>> {
-        Ok(
-            alive_keys(&session, &format!("{KEY_ROOT}/{domain}/{id}/*/{chunk}"))?
-                .iter()
-                .filter_map(|k| KeyParts::parse_with_chunk(k, chunk).map(|p| p.ty.to_string()))
-                .collect(),
-        )
+        Ok(alive_keys(
+            &session,
+            &format!(
+                "{KEY_ROOT}/{domain}/{id}/{slot}/*/*/{chunk}",
+                slot = if chunk == SUB_CHUNK { "@in" } else { "@out" }
+            ),
+        )?
+        .iter()
+        .filter_map(|k| {
+            KeyParts::parse_with_chunk(k, chunk).map(|p| format!("{} ({})", p.port, p.ty))
+        })
+        .collect())
     };
     let subs = chunked(SUB_CHUNK)?;
     let srvs = chunked(SERVICE_CHUNK)?;
@@ -744,14 +753,7 @@ fn node_info(id: &str, bus: &BusArgs) -> Result<()> {
         println!("{id}: not found in domain {domain}");
         return Ok(());
     }
-    println!(
-        "{id}{}",
-        if alive {
-            ""
-        } else {
-            "  (no @launch token: pre-0.5)"
-        }
-    );
+    println!("{id}{}", if alive { "" } else { "  (no @launch token)" });
     for (label, types) in [("pub", &pubs), ("sub", &subs), ("srv", &srvs)] {
         println!("{label} : {}", Roles::cell(types));
     }

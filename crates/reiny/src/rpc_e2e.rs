@@ -142,7 +142,13 @@ async fn services_round_trip_presence_and_latched_coexistence() {
     tokio::time::sleep(SETTLE).await;
 
     // --- presence: a server shows up in servers() and never in publishers() ---
-    assert_eq!(client.servers::<Add>().await.expect("servers"), ["srv"]);
+    assert_eq!(
+        client.servers::<Add>().await.expect("servers"),
+        [crate::bindings::EndpointAddress {
+            namespace: "srv".into(),
+            port: "test".into()
+        }]
+    );
     assert!(
         client
             .publishers::<Add>()
@@ -213,17 +219,23 @@ async fn services_round_trip_presence_and_latched_coexistence() {
     let mut watch = client.watch_servers::<Add>().expect("watch_servers");
     assert_eq!(
         timeout(PATIENCE, watch.recv()).await.expect("join event"),
-        Some(PresenceEvent::Joined("srv".to_string()))
+        Some(PresenceEvent::Joined(crate::bindings::EndpointAddress {
+            namespace: "srv".into(),
+            port: "test".into()
+        }))
     );
     server.shutdown_now();
     server_task.await.expect("server task");
     assert_eq!(
         timeout(PATIENCE, watch.recv()).await.expect("leave event"),
-        Some(PresenceEvent::Left("srv".to_string()))
+        Some(PresenceEvent::Left(crate::bindings::EndpointAddress {
+            namespace: "srv".into(),
+            port: "test".into()
+        }))
     );
     assert_eq!(
         client.servers::<Add>().await.expect("servers"),
-        Vec::<String>::new()
+        Vec::<crate::bindings::EndpointAddress>::new()
     );
 
     // --- a launch that latched-publishes and serves the same type ---

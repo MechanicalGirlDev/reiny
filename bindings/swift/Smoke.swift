@@ -18,6 +18,7 @@ guard let message = try subscriber.receive(timeoutMs: 1000) else {
 }
 precondition(message.payload == payload)
 precondition(message.source == "sender")
+precondition(message.sourcePort == "out")
 precondition(message.schema == 42)
 receiver.shutdown()
 let afterShutdown = try subscriber.receive(timeoutMs: 1000)

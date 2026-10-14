@@ -24,6 +24,7 @@ def main() -> None:
     assert message is not None
     assert message.payload == payload
     assert message.source == "sender"
+    assert message.source_port == "out"
     assert message.schema == 42
 
     try:
@@ -57,6 +58,7 @@ def main() -> None:
         assert network_message is not None
         assert network_message.payload == payload
         assert network_message.source == "network"
+        assert network_message.source_port == "out"
         network.shutdown()
     print("Python UniFFI smoke passed")
 

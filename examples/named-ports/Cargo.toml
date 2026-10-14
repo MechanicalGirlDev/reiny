@@ -1,0 +1,13 @@
+[workspace]
+
+[package]
+name = "named-ports"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1"
+prost = "0.14"
+reiny = { path = "../../crates/reiny" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

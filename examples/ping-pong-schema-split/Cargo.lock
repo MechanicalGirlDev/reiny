@@ -2011,6 +2011,7 @@ dependencies = [
  "prost-build",
  "prost-types",
  "protoc-bin-vendored",
+ "reiny-core",
  "serde",
  "serde_yaml",
  "toml",

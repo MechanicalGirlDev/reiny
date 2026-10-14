@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "namespace": "isolated",
   "endpoint_namespace": "isolated",
   "inputs": {
@@ -8,8 +8,8 @@
         "type": "Binary"
       },
       "sources": [
-        "sender",
-        "isolated"
+        { "namespace": "sender", "port": "out" },
+        { "namespace": "isolated", "port": "out" }
       ]
     }
   },

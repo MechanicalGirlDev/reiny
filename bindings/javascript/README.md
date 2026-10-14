@@ -48,8 +48,10 @@ shuts down a session and can throw if the native operation fails.
 Run `npm run check`, `npm test`, `npm run smoke`, and
 `npm run smoke:typescript`. Both examples require the native library.
 
-Session constructors require an absolute prepared version-2 module-bindings JSON path.
+Session constructors require an absolute prepared version-3 module-bindings JSON path.
 Ports take a declared name, the contract type name, and a mandatory uint64 schema
 fingerprint. Source routing and policies come from the prepared contract, not caller
 overrides. Register all declared ports, then call `ready()` before sending.
 Publisher discovery is not exposed by this managed facade.
+Received messages expose `source` (namespace) and `sourcePort` (output name);
+same-type outputs retain distinct identities.

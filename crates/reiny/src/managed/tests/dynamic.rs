@@ -31,13 +31,13 @@ async fn dynamic_ports_verify_names_types_sources_and_fingerprints() {
     receiver.ready().expect("receiver ready");
     let invalid = bus
         .publisher(
-            &Key::topic(DOMAIN, Some(SENDER), Probe::TYPE_NAME),
+            &Key::output(DOMAIN, SENDER, "outgoing", Probe::TYPE_NAME),
             &Qos::DEFAULT,
         )
         .expect("transport fixture");
     let foreign = bus
         .publisher(
-            &Key::topic(DOMAIN, Some("undeclared/source"), Probe::TYPE_NAME),
+            &Key::output(DOMAIN, "undeclared/source", "outgoing", Probe::TYPE_NAME),
             &Qos::DEFAULT,
         )
         .expect("foreign fixture");

@@ -1,0 +1,14 @@
+version: 3
+deployment: named-ports
+providers:
+  process:
+    type: process
+    bin_dir: target/debug
+modules:
+  proof:
+    source: apps/proof
+    in:
+      left: {from: proof.first}
+      right: {from: proof.second}
+      call_first: {from: proof.rpc_first}
+      call_second: {from: proof.rpc_second}

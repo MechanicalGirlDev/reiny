@@ -45,7 +45,7 @@ fn owner_identity_alias_is_validated_before_engine_startup() {
     let directory = tempfile::tempdir().unwrap();
     let bindings = directory.path().join("bindings.json");
     let contract: reiny::bindings::ModuleBindings = serde_yaml::from_str(
-        "version: 2\nnamespace: cli\nendpoint_namespace: cli\ninputs:\n  state:\n    contract: {type: test.State}\n    sources: [controller]\noutputs: {}\n",
+        "version: 3\nnamespace: cli\nendpoint_namespace: cli\ninputs:\n  state:\n    contract: {type: test.State}\n    sources: [{namespace: controller, port: state}]\noutputs: {}\n",
     ).unwrap();
     std::fs::write(&bindings, serde_json::to_vec(&contract).unwrap()).unwrap();
     for identity in ["--id", "--name"] {

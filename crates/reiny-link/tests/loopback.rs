@@ -56,6 +56,7 @@ const PORTS: &[StaticPort] = &[
         direction: PortDirection::Output,
         ty: State::TYPE_NAME,
         schema: State::SCHEMA_FINGERPRINT,
+        sources: &[],
         response: None,
     },
     StaticPort {
@@ -63,6 +64,10 @@ const PORTS: &[StaticPort] = &[
         direction: PortDirection::Input,
         ty: State::TYPE_NAME,
         schema: State::SCHEMA_FINGERPRINT,
+        sources: &[reiny_link::StaticEndpointAddress {
+            namespace: "mcu",
+            port: "state",
+        }],
         response: None,
     },
     StaticPort {
@@ -70,6 +75,7 @@ const PORTS: &[StaticPort] = &[
         direction: PortDirection::RpcServer,
         ty: Add::TYPE_NAME,
         schema: Add::SCHEMA_FINGERPRINT,
+        sources: &[],
         response: Some(PortType {
             ty: Sum::TYPE_NAME,
             schema: Sum::SCHEMA_FINGERPRINT,
@@ -80,6 +86,10 @@ const PORTS: &[StaticPort] = &[
         direction: PortDirection::RpcClient,
         ty: Add::TYPE_NAME,
         schema: Add::SCHEMA_FINGERPRINT,
+        sources: &[reiny_link::StaticEndpointAddress {
+            namespace: "mcu",
+            port: "addition",
+        }],
         response: Some(PortType {
             ty: Sum::TYPE_NAME,
             schema: Sum::SCHEMA_FINGERPRINT,
@@ -91,7 +101,12 @@ const WAIT: Duration = Duration::from_secs(5);
 
 /// Playing the MCU: publishes `State`, serves `Add`.
 fn mcu_link() -> HostLink {
-    let mut l = HostLink::host("mcu", PORTS).unwrap();
+    let mut ports = PORTS.to_vec();
+    ports[3].sources = &[reiny_link::StaticEndpointAddress {
+        namespace: "pc",
+        port: "addition",
+    }];
+    let mut l = HostLink::host("mcu", Box::leak(ports.into_boxed_slice())).unwrap();
     l.publishes::<State>("state").unwrap();
     l.rpc_server::<Add>("addition").unwrap();
     l.rpc_client::<Add>("addition").unwrap();
@@ -316,4 +331,147 @@ async fn stream_eof_closes_host() {
         Err(CallError::NoPeerService) => {}
         other => panic!("expected NoPeerService, got {other:?}"),
     }
+}
+
+fn named_hosts<A: Transport + 'static, B: Transport + 'static>(a: A, b: B) -> (Host, Host) {
+    let mut server_ports = Vec::new();
+    let mut client_ports = Vec::new();
+    for (stream, rpc) in [("left", "first"), ("right", "second")] {
+        server_ports.push(StaticPort {
+            name: stream,
+            direction: PortDirection::Output,
+            ty: State::TYPE_NAME,
+            schema: State::SCHEMA_FINGERPRINT,
+            response: None,
+            sources: &[],
+        });
+        server_ports.push(StaticPort {
+            name: rpc,
+            direction: PortDirection::RpcServer,
+            ty: Add::TYPE_NAME,
+            schema: Add::SCHEMA_FINGERPRINT,
+            response: Some(PortType {
+                ty: Sum::TYPE_NAME,
+                schema: Sum::SCHEMA_FINGERPRINT,
+            }),
+            sources: &[],
+        });
+        client_ports.push(StaticPort {
+            name: stream,
+            direction: PortDirection::Input,
+            ty: State::TYPE_NAME,
+            schema: State::SCHEMA_FINGERPRINT,
+            response: None,
+            sources: Box::leak(Box::new([reiny_link::StaticEndpointAddress {
+                namespace: "server",
+                port: stream,
+            }])),
+        });
+        client_ports.push(StaticPort {
+            name: rpc,
+            direction: PortDirection::RpcClient,
+            ty: Add::TYPE_NAME,
+            schema: Add::SCHEMA_FINGERPRINT,
+            response: Some(PortType {
+                ty: Sum::TYPE_NAME,
+                schema: Sum::SCHEMA_FINGERPRINT,
+            }),
+            sources: Box::leak(Box::new([reiny_link::StaticEndpointAddress {
+                namespace: "server",
+                port: rpc,
+            }])),
+        });
+    }
+    let mut server_link =
+        HostLink::host("server", Box::leak(server_ports.into_boxed_slice())).unwrap();
+    let mut client_link =
+        HostLink::host("client", Box::leak(client_ports.into_boxed_slice())).unwrap();
+    for (stream, rpc) in [("left", "first"), ("right", "second")] {
+        server_link.publishes::<State>(stream).unwrap();
+        server_link.rpc_server::<Add>(rpc).unwrap();
+        client_link.subscribes::<State>(stream).unwrap();
+        client_link.rpc_client::<Add>(rpc).unwrap();
+    }
+    (Host::spawn(server_link, a), Host::spawn(client_link, b))
+}
+
+/// Both transports must keep same-type streams and same-request servers independent.
+async fn exercise_named<A: Transport + 'static, B: Transport + 'static>(a: A, b: B) {
+    let (mut server, mut client) = named_hosts(a, b);
+    expect_connected(&mut server, "client").await;
+    expect_connected(&mut client, "server").await;
+    server.send("left", &State { seq: 11 }).unwrap();
+    server.send("right", &State { seq: 22 }).unwrap();
+    for (expected_port, expected_value) in [("left", 11), ("right", 22)] {
+        let event = timeout(WAIT, client.recv()).await.unwrap().unwrap();
+        let HostEvent::Data {
+            namespace, port, ..
+        } = &event
+        else {
+            panic!("data");
+        };
+        assert_eq!(namespace, "server");
+        assert_eq!(port, expected_port);
+        assert_eq!(
+            event.decode::<State>(),
+            Some(State {
+                seq: expected_value
+            })
+        );
+    }
+    let serve = async {
+        for _ in 0..2 {
+            let event = timeout(WAIT, server.recv()).await.unwrap().unwrap();
+            let HostEvent::Request {
+                port, seq, hash, ..
+            } = &event
+            else {
+                panic!("request");
+            };
+            assert_eq!(*hash, wire::endpoint_hash("server", port));
+            let request = event.decode::<Add>().unwrap();
+            let offset = match port.as_str() {
+                "first" => 100,
+                "second" => 200,
+                _ => panic!("wrong server"),
+            };
+            server
+                .reply::<Add>(
+                    port,
+                    *seq,
+                    &Sum {
+                        s: request.a + request.b + offset,
+                    },
+                )
+                .unwrap();
+        }
+    };
+    let call = async {
+        let request = Add { a: 2, b: 3 };
+        let (first, second) = tokio::join!(
+            client.call("first", &request, WAIT),
+            client.call("second", &request, WAIT)
+        );
+        assert_eq!(first.unwrap(), Sum { s: 105 });
+        assert_eq!(second.unwrap(), Sum { s: 205 });
+    };
+    timeout(WAIT, async {
+        tokio::join!(serve, call);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn named_endpoints_over_duplex() {
+    let (a, b) = tokio::io::duplex(8192);
+    exercise_named(Stream(a), Stream(b)).await;
+}
+
+#[tokio::test]
+async fn named_endpoints_over_udp_loopback() {
+    let a = Udp::bind("127.0.0.1:0").await.unwrap();
+    let b = Udp::bind("127.0.0.1:0").await.unwrap();
+    let peer = b.local_addr().unwrap();
+    exercise_named(a.with_peer(peer), b).await;
 }

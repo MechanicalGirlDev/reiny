@@ -5,7 +5,7 @@
 //! Message and RPC fingerprints come from the compiled schemas supplied by the caller.
 //! Launch, readiness and stop are control-plane routes and retain their original namespaces.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -47,39 +47,23 @@ fn validate_routes(from: &ModuleBindings, into: &ModuleBindings) -> Result<()> {
             !input
                 .sources
                 .iter()
-                .any(|source| source == &from.endpoint_namespace),
+                .any(|source| source.namespace == from.endpoint_namespace),
             "bridge input '{name}' cannot consume its own output namespace"
         );
         anyhow::ensure!(
             into.outputs
-                .values()
-                .any(|output| same_type(&input.contract, &output.contract)),
+                .get(name)
+                .is_some_and(|output| same_type(&input.contract, &output.contract)),
             "bridge input '{name}' has no matching declared output on the other engine"
         );
     }
-    let mut types = BTreeSet::new();
     for (name, output) in &into.outputs {
-        let ty = &output.contract.type_name;
-        anyhow::ensure!(
-            types.insert(ty),
-            "duplicate bridge output transport type '{ty}'"
-        );
         anyhow::ensure!(
             from.inputs
-                .values()
-                .any(|input| same_type(&input.contract, &output.contract)),
+                .get(name)
+                .is_some_and(|input| same_type(&input.contract, &output.contract)),
             "bridge output '{name}' has no matching declared input on the other engine"
         );
-        if output.contract.kind == PortKind::Rpc {
-            anyhow::ensure!(
-                from.inputs
-                    .values()
-                    .filter(|input| same_type(&input.contract, &output.contract))
-                    .count()
-                    == 1,
-                "bridge RPC output '{name}' requires exactly one caller route"
-            );
-        }
     }
     Ok(())
 }
@@ -161,9 +145,9 @@ fn forward_ports(
         .outputs;
     let mut publishers = BTreeMap::new();
     for (name, input) in inputs {
-        let (output_name, output) = outputs
-            .iter()
-            .find(|(_, output)| same_type(&input.contract, &output.contract))
+        let output_name = name;
+        let output = outputs
+            .get(name)
             .ok_or_else(|| anyhow::anyhow!("missing matching bridge output"))?;
         let schema = schemas[&input.contract.type_name];
         match input.contract.kind {
@@ -225,8 +209,8 @@ fn forward_rpc(
         .first()
         .ok_or_else(|| anyhow::anyhow!("RPC requires exact target"))?;
     let ty = &input.contract.type_name;
-    let target = Key::topic(from.domain(), Some(source), ty);
-    let output_key = Key::topic(into.domain(), Some(into.endpoint_namespace()), ty);
+    let target = Key::output(from.domain(), &source.namespace, &source.port, ty);
+    let output_key = Key::output(into.domain(), into.endpoint_namespace(), output_name, ty);
     let engine = from.engine().clone();
     let handle = Handle::current();
     let reply_key = output_key.clone();
@@ -287,8 +271,7 @@ async fn relay_rpc(
         let reply = replies.next().await;
         if let Some(Ok(sample)) = &reply {
             anyhow::ensure!(
-                sample.key.source == target.source
-                    && sample.key.ty == target.ty
+                sample.key == target
                     && sample.attachment.as_deref()
                         == Some(response_schema.to_le_bytes().as_slice()),
                 "bridge response source or schema mismatch"
@@ -320,7 +303,7 @@ fn control_flow(
     let mut watches = Vec::new();
     for key in [
         Key::launch(from.domain(), None),
-        Key::topic(from.domain(), None, READY_CHUNK),
+        Key::module(from.domain(), None, READY_CHUNK),
     ] {
         let tx = tx.clone();
         watches.push(from.engine().watch_alive(
@@ -377,7 +360,7 @@ fn control_flow(
                         }
                     }
                     if key.ty.as_deref() == Some(LAUNCH_CHUNK) {
-                        let target = Key::topic(&key.domain, key.source.as_deref(), STOP_CHUNK);
+                        let target = Key::module(&key.domain, key.source.as_deref(), STOP_CHUNK);
                         let callback_target = target.clone();
                         let engine = source_engine.clone();
                         let handle = handle.clone();

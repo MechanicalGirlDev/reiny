@@ -22,7 +22,7 @@ async fn bridged_namespace_preserves_ready_stop_and_owner_departure() {
     let module = ModuleContext::open(options(left, bindings(SENDER)))
         .await
         .expect("module");
-    let ready = Key::topic(DOMAIN, Some(SENDER), "@ready");
+    let ready = Key::module(DOMAIN, Some(SENDER), "@ready");
     let (events, mut observed) = tokio::sync::mpsc::unbounded_channel();
     let _watch = right
         .watch_alive(
@@ -41,7 +41,7 @@ async fn bridged_namespace_preserves_ready_stop_and_owner_departure() {
             .expect("mirrored readiness"),
         Some(Presence::Joined(ready.clone()))
     );
-    let stop = Key::topic(DOMAIN, Some(SENDER), "@stop");
+    let stop = Key::module(DOMAIN, Some(SENDER), "@stop");
     let mut replies = right
         .query(
             &stop,

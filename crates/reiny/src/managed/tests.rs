@@ -15,8 +15,8 @@ use prost::Message;
 use tokio::time::timeout;
 
 use crate::bindings::{
-    EndpointContract, InputBinding, MODULE_BINDINGS_VERSION, ModuleBindings, ModuleReport,
-    OutputBinding,
+    EndpointAddress, EndpointContract, InputBinding, MODULE_BINDINGS_VERSION, ModuleBindings,
+    ModuleReport, OutputBinding,
 };
 use crate::engine::{Engine, Key, Local, Presence, QueryParams};
 use crate::{Descriptor, MessageType, ModuleContext, Qos, RuntimeOptions};
@@ -80,7 +80,14 @@ fn bindings(namespace: &str) -> ModuleBindings {
 fn input(source: &str) -> InputBinding {
     InputBinding {
         contract: contract("test.Probe"),
-        sources: vec![source.to_string()],
+        sources: vec![endpoint(source, "outgoing")],
+    }
+}
+
+fn endpoint(namespace: &str, port: &str) -> EndpointAddress {
+    EndpointAddress {
+        namespace: namespace.to_owned(),
+        port: port.to_owned(),
     }
 }
 

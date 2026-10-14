@@ -126,12 +126,14 @@ fn print_flow(plan: &DeploymentPlan) {
         .enumerate()
         .map(|(index, node)| (node.namespace.clone(), index))
         .collect();
-    let mut connections: BTreeMap<(String, String, Option<String>), Vec<usize>> = BTreeMap::new();
+    let mut connections: BTreeMap<(String, String, String, Option<String>), Vec<usize>> =
+        BTreeMap::new();
     for route in &plan.connections {
         let index = indices[&route.destination.namespace];
         let subscribers = connections
             .entry((
                 route.source.namespace.clone(),
+                route.source.name.clone(),
                 route.contract.type_name.clone(),
                 route.contract.response.clone(),
             ))
@@ -142,7 +144,7 @@ fn print_flow(plan: &DeploymentPlan) {
     }
     let edges: Vec<_> = connections
         .into_iter()
-        .map(|((source, ty, reply), clients)| {
+        .map(|((source, port, ty, reply), clients)| {
             let server = vec![indices[&source]];
             let (pubs, subs) = if reply.is_some() {
                 (clients, server)
@@ -150,7 +152,7 @@ fn print_flow(plan: &DeploymentPlan) {
                 (server, clients)
             };
             crate::flowart::Edge {
-                ty,
+                ty: format!("{port}: {ty}"),
                 pubs,
                 subs,
                 reply,

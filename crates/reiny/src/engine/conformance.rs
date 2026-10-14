@@ -124,6 +124,19 @@ pub async fn cloudy(engine: Arc<dyn Engine>, id: &str) -> ModuleContext {
 /// The conformance body. `a` / `b` are two launches (ids `a` / `b`) on the same bus. It panics on failure.
 #[allow(clippy::too_many_lines)] // one pass end to end (run once per engine), hence long
 pub async fn exercise(a: ModuleContext, b: ModuleContext) {
+    // Capability declarations must agree with the actual publisher boundary.
+    for qos in [Qos::DEFAULT, Qos::SENSOR, Qos::COMMAND] {
+        let result = a.engine().publisher(
+            &Key::output(a.domain(), a.id(), "test", Probe::TYPE_NAME),
+            &qos,
+        );
+        assert_eq!(
+            result.is_ok(),
+            qos == Qos::DEFAULT || a.engine().caps().congestion_control,
+            "congestion policy {:?} must match engine capabilities",
+            qos.congestion_control
+        );
+    }
     tokio::time::sleep(SETTLE).await;
 
     // --- launch presence: ModuleContext::new raised @launch ---
@@ -185,41 +198,65 @@ pub async fn exercise(a: ModuleContext, b: ModuleContext) {
     // `Sum` has neither a publisher nor another subscriber here, so the answer is unambiguous.
     assert_eq!(
         a.subscribers::<Sum>().await.expect("subscribers"),
-        Vec::<String>::new()
+        Vec::<crate::bindings::EndpointAddress>::new()
     );
     let mut watch_subs = a.watch_subscribers::<Sum>().expect("watch subscribers");
     let listener = b.subscribe::<Sum>().expect("subscriber");
     assert_eq!(
         timeout(PATIENCE, watch_subs.recv()).await.expect("join"),
-        Some(PresenceEvent::Joined("b".to_string()))
+        Some(PresenceEvent::Joined(crate::bindings::EndpointAddress {
+            namespace: "b".into(),
+            port: "test".into()
+        }))
     );
-    assert_eq!(a.subscribers::<Sum>().await.expect("subscribers"), ["b"]);
+    assert_eq!(
+        a.subscribers::<Sum>().await.expect("subscribers"),
+        [crate::bindings::EndpointAddress {
+            namespace: "b".into(),
+            port: "test".into()
+        }]
+    );
     // A listener is not a publisher: `@sub` must not leak into the type's own key.
     assert_eq!(
         a.publishers::<Sum>().await.expect("publishers"),
-        Vec::<String>::new()
+        Vec::<crate::bindings::EndpointAddress>::new()
     );
     drop(listener);
     assert_eq!(
         timeout(PATIENCE, watch_subs.recv()).await.expect("leave"),
-        Some(PresenceEvent::Left("b".to_string()))
+        Some(PresenceEvent::Left(crate::bindings::EndpointAddress {
+            namespace: "b".into(),
+            port: "test".into()
+        }))
     );
 
     // --- presence: publishers() and watch (history → Joined, drop → Left) ---
-    assert_eq!(b.publishers::<Probe>().await.expect("publishers"), ["a"]);
+    assert_eq!(
+        b.publishers::<Probe>().await.expect("publishers"),
+        [crate::bindings::EndpointAddress {
+            namespace: "a".into(),
+            port: "test".into()
+        }]
+    );
     let mut watch = b.watch_publishers::<Probe>().expect("watch");
     assert_eq!(
         timeout(PATIENCE, watch.recv()).await.expect("join"),
-        Some(PresenceEvent::Joined("a".to_string()))
+        Some(PresenceEvent::Joined(crate::bindings::EndpointAddress {
+            namespace: "a".into(),
+            port: "test".into()
+        }))
     );
     drop(probe);
     assert_eq!(
         timeout(PATIENCE, watch.recv()).await.expect("leave"),
-        Some(PresenceEvent::Left("a".to_string()))
+        Some(PresenceEvent::Left(crate::bindings::EndpointAddress {
+            namespace: "a".into(),
+            port: "test".into()
+        }))
     );
     assert_eq!(
         b.publishers::<Probe>().await.expect("publishers"),
-        Vec::<String>::new()
+        Vec::<crate::bindings::EndpointAddress>::new()
     );
 
     // --- latched (Qos::STATE): a late subscriber receives the most recent value ---
@@ -314,14 +351,18 @@ pub async fn exercise(a: ModuleContext, b: ModuleContext) {
     joined.sort();
     assert_eq!(
         joined,
-        ["reiny/conf/a/ConfProbe", "reiny/conf/a/ConfStamped"]
+        [
+            "reiny/v3/conf/a/@out/test/ConfProbe",
+            "reiny/v3/conf/a/@out/test/ConfStamped"
+        ]
     );
     drop(stamped);
     assert_eq!(
         timeout(PATIENCE, everyone.recv()).await.expect("leave"),
-        Some(Presence::Left(Key::topic(
+        Some(Presence::Left(Key::output(
             DOMAIN,
-            Some("a"),
+            "a",
+            "test",
             StampedV1::TYPE_NAME
         )))
     );
@@ -361,7 +402,13 @@ pub async fn exercise(a: ModuleContext, b: ModuleContext) {
         }
     });
     tokio::time::sleep(SETTLE).await;
-    assert_eq!(b.servers::<Add>().await.expect("servers"), ["a"]);
+    assert_eq!(
+        b.servers::<Add>().await.expect("servers"),
+        [crate::bindings::EndpointAddress {
+            namespace: "a".into(),
+            port: "test".into()
+        }]
+    );
     let sum = timeout(PATIENCE, b.call::<Add>(Add { a: 2, b: 3 }))
         .await
         .expect("call returns")

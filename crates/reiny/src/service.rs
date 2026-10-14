@@ -1,11 +1,12 @@
-//! Typed request/response — **the request type is the service's address**.
+//! Typed request/response through exact declared output endpoints.
 //!
 //! ```text
-//! server : respond  reiny/<domain>/<id>/<Req>      (+ liveliness  reiny/<domain>/<id>/<Req>/@service)
-//! client : query    reiny/<domain>/<id|*>/<Req>    payload = Req, reply payload = Req::Response
+//! server : respond  reiny/v3/<domain>/<namespace>/@out/<port>/<Req>
+//! client : query    the exact configured server endpoint
+//! presence: <server-key>/@service
 //! ```
 //!
-//! It is the same key shape as publishing, so addressing ([`RpcClientBuilder::to`]) and presence
+//! It is the same key shape as publishing, so exact endpoint addressing and presence
 //! ([`ModuleContext::servers`] / [`ModuleContext::watch_servers`]) work through the same machinery as pub/sub.
 //! It can even share a key with a latched publisher (`pubsub.rs`) — they are told apart by **whether
 //! there is a payload**: a latched subscriber's `get` carries none, a service call always does.
@@ -55,7 +56,7 @@ pub struct RpcServer<S> {
 }
 
 impl<S: Service> RpcServer<S> {
-    pub(crate) fn declare(cloudy: &ModuleContext) -> Result<Self> {
+    pub(crate) fn declare(cloudy: &ModuleContext, name: &str) -> Result<Self> {
         let engine = &cloudy.engine;
         let caps = engine.caps();
         if !(caps.query && caps.liveliness) {
@@ -64,7 +65,12 @@ impl<S: Service> RpcServer<S> {
                 S::TYPE_NAME
             );
         }
-        let key = cloudy.key_for(Some(cloudy.endpoint_namespace()), S::TYPE_NAME);
+        let key = Key::output(
+            cloudy.domain(),
+            cloudy.endpoint_namespace(),
+            name,
+            S::TYPE_NAME,
+        );
         let (tx, rx) = flume::bounded(QUERY_CAPACITY);
         let guard = engine.respond(
             &key,
@@ -178,7 +184,7 @@ impl<S: Service> Request<S> {
 #[must_use = "a builder does nothing until .build()"]
 pub(crate) struct RpcClientBuilder<'a, S> {
     cloudy: &'a ModuleContext,
-    to: Option<String>,
+    to: Option<crate::bindings::EndpointAddress>,
     timeout: Duration,
     _marker: PhantomData<S>,
 }
@@ -195,8 +201,17 @@ impl<'a, S> RpcClientBuilder<'a, S> {
 
     /// Fire only at one launch id's server. Unset, it fires at every server in the domain and
     /// **takes the first reply** — with two or more servers around, pick here.
+    #[cfg(any(test, feature = "conformance"))]
     pub(crate) fn to(mut self, id: impl Into<String>) -> Self {
-        self.to = Some(id.into());
+        self.to = Some(crate::bindings::EndpointAddress {
+            namespace: id.into(),
+            port: "test".into(),
+        });
+        self
+    }
+
+    pub(crate) fn target(mut self, endpoint: &crate::bindings::EndpointAddress) -> Self {
+        self.to = Some(endpoint.clone());
         self
     }
 
@@ -215,7 +230,7 @@ impl<'a, S> RpcClientBuilder<'a, S> {
     {
         self.cloudy.ensure_standalone()?;
         if let Some(target) = &self.to {
-            crate::managed::config::validate_namespace(target)?;
+            crate::managed::config::validate_namespace(&target.namespace)?;
         }
         Ok(self.build_named())
     }
@@ -226,7 +241,15 @@ impl<'a, S> RpcClientBuilder<'a, S> {
     {
         RpcClient {
             engine: Arc::clone(&self.cloudy.engine),
-            key: self.cloudy.key_for(self.to.as_deref(), S::TYPE_NAME),
+            key: match self.to {
+                Some(target) => Key::output(
+                    self.cloudy.domain(),
+                    &target.namespace,
+                    &target.port,
+                    S::TYPE_NAME,
+                ),
+                None => self.cloudy.key_for(None, S::TYPE_NAME),
+            },
             timeout: self.timeout,
             _marker: PhantomData,
             managed: None,

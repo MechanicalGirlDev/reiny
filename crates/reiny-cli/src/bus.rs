@@ -1,7 +1,7 @@
 //! The bus vocabulary `reiny bag` / `reiny topic` / `reiny node` / `reiny service` share.
 //!
-//! The key shape (`reiny/<domain>/<id>/<TYPE_NAME>` plus the side chunks `@schema` / `@service` /
-//! `@launch`), building a session by the same path a launch does, and collecting the descriptors a
+//! Named v3 endpoint keys (namespace, direction, port and protobuf type), module controls,
+//! building a session by the same path a module does, and collecting the descriptors a
 //! running publisher / server announces. Only what cannot be written without knowing reiny's and
 //! zenoh's conventions lives here; the statistics and the printing belong to each subcommand.
 //!
@@ -13,14 +13,14 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
 use reiny::bindings::{
-    EndpointContract, MODULE_REPORT_VERSION, ModuleBindings, ModuleReport, PortKind, PortReport,
-    ReceiveBuffer, Replay,
+    EndpointAddress, EndpointContract, MODULE_REPORT_VERSION, ModuleBindings, ModuleReport,
+    PortEndpoint, PortKind, PortReport, ReceiveBuffer, Replay,
 };
 use reiny::zenoh::{self, Wait};
 use reiny::{RuntimeOptions, ZenohSource};
 
 /// The key prefix and the side chunk names. Kept in step with reiny proper (verbatim, so `*` never sees them).
-pub(crate) const KEY_ROOT: &str = "reiny";
+pub(crate) const KEY_ROOT: &str = "reiny/v3";
 pub(crate) const SCHEMA_CHUNK: &str = "@schema";
 pub(crate) const SERVICE_CHUNK: &str = "@service";
 pub(crate) const SUB_CHUNK: &str = "@sub";
@@ -157,7 +157,9 @@ pub(crate) fn ready_inputs(
     }
     let report = ModuleReport {
         version: MODULE_REPORT_VERSION,
+        fingerprint_version: reiny::SCHEMA_FINGERPRINT_VERSION,
         namespace: bindings.namespace.clone(),
+        endpoint_namespace: bindings.endpoint_namespace.clone(),
         inputs,
         outputs: BTreeMap::new(),
     };
@@ -197,12 +199,19 @@ pub(crate) fn ready_inputs(
     Ok((token, control))
 }
 
-pub(crate) fn stream_report(contract: &EndpointContract, schema: u64) -> PortReport {
+pub(crate) fn stream_report(
+    contract: &EndpointContract,
+    schema: u64,
+    sources: &[EndpointAddress],
+) -> PortReport {
     PortReport {
         type_name: contract.type_name.clone(),
         schema,
         contract: contract.clone(),
         response: None,
+        endpoint: PortEndpoint::Input {
+            sources: sources.to_vec(),
+        },
     }
 }
 
@@ -282,15 +291,20 @@ pub(crate) fn input_keys(
         "wrong operation kind for input endpoint {name}"
     );
     ensure!(
-        source.is_none_or(|s| port.sources.iter().any(|declared| declared == s)),
+        source.is_none_or(|s| port.sources.iter().any(|declared| declared.namespace == s)),
         "source is not declared for endpoint {name}"
     );
     let keys = port
         .sources
         .iter()
-        .filter(|s| source.is_none_or(|wanted| wanted == s.as_str()))
+        .filter(|s| source.is_none_or(|wanted| wanted == s.namespace))
         .map(|source| {
-            let key = reiny::engine::Key::topic(domain, Some(source), topic_type(&port.contract));
+            let key = reiny::engine::Key::output(
+                domain,
+                &source.namespace,
+                &source.port,
+                topic_type(&port.contract),
+            );
             key.validate()?;
             Ok(key.to_string())
         })
@@ -317,58 +331,82 @@ pub(crate) fn output_key(
         source.is_none_or(|s| s == bindings.endpoint_namespace),
         "--as must match the contract endpoint namespace"
     );
-    let key = reiny::engine::Key::topic(
+    let key = reiny::engine::Key::output(
         domain,
-        Some(&bindings.endpoint_namespace),
+        &bindings.endpoint_namespace,
+        name,
         topic_type(&port.contract),
     );
     key.validate()?;
     Ok((port.contract.clone(), key.to_string()))
 }
 
-/// The domain, hierarchical source and type of a topic. Side chunks are rejected.
+/// The domain, hierarchical source, named port and protobuf type. Side chunks are rejected.
 pub(crate) struct KeyParts<'a> {
     pub(crate) domain: &'a str,
     pub(crate) source: &'a str,
+    pub(crate) port: &'a str,
     pub(crate) ty: &'a str,
 }
 
 impl<'a> KeyParts<'a> {
     pub(crate) fn parse(key: &'a str) -> Option<Self> {
-        let rest = key.strip_prefix("reiny/")?;
+        let parsed = reiny::engine::Key::parse(key)?;
+        if parsed.chunk.is_some() || parsed.endpoint.is_none() {
+            return None;
+        }
+        Self::base_parts(key)
+    }
+
+    fn base_parts(key: &'a str) -> Option<Self> {
+        let rest = key.strip_prefix("reiny/v3/")?;
         let (domain, rest) = rest.split_once('/')?;
-        let (source, ty) = rest.rsplit_once('/')?;
-        if domain.is_empty()
-            || source
-                .split('/')
-                .any(|part| part.is_empty() || part.starts_with('@'))
-            || ty.is_empty()
-            || (ty.starts_with('@')
-                && !matches!(
-                    ty,
-                    LAUNCH_CHUNK | reiny::engine::READY_CHUNK | reiny::engine::STOP_CHUNK
-                ))
+        let (source, endpoint) = rest
+            .split_once("/@out/")
+            .or_else(|| rest.split_once("/@in/"))?;
+        let (port, ty) = endpoint.split_once('/')?;
+        if !segment(domain)
+            || source.split('/').any(|part| !segment(part))
+            || !segment(port)
+            || !segment(ty)
         {
             return None;
         }
-        Some(Self { domain, source, ty })
+        Some(Self {
+            domain,
+            source,
+            port,
+            ty,
+        })
     }
 
-    /// The form `reiny/<domain>/<source>/<TYPE_NAME>/<chunk>` (with a side chunk). `chunk` is `@service` and the like.
+    /// A named endpoint key with a validated facet such as `@service` or `@sub`.
     pub(crate) fn parse_with_chunk(key: &'a str, chunk: &str) -> Option<Self> {
+        reiny::engine::Key::parse(key)?;
         let base = key.strip_suffix(chunk)?.strip_suffix('/')?;
-        Self::parse(base)
+        Self::base_parts(base)
     }
 }
 
 /// Take the complete source namespace from a topic or presence key.
 pub(crate) fn key_source(key: &str) -> &str {
-    KeyParts::parse(key)
-        .or_else(|| {
-            key.split_once("/@")
-                .and_then(|(base, _)| KeyParts::parse(base))
-        })
-        .map_or("", |parts| parts.source)
+    if reiny::engine::Key::parse(key).is_none() {
+        return "";
+    }
+    let Some(rest) = key
+        .strip_prefix("reiny/v3/")
+        .and_then(|s| s.split_once('/').map(|(_, rest)| rest))
+    else {
+        return "";
+    };
+    let Some((source, _)) = rest.split_once("/@") else {
+        return "";
+    };
+    if source.split('/').all(segment) {
+        source
+    } else {
+        ""
+    }
 }
 
 /// Read a zenoh attachment as reiny's fingerprint (8 bytes LE). `None` when the shape differs.
@@ -405,7 +443,7 @@ pub(crate) fn collect_schemas(
     collect_schemas_all(session, pattern)
         .into_iter()
         .filter_map(|(base, named)| {
-            let ty = KeyParts::parse(&base).map(|p| p.ty.to_string());
+            let ty = KeyParts::base_parts(&base).map(|p| p.ty.to_string());
             let own = named
                 .iter()
                 .position(|(fqn, _)| Some(fqn.as_str()) == ty.as_deref())?;
@@ -418,7 +456,7 @@ pub(crate) fn collect_schemas(
 /// The result is `<base key>` → `[(fqn, the FileDescriptorSet pruned to that message)]` (a service's
 /// key announces two: the request and the response).
 ///
-/// `pattern` is `reiny/<domain>/*/**` (every type) or `reiny/<domain>/**/<TYPE_NAME>` (one).
+/// Patterns include the explicit `@out` or `@in` slot, which wildcards cannot cross.
 pub(crate) fn collect_schemas_all(
     session: &zenoh::Session,
     pattern: &str,
@@ -435,7 +473,10 @@ pub(crate) fn collect_schemas_all(
     for reply in &replies {
         let Ok(sample) = reply.result() else { continue };
         let full = sample.key_expr().as_str();
-        // reiny/<domain>/<id>/<TYPE_NAME>/@schema/<fqn>
+        if reiny::engine::Key::parse(full).is_none() {
+            continue;
+        }
+        // reiny/v3/<domain>/<namespace>/@out/<port>/<TYPE_NAME>/@schema/<fqn>
         let Some((base, fqn)) = full.split_once(&format!("/{SCHEMA_CHUNK}/")) else {
             continue;
         };
@@ -486,7 +527,7 @@ mod tests {
 
     fn bindings() -> ModuleBindings {
         serde_yaml::from_str(
-            "version: 2\nnamespace: tools/cli\nendpoint_namespace: tools/cli\ninputs:\n  state:\n    contract: {type: robot.State}\n    sources: [robot/control, robot/simulation]\n  calibrate:\n    contract: {type: robot.Calibrate, kind: rpc, response: robot.Result}\n    sources: [robot/control]\noutputs:\n  command:\n    contract: {type: robot.Command}\n",
+            "version: 3\nnamespace: tools/cli\nendpoint_namespace: tools/cli\ninputs:\n  state:\n    contract: {type: robot.State}\n    sources: [{namespace: robot/control, port: state}, {namespace: robot/simulation, port: state}]\n  calibrate:\n    contract: {type: robot.Calibrate, kind: rpc, response: robot.Result}\n    sources: [{namespace: robot/control, port: calibrate}]\noutputs:\n  command:\n    contract: {type: robot.Command}\n",
         ).unwrap()
     }
 
@@ -500,12 +541,12 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "reiny/lab/robot/control/robot.State",
-                "reiny/lab/robot/simulation/robot.State"
+                "reiny/v3/lab/robot/control/@out/state/robot.State",
+                "reiny/v3/lab/robot/simulation/@out/state/robot.State"
             ]
         );
         let (_, key) = output_key(&bindings, "lab", "command", PortKind::Stream, None).unwrap();
-        assert_eq!(key, "reiny/lab/tools/cli/robot.Command");
+        assert_eq!(key, "reiny/v3/lab/tools/cli/@out/command/robot.Command");
         assert!(input_keys(&bindings, "lab", "State", PortKind::Stream, None).is_err());
         assert!(input_keys(&bindings, "lab", "state", PortKind::Stream, Some("**")).is_err());
         assert!(input_keys(&bindings, "lab", "calibrate", PortKind::Stream, None).is_err());
@@ -519,7 +560,7 @@ mod tests {
         bindings.namespace = "tools/cli/owned/inspector".into();
         validate_bindings(&bindings, "lab").unwrap();
         let (_, key) = output_key(&bindings, "lab", "command", PortKind::Stream, None).unwrap();
-        assert_eq!(key, "reiny/lab/tools/cli/robot.Command");
+        assert_eq!(key, "reiny/v3/lab/tools/cli/@out/command/robot.Command");
     }
 
     #[test]
@@ -529,14 +570,17 @@ mod tests {
             match change {
                 0 => bindings.version = 1,
                 1 => bindings.endpoint_namespace = "other".into(),
-                2 => bindings.inputs.get_mut("state").unwrap().sources = vec!["**".into()],
+                2 => bindings.inputs.get_mut("state").unwrap().sources[0].namespace = "**".into(),
                 3 => bindings.inputs.get_mut("state").unwrap().sources.clear(),
                 4 => bindings
                     .inputs
                     .get_mut("calibrate")
                     .unwrap()
                     .sources
-                    .push("other".into()),
+                    .push(EndpointAddress {
+                        namespace: "other".into(),
+                        port: "calibrate".into(),
+                    }),
                 5 => {
                     bindings
                         .outputs
@@ -557,7 +601,7 @@ mod tests {
                 8 => bindings.namespace = "tools/../cli".into(),
                 _ => {
                     let duplicate = bindings.outputs["command"].clone();
-                    bindings.outputs.insert("duplicate".into(), duplicate);
+                    bindings.outputs.insert("*".into(), duplicate);
                 }
             }
             assert!(
@@ -570,12 +614,16 @@ mod tests {
 
     #[test]
     fn key_parts_parse_hierarchical_sources_without_side_chunks() {
-        let p = KeyParts::parse("reiny/lab/ctrl/RobotState").unwrap();
-        assert_eq!((p.domain, p.source, p.ty), ("lab", "ctrl", "RobotState"));
+        let p = KeyParts::parse("reiny/v3/lab/ctrl/@out/state/RobotState").unwrap();
+        assert_eq!(
+            (p.domain, p.source, p.port, p.ty),
+            ("lab", "ctrl", "state", "RobotState")
+        );
+        assert!(KeyParts::parse("reiny/lab/ctrl/RobotState").is_none());
         assert!(KeyParts::parse("reiny/lab/ctrl").is_none());
         assert!(KeyParts::parse("reiny/lab/ctrl/RobotState/@schema/hs.RobotState").is_none());
         assert!(KeyParts::parse("other/lab/ctrl/RobotState").is_none());
-        let nested = KeyParts::parse("reiny/lab/robot/control/RobotState").unwrap();
+        let nested = KeyParts::parse("reiny/v3/lab/robot/control/@out/state/RobotState").unwrap();
         assert_eq!(
             (nested.domain, nested.source, nested.ty),
             ("lab", "robot/control", "RobotState")
@@ -587,22 +635,40 @@ mod tests {
 
     #[test]
     fn key_parts_with_chunk() {
-        let p = KeyParts::parse_with_chunk("reiny/lab/ctrl/Calib/@service", SERVICE_CHUNK).unwrap();
+        let p = KeyParts::parse_with_chunk(
+            "reiny/v3/lab/ctrl/@out/calibrate/Calib/@service",
+            SERVICE_CHUNK,
+        )
+        .unwrap();
         assert_eq!((p.source, p.ty), ("ctrl", "Calib"));
+        let input =
+            KeyParts::parse_with_chunk("reiny/v3/lab/gui/@in/command/e2e.Sum/@sub", SUB_CHUNK)
+                .unwrap();
+        assert_eq!(
+            (input.source, input.port, input.ty),
+            ("gui", "command", "e2e.Sum")
+        );
+        assert!(
+            KeyParts::parse_with_chunk("reiny/v3/lab/gui/@out/command/e2e.Sum/@sub", SUB_CHUNK)
+                .is_none()
+        );
         assert!(KeyParts::parse_with_chunk("reiny/lab/ctrl/Calib", SERVICE_CHUNK).is_none());
     }
 
     #[test]
     fn key_source_preserves_module_path() {
-        assert_eq!(key_source("reiny/lab/ctrl/RobotState"), "ctrl");
-        assert_eq!(key_source("reiny/lab/ctrl/@launch"), "ctrl");
+        assert_eq!(
+            key_source("reiny/v3/lab/ctrl/@out/state/RobotState"),
+            "ctrl"
+        );
+        assert_eq!(key_source("reiny/v3/lab/ctrl/@launch"), "ctrl");
         assert_eq!(key_source("reiny"), "");
         assert_eq!(
-            key_source("reiny/lab/robot/control/@launch"),
+            key_source("reiny/v3/lab/robot/control/@launch"),
             "robot/control"
         );
         assert_eq!(
-            key_source("reiny/lab/robot/control/Calib/@service"),
+            key_source("reiny/v3/lab/robot/control/@out/calibrate/Calib/@service"),
             "robot/control"
         );
     }

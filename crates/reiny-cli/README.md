@@ -25,6 +25,22 @@ Modules and schema:
 
 Bus tools: `bag`, `topic`, `node`, `service`, `bridge`.
 
+Data commands require prepared version-3 `--module-bindings`. Input sources
+are exact `{namespace, port}` addresses. Discovery displays named endpoint
+ports separately from complete protobuf type names.
+
+Replay maps every selected MCAP endpoint channel explicitly:
+
+```sh
+reiny bag play recording.mcap --module-bindings replay.json \
+  --map 'reiny/v3/lab/controller/@out/state/robot.State=state'
+```
+
+Repeat `--map recorded-key=output` for other channels. A type match alone never
+selects a replay output. Missing, repeated, ambiguous, or incompatible mappings
+are errors. Bridges likewise pair identical declared input/output port names
+and validate request and response fingerprints.
+
 The `main.yaml` format is documented in `docs/modules.md` in the repository.
 
 License: MIT

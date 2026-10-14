@@ -244,8 +244,9 @@ fn record_subscriber(
         runtime.spawn(async move {
             while let Some(sample) = input.recv().await {
                 let key = format!(
-                    "{KEY_ROOT}/{domain}/{}/{}",
+                    "{KEY_ROOT}/{domain}/{}/@out/{}/{}",
                     sample.source,
+                    sample.source_port,
                     crate::bus::topic_type(&contract)
                 );
                 if sender.send((key, sample)).is_err() {
@@ -294,6 +295,12 @@ fn write_sample<W: std::io::Write + std::io::Seek>(
         let mut meta: BTreeMap<String, String> = BTreeMap::new();
         meta.insert("reiny.domain".to_string(), parts.domain.to_string());
         meta.insert("reiny.source".to_string(), parts.source.to_string());
+        meta.insert("reiny.port".to_string(), parts.port.to_string());
+        meta.insert("reiny.key".to_string(), key.to_string());
+        meta.insert(
+            "reiny.fingerprint_version".to_string(),
+            reiny::SCHEMA_FINGERPRINT_VERSION.to_string(),
+        );
         meta.insert("reiny.type".to_string(), parts.ty.to_string());
         if let Some(fp) = fingerprint {
             meta.insert("reiny.schema".to_string(), format!("{fp:016x}"));
@@ -340,6 +347,9 @@ fn write_sample<W: std::io::Write + std::io::Seek>(
 struct PlayArgs {
     /// The MCAP to replay.
     file: PathBuf,
+    /// Map an exact recorded endpoint key to a declared output (repeatable).
+    #[arg(long = "map", value_name = "RECORDED-KEY=OUTPUT")]
+    mappings: Vec<String>,
     /// Require this source identity (it must equal the contract's endpoint namespace).
     #[arg(long = "as")]
     as_id: Option<String>,
@@ -370,7 +380,7 @@ struct PlayArgs {
 
 /// What a channel needs at replay time: its output key and reiny's conventions.
 struct PlayChannel {
-    /// The output key `reiny/<domain>/<source>/<TYPE_NAME>` (with --domain / --as already applied).
+    /// The mapped named output key, with the target domain and declared namespace.
     key: String,
     ty: String,
     publisher: Arc<reiny::DeclaredPublisher>,
@@ -381,6 +391,10 @@ fn play(args: &PlayArgs) -> Result<()> {
     anyhow::ensure!(
         bindings.inputs.is_empty(),
         "bag play contract cannot contain inputs"
+    );
+    anyhow::ensure!(
+        !args.mappings.is_empty(),
+        "bag play requires --map recorded-key=output"
     );
     let domain = args.bus.runtime_options("reiny-cli").domain;
     if args.rate <= 0.0 {
@@ -471,6 +485,31 @@ struct PlannedChannel {
     fingerprint: u64,
 }
 
+fn playback_mappings(arguments: &[String]) -> Result<BTreeMap<&str, &str>> {
+    let mut mappings = BTreeMap::new();
+    let mut outputs = std::collections::BTreeSet::new();
+    for mapping in arguments {
+        let (recorded, output) = mapping
+            .split_once('=')
+            .context("--map requires recorded-key=output")?;
+        anyhow::ensure!(
+            KeyParts::parse(recorded).is_some()
+                && recorded.contains("/@out/")
+                && !output.is_empty(),
+            "--map requires an exact recorded endpoint key and an output name"
+        );
+        anyhow::ensure!(
+            mappings.insert(recorded, output).is_none(),
+            "duplicate mapping for recorded endpoint {recorded}"
+        );
+        anyhow::ensure!(
+            outputs.insert(output),
+            "multiple recorded endpoints map to output {output}"
+        );
+    }
+    Ok(mappings)
+}
+
 fn playback_plan(
     args: &PlayArgs,
     bindings: &reiny::bindings::ModuleBindings,
@@ -479,7 +518,8 @@ fn playback_plan(
 ) -> Result<BTreeMap<u16, PlannedChannel>> {
     let filter = Filter::new(&args.types, &args.from, &[]);
     let mut plan = BTreeMap::new();
-    let mut output_schemas = BTreeMap::new();
+    let mappings = playback_mappings(&args.mappings)?;
+    let mut used = std::collections::BTreeSet::new();
     for (id, ch) in &summary.channels {
         let Some(parts) = KeyParts::parse(&ch.topic) else {
             continue;
@@ -495,19 +535,23 @@ fn playback_plan(
             schema.encoding == "protobuf" && ch.message_encoding == "protobuf",
             "bag playback requires protobuf channel and schema encodings"
         );
-        let matching: Vec<_> = bindings
-            .outputs
-            .iter()
-            .filter(|(_, port)| {
-                port.contract.kind == PortKind::Stream && port.contract.type_name == schema.name
-            })
-            .collect();
+        let name = mappings
+            .get(ch.topic.as_str())
+            .with_context(|| format!("missing --map for recorded endpoint {}", ch.topic))?;
         anyhow::ensure!(
-            matching.len() == 1,
-            "bag channel {} must match exactly one declared stream output",
+            used.insert(ch.topic.as_str()),
+            "ambiguous recorded endpoint {} has multiple channels",
             ch.topic
         );
-        let (name, output) = matching[0];
+        let output = bindings
+            .outputs
+            .get(*name)
+            .with_context(|| format!("undeclared mapped output {name}"))?;
+        anyhow::ensure!(
+            output.contract.kind == PortKind::Stream && output.contract.type_name == schema.name,
+            "bag channel {} is incompatible with mapped output {name}",
+            ch.topic
+        );
         anyhow::ensure!(
             parts.ty == crate::bus::topic_type(&output.contract),
             "bag channel type differs from its descriptor"
@@ -520,23 +564,28 @@ fn playback_plan(
             args.as_id.as_deref(),
         )?;
         let fingerprint = schema_fingerprint(&schema.data, &schema.name)?;
+        anyhow::ensure!(
+            ch.metadata.get("reiny.key").map(String::as_str) == Some(ch.topic.as_str())
+                && ch.metadata.get("reiny.port").map(String::as_str) == Some(parts.port)
+                && ch.metadata.get("reiny.source").map(String::as_str) == Some(parts.source)
+                && ch.metadata.get("reiny.domain").map(String::as_str) == Some(parts.domain)
+                && ch.metadata.get("reiny.type").map(String::as_str) == Some(parts.ty)
+                && ch.metadata.get("reiny.fingerprint_version")
+                    == Some(&reiny::SCHEMA_FINGERPRINT_VERSION.to_string()),
+            "bag channel {} lacks consistent named endpoint metadata",
+            ch.topic
+        );
         let recorded = ch
             .metadata
             .get("reiny.schema")
             .and_then(|value| u64::from_str_radix(value, 16).ok());
         verify_fingerprint(fingerprint, recorded)?;
-        if let Some(previous) = output_schemas.insert(name.clone(), fingerprint) {
-            anyhow::ensure!(
-                previous == fingerprint,
-                "bag channels disagree on one output schema"
-            );
-        }
         plan.insert(
             *id,
             PlannedChannel {
                 key,
                 ty: parts.ty.to_string(),
-                name: name.clone(),
+                name: (*name).to_string(),
                 fqn: schema.name.clone(),
                 fingerprint,
             },
@@ -545,6 +594,14 @@ fn playback_plan(
     if plan.is_empty() {
         bail!("nothing to play (no channels matched the filters)");
     }
+    anyhow::ensure!(
+        used.len() == mappings.len(),
+        "--map names an absent or filtered recorded endpoint"
+    );
+    anyhow::ensure!(
+        mappings.len() == bindings.outputs.len(),
+        "bag play must map every declared output"
+    );
     Ok(plan)
 }
 
@@ -558,7 +615,7 @@ fn guard_live_publishers(
     types.sort_unstable();
     types.dedup();
     for ty in types {
-        let key = format!("{KEY_ROOT}/{domain}/**/{ty}");
+        let key = format!("{KEY_ROOT}/{domain}/**/@out/*/{ty}");
         let Ok(replies) = session.liveliness().get(&key).wait() else {
             continue;
         };
@@ -689,7 +746,11 @@ fn info(args: &InfoArgs) -> Result<()> {
             let count = stats.channel_message_counts.get(id).copied().unwrap_or(0);
             let m = &ch.metadata;
             Row {
-                source: m.get("reiny.source").cloned().unwrap_or_default(),
+                source: format!(
+                    "{}:{}",
+                    m.get("reiny.source").map_or("", String::as_str),
+                    m.get("reiny.port").map_or("", String::as_str)
+                ),
                 ty: m
                     .get("reiny.type")
                     .cloned()
@@ -812,9 +873,117 @@ fn civil(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
 mod tests {
     use super::*;
 
+    fn playback_fixture() -> (PlayArgs, reiny::bindings::ModuleBindings, mcap::Summary) {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Command {
+            #[command(flatten)]
+            args: PlayArgs,
+        }
+        let args = Command::parse_from(["play", "recording.mcap"]).args;
+        let bindings = serde_yaml::from_str(
+            "version: 3\nnamespace: replay\nendpoint_namespace: replay\ninputs: {}\noutputs:\n  left:\n    contract: {type: e2e.Probe}\n  right:\n    contract: {type: e2e.Probe}\n",
+        ).unwrap();
+        let set = crate::codec::tests::probe_set();
+        let fingerprint = schema_fingerprint(&set, "e2e.Probe").unwrap();
+        let keys = [
+            "reiny/v3/lab/ctrl/@out/left/e2e.Probe",
+            "reiny/v3/lab/ctrl/@out/right/e2e.Probe",
+        ];
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        {
+            let mut state = RecordChannels {
+                writer: mcap::Writer::new(&mut bytes).unwrap(),
+                channels: BTreeMap::new(),
+                schemas: keys
+                    .iter()
+                    .map(|key| ((*key).into(), ("e2e.Probe".into(), set.clone())))
+                    .collect(),
+                fingerprints: keys
+                    .iter()
+                    .map(|key| ((*key).into(), fingerprint))
+                    .collect(),
+            };
+            for key in keys {
+                write_sample(
+                    &mut state,
+                    key,
+                    &[],
+                    Some(fingerprint),
+                    1,
+                    1,
+                    false,
+                    &Filter::new(&[], &[], &[]),
+                )
+                .unwrap();
+            }
+            state.writer.finish().unwrap();
+        }
+        let summary = mcap::Summary::read(bytes.get_ref()).unwrap().unwrap();
+        (args, bindings, summary)
+    }
+
+    #[test]
+    fn replay_maps_exact_recorded_endpoints_without_type_inference() {
+        let (mut args, bindings, summary) = playback_fixture();
+        assert!(playback_plan(&args, &bindings, "replay", &summary).is_err());
+        args.mappings = vec![
+            "reiny/v3/lab/ctrl/@out/left/e2e.Probe=right".into(),
+            "reiny/v3/lab/ctrl/@out/right/e2e.Probe=left".into(),
+        ];
+        let plan = playback_plan(&args, &bindings, "replay", &summary).unwrap();
+        for (id, channel) in &summary.channels {
+            let expected = if channel.topic.contains("/left/") {
+                "right"
+            } else {
+                "left"
+            };
+            assert_eq!(plan[id].name, expected);
+            assert_eq!(
+                plan[id].key,
+                format!("reiny/v3/replay/replay/@out/{expected}/e2e.Probe")
+            );
+            assert_eq!(channel.metadata["reiny.key"], channel.topic);
+            assert_eq!(
+                channel.metadata["reiny.port"],
+                if expected == "right" { "left" } else { "right" }
+            );
+        }
+    }
+
+    #[test]
+    fn replay_rejects_duplicate_ambiguous_and_incompatible_mappings() {
+        let (mut args, mut bindings, mut summary) = playback_fixture();
+        let first = "reiny/v3/lab/ctrl/@out/left/e2e.Probe=left";
+        let second = "reiny/v3/lab/ctrl/@out/right/e2e.Probe=right";
+        for mappings in [
+            vec![first],
+            vec![first, first, second],
+            vec![first, "reiny/v3/lab/ctrl/@out/right/e2e.Probe=left"],
+            vec![first, "reiny/v3/lab/ctrl/@out/unknown/e2e.Probe=right"],
+            vec![first, "reiny/v3/lab/ctrl/@out/right/e2e.Probe=unknown"],
+        ] {
+            args.mappings = mappings.into_iter().map(str::to_string).collect();
+            assert!(playback_plan(&args, &bindings, "replay", &summary).is_err());
+        }
+        args.mappings = vec![first.into(), second.into()];
+        bindings.outputs.get_mut("left").unwrap().contract.type_name = "other.Probe".into();
+        assert!(playback_plan(&args, &bindings, "replay", &summary).is_err());
+        bindings.outputs.get_mut("left").unwrap().contract.type_name = "e2e.Probe".into();
+        let duplicate = Arc::clone(summary.channels.values().next().unwrap());
+        summary.channels.insert(99, duplicate);
+        assert!(playback_plan(&args, &bindings, "replay", &summary).is_err());
+        summary.channels.remove(&99);
+        let channel = Arc::make_mut(summary.channels.values_mut().next().unwrap());
+        channel
+            .metadata
+            .insert("reiny.schema".into(), "0000000000000000".into());
+        assert!(playback_plan(&args, &bindings, "replay", &summary).is_err());
+    }
+
     #[test]
     fn live_samples_and_snapshots_are_not_written_without_matching_schema() {
-        let key = "reiny/lab/ctrl/Probe";
+        let key = "reiny/v3/lab/ctrl/@out/probe/e2e.Probe";
         let set = crate::codec::tests::probe_set();
         let expected = schema_fingerprint(&set, "e2e.Probe").unwrap();
         let mut state = RecordChannels {
@@ -843,6 +1012,7 @@ mod tests {
         let mk = |src, ty| KeyParts {
             domain: "d",
             source: src,
+            port: "out",
             ty,
         };
         assert!(f.accepts(&mk("ctrl", "A")));

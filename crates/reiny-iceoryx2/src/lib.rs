@@ -5,8 +5,8 @@
 //!
 //! | reiny | iceoryx2 |
 //! | --- | --- |
-//! | publish to `reiny/<d>/<id>/<T>` | the pub-sub service `reiny/<d>/<T>` (payload `[u8]` + [`Meta`]); the source is in the header |
-//! | subscribe to `reiny/<d>/*/<T>` | one subscriber on that same service; `source` is a **filter** applied to the header |
+//! | publish to `reiny/v3/<d>/<namespace>/@out/<port>/<T>` | the pub-sub service `reiny/<d>/<T>` (payload `[u8]` + [`Meta`]); the complete endpoint is in the header |
+//! | subscribe to an exact output endpoint | one subscriber on that same service; namespace and port are filters applied to the header |
 //! | respond / query | the request-response service `reiny/<d>/<T>/q`. The query's key (a pattern) rides in the request header, and a server that does not match drops the request (= finalizes it) |
 //! | `declare_alive(key)` | `open_or_create` the pub-sub service `reiny-alive/<key>` and **hold** it. Existing = alive |
 //! | `alive` / `watch_alive` | read `Service::list`. `watch` has the engine thread diffing that list every 200 ms (there is no push) |
@@ -39,7 +39,7 @@ use reiny::engine::{
     BoxFuture, Callback, Caps, Engine, Guard, Key, Presence, QueryCallback, QueryParams,
     RawPublisher, RawQuery, RawReplies, ReplyResult, Sample, now_unix_ns,
 };
-use reiny::{Qos, Reliability, Result};
+use reiny::{CongestionControl, Qos, Result};
 
 /// iceoryx2's service flavour. It makes ports `Send + Sync` (at the cost of one internal mutex).
 type S = ipc_threadsafe::Service;
@@ -416,6 +416,14 @@ impl Drop for Iceoryx2 {
     }
 }
 
+fn iceoryx_congestion(congestion: CongestionControl) -> Option<BackpressureStrategy> {
+    match congestion {
+        CongestionControl::BackendDefault => None,
+        CongestionControl::Drop => Some(BackpressureStrategy::DiscardData),
+        CongestionControl::Block => Some(BackpressureStrategy::RetryUntilDelivered),
+    }
+}
+
 impl Engine for Iceoryx2 {
     fn caps(&self) -> Caps {
         Caps::ALL
@@ -425,17 +433,17 @@ impl Engine for Iceoryx2 {
         // Fail at declaration, not on the first put, if the complete namespace cannot fit.
         Meta::new(key, None, 0)?;
         let ty = type_of(key)?;
-        let publisher = self
-            .pubsub(&key.domain, ty)?
+        let factory = self.pubsub(&key.domain, ty)?;
+        let mut publisher = factory
             .publisher_builder()
             .initial_max_slice_len(INITIAL_SLICE)
-            .allocation_strategy(AllocationStrategy::PowerOfTwo)
-            .backpressure_strategy(match qos.reliability {
-                Reliability::Reliable => BackpressureStrategy::RetryUntilDelivered,
-                Reliability::BestEffort => BackpressureStrategy::DiscardData,
-            })
-            .create()
-            .map_err(err)?;
+            .allocation_strategy(AllocationStrategy::PowerOfTwo);
+        // The shared service disables safe overflow. These are port-local policies;
+        // BackendDefault preserves the strategy configured on the node.
+        if let Some(strategy) = iceoryx_congestion(qos.congestion_control) {
+            publisher = publisher.backpressure_strategy(strategy);
+        }
+        let publisher = publisher.create().map_err(err)?;
         let notifier = self
             .event(&key.domain, ty, "ev")?
             .notifier_builder()
@@ -864,14 +872,14 @@ impl RawReplies for Iox2Replies {
                 match self.pending.receive() {
                     Ok(Some(response)) => {
                         let meta = *response.user_header();
+                        let Some(key) = meta.key() else { continue };
+                        if !self.pattern.matches(&key) {
+                            continue;
+                        }
                         let payload = response.payload().to_vec();
                         return Some(if meta.flags & FLAG_ERROR != 0 {
                             Err(payload)
                         } else {
-                            let Some(key) = meta.key() else { continue };
-                            if !self.pattern.matches(&key) {
-                                continue;
-                            }
                             Ok(Sample {
                                 key,
                                 payload,
@@ -906,8 +914,21 @@ mod tests {
     use super::*;
     use reiny::engine::SERVICE_CHUNK;
 
+    #[test]
+    fn congestion_maps_explicit_policies_and_preserves_node_default() {
+        assert_eq!(iceoryx_congestion(CongestionControl::BackendDefault), None);
+        assert_eq!(
+            iceoryx_congestion(CongestionControl::Drop),
+            Some(BackpressureStrategy::DiscardData)
+        );
+        assert_eq!(
+            iceoryx_congestion(CongestionControl::Block),
+            Some(BackpressureStrategy::RetryUntilDelivered)
+        );
+    }
+
     fn key() -> Key {
-        Key::topic("lab", Some("ctrl"), "RobotState")
+        Key::output("lab", "ctrl", "state", "RobotState")
     }
 
     /// iceoryx2 carries no key of its own — the whole address rides in the fixed-size header, so what
@@ -916,17 +937,34 @@ mod tests {
     fn meta_round_trips_every_kind_of_key() {
         for original in [
             key(),
-            Key::topic("lab", Some("deployment/robot/ctrl"), "RobotState"),
-            Key::topic("lab", None, "RobotState"),
+            Key::output("lab", "deployment/robot/ctrl", "state", "RobotState"),
+            Key::all("lab"),
             Key::launch("lab", Some("ctrl")),
-            Key::topic("lab", Some("deployment/robot/ctrl"), "@ready"),
-            Key::topic("lab", Some("deployment/robot/ctrl"), "@stop"),
+            Key::module("lab", Some("deployment/robot/ctrl"), "@ready"),
+            Key::module("lab", Some("deployment/robot/ctrl"), "@stop"),
             key().with_chunk(SERVICE_CHUNK),
             key().with_chunk("@schema/hs.RobotState"),
         ] {
             let meta = Meta::new(&original, None, 0).expect("it fits");
             assert_eq!(meta.key(), Some(original.clone()), "{original}");
         }
+    }
+
+    #[test]
+    fn same_type_headers_preserve_exact_endpoint_targets() {
+        let first = Key::output("lab", "ctrl", "first", "Probe");
+        let second = Key::output("lab", "ctrl", "second", "Probe");
+        assert_eq!(type_of(&first).unwrap(), type_of(&second).unwrap());
+        for flags in [0, FLAG_PAYLOAD, FLAG_ERROR] {
+            for target in [&first, &second] {
+                let restored = Meta::new(target, None, flags).unwrap().key().unwrap();
+                assert!(target.matches(&restored));
+                let other = if target == &first { &second } else { &first };
+                assert!(!other.matches(&restored));
+                assert!(!restored.matches(other));
+            }
+        }
+        assert!(Key::parse("reiny/lab/ctrl/Probe").is_none());
     }
 
     /// The fingerprint travels in the header too. An absent attachment must come back as `None` rather
@@ -952,11 +990,11 @@ mod tests {
     #[test]
     fn oversized_key_or_attachment_is_rejected() {
         let long_type = "T".repeat(KEY_MAX);
-        let too_long = Key::topic("lab", Some("ctrl"), &long_type);
+        let too_long = Key::output("lab", "ctrl", "state", &long_type);
         let err = Meta::new(&too_long, None, 0).expect_err("the key does not fit");
         assert!(err.to_string().contains("longer than"), "{err}");
         let source = format!("deployment/{}", "x".repeat(KEY_MAX));
-        assert!(Meta::new(&Key::topic("lab", Some(&source), "T"), None, 0).is_err());
+        assert!(Meta::new(&Key::output("lab", &source, "state", "T"), None, 0).is_err());
 
         let big = vec![0u8; ATTACHMENT_MAX + 1];
         let err = Meta::new(&key(), Some(&big), 0).expect_err("the attachment does not fit");
@@ -1006,8 +1044,8 @@ mod tests {
         for original in [
             Key::launch("lab", Some("ctrl")),
             Key::launch("lab", Some("deployment/_at_/_us_/ctrl")),
-            Key::topic("lab", Some("deployment/_at_/ctrl"), "@ready"),
-            Key::topic("lab", Some("deployment/_us_/ctrl"), "@stop"),
+            Key::module("lab", Some("deployment/_at_/ctrl"), "@ready"),
+            Key::module("lab", Some("deployment/_us_/ctrl"), "@stop"),
             key(),
             key().with_chunk(SERVICE_CHUNK),
         ] {

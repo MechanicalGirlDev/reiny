@@ -139,8 +139,14 @@ and outputs determine what can be recorded or replayed.
 ```sh
 reiny bag record --module-bindings "$BINDINGS" --type RobotState --out walk.mcap
 reiny bag info walk.mcap
-reiny bag play walk.mcap --module-bindings "$BINDINGS" --rate 0.5 --loop
+reiny bag play walk.mcap --module-bindings "$BINDINGS" \
+  --map 'reiny/v3/lab/robot/@out/state/RobotState=state' --rate 0.5 --loop
 ```
+
+Repeat `--map recorded-key=output` for every selected recorded channel and
+declared replay output. The exact recorded namespace and port are retained in
+MCAP metadata; replay never chooses an output by protobuf type. Missing,
+duplicate, ambiguous, and schema-incompatible mappings are rejected.
 
 Design and the split of what reiny records vs. what the `mcap` CLI is left to do:
 [`docs/design/bag.md`](docs/design/bag.md).

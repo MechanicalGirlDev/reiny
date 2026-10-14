@@ -54,6 +54,8 @@ pub struct Message {
     pub payload: Vec<u8>,
     /// Exact sending module namespace.
     pub source: String,
+    /// Exact sending output port, independent from the protobuf type name.
+    pub source_port: String,
     /// Mandatory declared fingerprint.
     pub schema: Option<u64>,
     /// Optional Unix nanosecond timestamp.
@@ -65,6 +67,7 @@ impl From<RawEnvelope> for Message {
         Self {
             payload: sample.payload,
             source: sample.source,
+            source_port: sample.source_port,
             schema: sample.schema,
             timestamp: sample.timestamp,
         }

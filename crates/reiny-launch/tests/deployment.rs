@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use reiny_core::bindings::{
-    EndpointContract, InputBinding, MODULE_BINDINGS_VERSION, MODULE_REPORT_VERSION, ModuleBindings,
-    ModuleReport, OutputBinding, PortKind, PortReport, QosProfile, ResponseReport,
+    EndpointAddress, EndpointContract, InputBinding, MODULE_BINDINGS_VERSION,
+    MODULE_REPORT_VERSION, ModuleBindings, ModuleReport, OutputBinding, PortEndpoint, PortKind,
+    PortReport, QosProfile, ResponseReport,
 };
 use reiny_launch::{
     DeploymentClient, DeploymentPhase, DeploymentStatus, FailurePolicy, ModuleObserver,
@@ -308,7 +309,9 @@ impl Harness {
             };
             let report = ModuleReport {
                 version: MODULE_REPORT_VERSION,
+                fingerprint_version: reiny_core::SCHEMA_FINGERPRINT_VERSION,
                 namespace: namespace.clone(),
+                endpoint_namespace: namespace.clone(),
                 inputs: BTreeMap::new(),
                 outputs: BTreeMap::new(),
             };
@@ -786,12 +789,21 @@ fn connected_fixture(
         response: rpc.then(|| "test.Pong".into()),
         ..EndpointContract::default()
     };
-    let sources = prepared.nodes[..publishers]
+    let sources: Vec<_> = prepared.nodes[..publishers]
         .iter()
-        .map(|node| node.namespace.clone())
+        .map(|node| EndpointAddress {
+            namespace: node.namespace.clone(),
+            port: "out".into(),
+        })
         .collect();
     for (index, node) in prepared.nodes.iter_mut().enumerate() {
-        let port = PortReport {
+        let mut port = PortReport {
+            endpoint: PortEndpoint::Output {
+                address: EndpointAddress {
+                    namespace: node.namespace.clone(),
+                    port: "out".into(),
+                },
+            },
             type_name: "test.Ping".into(),
             schema: 42,
             contract: contract.clone(),
@@ -802,11 +814,16 @@ fn connected_fixture(
         };
         let mut report = ModuleReport {
             version: MODULE_REPORT_VERSION,
+            fingerprint_version: reiny_core::SCHEMA_FINGERPRINT_VERSION,
             namespace: node.namespace.clone(),
+            endpoint_namespace: node.bindings.endpoint_namespace.clone(),
             inputs: BTreeMap::new(),
             outputs: BTreeMap::new(),
         };
         if index == publishers {
+            port.endpoint = PortEndpoint::Input {
+                sources: sources.clone(),
+            };
             node.bindings.inputs.insert(
                 "in".into(),
                 InputBinding {
@@ -828,6 +845,58 @@ fn connected_fixture(
         node.run.args[5] = serde_json::to_string(&report)?;
     }
     Ok(prepared)
+}
+
+#[test]
+fn readiness_selects_named_output_not_every_output_of_the_same_type() -> Result<()> {
+    let mut harness = Harness::new()?;
+    let mut prepared = connected_fixture(&harness, 1, false)?;
+    let publisher = &mut prepared.nodes[0];
+    let mut report: ModuleReport = serde_json::from_str(&publisher.run.args[5])?;
+    publisher
+        .bindings
+        .outputs
+        .insert("other".into(), publisher.bindings.outputs["out"].clone());
+    let mut other = report.outputs["out"].clone();
+    other.schema = 99;
+    other.endpoint = PortEndpoint::Output {
+        address: EndpointAddress {
+            namespace: publisher.namespace.clone(),
+            port: "other".into(),
+        },
+    };
+    report.outputs.insert("other".into(), other);
+    publisher.run.args[5] = serde_json::to_string(&report)?;
+    let client = harness.start(prepared)?;
+    assert_eq!(client.wait_ready(DEADLINE)?.phase, DeploymentPhase::Ready);
+    Ok(())
+}
+
+#[test]
+fn readiness_rejects_missing_named_output_even_when_its_type_exists() -> Result<()> {
+    let mut harness = Harness::new()?;
+    let mut prepared = connected_fixture(&harness, 1, false)?;
+    let receiver = &mut prepared.nodes[1];
+    receiver
+        .bindings
+        .inputs
+        .get_mut("in")
+        .context("input")?
+        .sources[0]
+        .port = "missing".into();
+    let mut report: ModuleReport = serde_json::from_str(&receiver.run.args[5])?;
+    report
+        .inputs
+        .get_mut("in")
+        .context("input report")?
+        .endpoint = PortEndpoint::Input {
+        sources: receiver.bindings.inputs["in"].sources.clone(),
+    };
+    receiver.run.args[5] = serde_json::to_string(&report)?;
+    let client = harness.start(prepared)?;
+    assert!(client.wait_ready(DEADLINE).is_err());
+    assert_eq!(client.status()?.phase, DeploymentPhase::Failed);
+    Ok(())
 }
 
 #[test]
@@ -986,15 +1055,18 @@ fn stop_notification_observes_stopping_before_owned_tree_is_reaped() -> Result<(
 }
 
 #[test]
-fn v1_readiness_report_is_rejected() -> Result<()> {
-    let mut harness = Harness::new()?;
-    let mut prepared = harness.prepared(1)?;
-    let mut report: ModuleReport = serde_json::from_str(&prepared.nodes[0].run.args[5])?;
-    report.version = 1;
-    prepared.nodes[0].run.args[5] = serde_json::to_string(&report)?;
-    let client = harness.start(prepared)?;
-    assert!(client.wait_ready(DEADLINE).is_err());
-    assert_eq!(client.status()?.phase, DeploymentPhase::Failed);
+fn legacy_report_versions_and_fingerprint_versions_are_rejected() -> Result<()> {
+    for (version, fingerprint_version) in [(1, 2), (2, 2), (3, 1)] {
+        let mut harness = Harness::new()?;
+        let mut prepared = harness.prepared(1)?;
+        let mut report: ModuleReport = serde_json::from_str(&prepared.nodes[0].run.args[5])?;
+        report.version = version;
+        report.fingerprint_version = fingerprint_version;
+        prepared.nodes[0].run.args[5] = serde_json::to_string(&report)?;
+        let client = harness.start(prepared)?;
+        assert!(client.wait_ready(DEADLINE).is_err());
+        assert_eq!(client.status()?.phase, DeploymentPhase::Failed);
+    }
     Ok(())
 }
 
@@ -1080,11 +1152,26 @@ fn incompatible_compiled_schemas_never_become_ready() -> Result<()> {
                 type_name: "test.Ping".into(),
                 ..EndpointContract::default()
             },
-            sources: vec![source],
+            sources: vec![EndpointAddress {
+                namespace: source,
+                port: "out".into(),
+            }],
         },
     );
     for (index, node) in prepared.nodes.iter_mut().enumerate() {
         let port = PortReport {
+            endpoint: if index == 1 {
+                PortEndpoint::Input {
+                    sources: node.bindings.inputs["in"].sources.clone(),
+                }
+            } else {
+                PortEndpoint::Output {
+                    address: EndpointAddress {
+                        namespace: node.namespace.clone(),
+                        port: "out".into(),
+                    },
+                }
+            },
             type_name: "test.Ping".into(),
             schema: u64::try_from(index)? + 1,
             contract: EndpointContract {
@@ -1095,7 +1182,9 @@ fn incompatible_compiled_schemas_never_become_ready() -> Result<()> {
         };
         let report = ModuleReport {
             version: MODULE_REPORT_VERSION,
+            fingerprint_version: reiny_core::SCHEMA_FINGERPRINT_VERSION,
             namespace: node.namespace.clone(),
+            endpoint_namespace: node.bindings.endpoint_namespace.clone(),
             inputs: if index == 1 {
                 BTreeMap::from([("in".into(), port.clone())])
             } else {
@@ -1143,7 +1232,9 @@ fn mismatched_report_identity_is_terminal() -> Result<()> {
     let mut prepared = harness.prepared(1)?;
     let report = ModuleReport {
         version: MODULE_REPORT_VERSION,
+        fingerprint_version: reiny_core::SCHEMA_FINGERPRINT_VERSION,
         namespace: "another/deployment".into(),
+        endpoint_namespace: "another/deployment".into(),
         inputs: BTreeMap::new(),
         outputs: BTreeMap::new(),
     };
@@ -1171,7 +1262,10 @@ fn cyclic_connections_start_without_a_readiness_dependency_order() -> Result<()>
                     type_name: "test.Ping".into(),
                     ..EndpointContract::default()
                 },
-                sources: vec![source],
+                sources: vec![EndpointAddress {
+                    namespace: source,
+                    port: "out".into(),
+                }],
             },
         );
         node.bindings.outputs.insert(
@@ -1184,6 +1278,12 @@ fn cyclic_connections_start_without_a_readiness_dependency_order() -> Result<()>
             },
         );
         let port = PortReport {
+            endpoint: PortEndpoint::Output {
+                address: EndpointAddress {
+                    namespace: node.namespace.clone(),
+                    port: "out".into(),
+                },
+            },
             type_name: "test.Ping".into(),
             schema: 42,
             contract: EndpointContract {
@@ -1192,10 +1292,16 @@ fn cyclic_connections_start_without_a_readiness_dependency_order() -> Result<()>
             },
             response: None,
         };
+        let mut input_port = port.clone();
+        input_port.endpoint = PortEndpoint::Input {
+            sources: node.bindings.inputs["in"].sources.clone(),
+        };
         let report = ModuleReport {
             version: MODULE_REPORT_VERSION,
+            fingerprint_version: reiny_core::SCHEMA_FINGERPRINT_VERSION,
             namespace: node.namespace.clone(),
-            inputs: BTreeMap::from([("in".into(), port.clone())]),
+            endpoint_namespace: node.bindings.endpoint_namespace.clone(),
+            inputs: BTreeMap::from([("in".into(), input_port)]),
             outputs: BTreeMap::from([("out".into(), port)]),
         };
         node.run.args[5] = serde_json::to_string(&report)?;
@@ -1206,6 +1312,7 @@ fn cyclic_connections_start_without_a_readiness_dependency_order() -> Result<()>
     let status = client.wait_ready(DEADLINE)?;
     assert_eq!(status.phase, DeploymentPhase::Ready);
     assert_eq!(status.modules.len(), 2);
+    assert_eq!(status.version, 2);
     assert!(
         status
             .modules

@@ -1,0 +1,20 @@
+version: 3
+run:
+  provider: process
+  bin: named-ports
+build:
+  type: cargo
+  manifest: ../../Cargo.toml
+  package: named-ports
+  profile: dev
+  locked: true
+in:
+  left: {type: named.Value}
+  right: {type: named.Value}
+  call_first: {kind: rpc, type: named.Request, response: named.Value}
+  call_second: {kind: rpc, type: named.Request, response: named.Value}
+out:
+  first: {type: named.Value}
+  second: {type: named.Value}
+  rpc_first: {kind: rpc, type: named.Request, response: named.Value}
+  rpc_second: {kind: rpc, type: named.Request, response: named.Value}

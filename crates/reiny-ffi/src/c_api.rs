@@ -241,6 +241,11 @@ export!(reiny_message_source(handle: u64, out: *mut u64) {
     *out = insert(Object::Buffer(Arc::new(message(handle)?.source.as_bytes().to_vec())))?;
     Ok(())
 });
+export!(reiny_message_source_port(handle: u64, out: *mut u64) {
+    output(out)?;
+    *out = insert(Object::Buffer(Arc::new(message(handle)?.source_port.as_bytes().to_vec())))?;
+    Ok(())
+});
 export!(reiny_message_schema(handle: u64, has: *mut u8, value: *mut u64) {
     output(has)?; output(value)?;
     let schema = message(handle)?.schema;
@@ -321,12 +326,14 @@ mod tests {
             let message = insert(Object::Message(Arc::new(Message {
                 payload: vec![0, 255, 0],
                 source: "sender".into(),
+                source_port: "out".into(),
                 schema: Some(42),
                 timestamp: None,
             })))
             .unwrap();
             let mut payload = 0;
             let mut source = 0;
+            let mut source_port = 0;
             let mut has = 99;
             let mut value = 99;
             assert_eq!(
@@ -341,11 +348,14 @@ mod tests {
             assert_eq!((has, value), (0, 0));
             assert_eq!(reiny_message_payload(message, &raw mut payload), 0);
             assert_eq!(reiny_message_source(message, &raw mut source), 0);
+            assert_eq!(reiny_message_source_port(message, &raw mut source_port), 0);
             assert_eq!(reiny_release(message), 0);
             assert_eq!(*buffer(payload).unwrap(), [0, 255, 0]);
             assert_eq!(*buffer(source).unwrap(), b"sender");
+            assert_eq!(*buffer(source_port).unwrap(), b"out");
             assert_eq!(reiny_release(payload), 0);
             assert_eq!(reiny_release(source), 0);
+            assert_eq!(reiny_release(source_port), 0);
         }
     }
 

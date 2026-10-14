@@ -26,6 +26,7 @@ try {
   assert.ok(message);
   assert.deepEqual(message.payload, payload);
   assert.equal(message.source, "sender");
+  assert.equal(message.sourcePort, "out");
   assert.equal(message.schema, schema);
   assert.ok(message.timestamp === undefined || typeof message.timestamp === "bigint");
   assert.deepEqual(filtered.receive(1000)?.payload, payload);

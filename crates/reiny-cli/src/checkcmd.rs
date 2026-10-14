@@ -91,7 +91,7 @@ pub(crate) fn check(path: Option<&Path>) -> Result<()> {
             .as_deref()
             .map_or_else(String::new, |o| format!("  ({o})"));
         println!(
-            "  {:<w_alias$}  {:<w_msg$}  ->  reiny/<domain>/<id>/{:<w_topic$}  [{:<w_mod$}]  {}{owner}",
+            "  {:<w_alias$}  {:<w_msg$}  ->  reiny/v3/<domain>/<namespace>/@out/<port>/{:<w_topic$}  [{:<w_mod$}]  {}{owner}",
             t.alias,
             t.message,
             t.type_name,

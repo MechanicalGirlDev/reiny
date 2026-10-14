@@ -1,0 +1,18 @@
+syntax = "proto3";
+package qa;
+
+message Envelope { Child child = 1; }
+message Child {
+  uint32 value = 1;
+  Kind kind = 2;
+}
+enum Kind {
+  ZERO = 0;
+  FIRST = 1;
+}
+message Node {
+  Node next = 1;
+  map<string, Child> children = 2;
+}
+message Left { Right right = 1; }
+message Right { Left left = 1; }

@@ -48,7 +48,7 @@ $defs:
       type: { type: string }
       kind: { enum: [stream, rpc], default: stream }
       response: { type: string, description: "Required response type for RPC definitions." }
-      qos: { enum: [reliable, sensor], default: reliable }
+      qos: { enum: [default, command, sensor], default: default }
       retention: { enum: [volatile, last], default: volatile }
       replay: { enum: [live, last], default: live }
       buffer:
@@ -78,7 +78,7 @@ $defs:
       from: { $ref: "#/$defs/sources" }
       kind: { const: stream }
       response: { type: "null" }
-      qos: { const: reliable }
+      qos: { const: default }
       retention: { const: volatile }
       replay: { const: live }
       buffer: { const: fifo }

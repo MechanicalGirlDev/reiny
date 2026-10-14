@@ -11,7 +11,7 @@
 int main(int argc, char **argv) {
     REQUIRE(argc == 3); /* Absolute sender and receiver fixture paths. */
     reiny_handle bus = 0, a = 0, b = 0, pub = 0, sub = 0, msg = 0;
-    reiny_handle payload = 0, source = 0;
+    reiny_handle payload = 0, source = 0, source_port = 0;
     const uint8_t binary[] = {0, 255, 1, 0, 128};
     const uint8_t *data = NULL;
     size_t size = 0;
@@ -36,6 +36,7 @@ int main(int argc, char **argv) {
     REQUIRE(has == 1 && schema == 42);
     OK(reiny_message_payload(msg, &payload));
     OK(reiny_message_source(msg, &source));
+    OK(reiny_message_source_port(msg, &source_port));
     OK(reiny_release(msg));
     OK(reiny_buffer_len(payload, &size));
     OK(reiny_buffer_data(payload, &data));
@@ -43,6 +44,9 @@ int main(int argc, char **argv) {
     OK(reiny_buffer_len(source, &size));
     OK(reiny_buffer_data(source, &data));
     REQUIRE(size == 6 && memcmp(data, "sender", size) == 0);
+    OK(reiny_buffer_len(source_port, &size));
+    OK(reiny_buffer_data(source_port, &data));
+    REQUIRE(size == 3 && memcmp(data, "out", size) == 0);
     OK(reiny_release(payload));
     REQUIRE(reiny_release(payload) == -1);
     REQUIRE(reiny_buffer_len(payload, &size) == -1);
@@ -58,6 +62,7 @@ int main(int argc, char **argv) {
     OK(reiny_subscription_receive(sub, 1, &msg));
     REQUIRE(msg == 0);
     OK(reiny_release(source));
+    OK(reiny_release(source_port));
     OK(reiny_release(pub));
     OK(reiny_release(sub));
     OK(reiny_session_shutdown(a));

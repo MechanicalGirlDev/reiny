@@ -1,6 +1,6 @@
 //! `reiny bridge serial|udp|iceoryx2` — stand up one raw bridge between zenoh and another engine.
 //!
-//! The prepared contract pairs named inputs/uses and outputs/provides. Native descriptors and
+//! The prepared contract pairs named inputs and outputs. Native descriptors and
 //! negotiated Link metadata determine fingerprints before the SDK opens forwarding ports and
 //! announces readiness. Forwarded data uses the declared bridge endpoint namespace.
 
@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand};
 use reiny::ModuleContext;
-use reiny::bindings::{EndpointContract, ModuleBindings, PortKind};
+use reiny::bindings::{EndpointAddress, EndpointContract, ModuleBindings, PortKind};
 use reiny::engine::Engine;
 use reiny_link::transport::Udp;
 use reiny_link::{Host, LinkEngine, PeerType};
@@ -129,23 +129,23 @@ fn paired(a: &EndpointContract, b: &EndpointContract) -> bool {
 fn validate_bridge_ports(bindings: &ModuleBindings) -> Result<()> {
     ensure!(
         !bindings.inputs.is_empty() && !bindings.outputs.is_empty(),
-        "bridge requires paired declared inputs/uses and outputs/provides"
+        "bridge requires paired declared inputs and outputs"
     );
-    for input in bindings.inputs.values() {
+    for (name, input) in &bindings.inputs {
         ensure!(
             bindings
                 .outputs
-                .values()
-                .any(|output| paired(&input.contract, &output.contract)),
+                .get(name)
+                .is_some_and(|output| paired(&input.contract, &output.contract)),
             "bridge input has no matching declared output"
         );
     }
-    for output in bindings.outputs.values() {
+    for (name, output) in &bindings.outputs {
         ensure!(
             bindings
                 .inputs
-                .values()
-                .any(|input| paired(&input.contract, &output.contract)),
+                .get(name)
+                .is_some_and(|input| paired(&input.contract, &output.contract)),
             "bridge output has no matching declared input"
         );
     }
@@ -178,48 +178,23 @@ async fn bridge_schemas(
             descriptors.extend(other.schemas(topic_type(contract)).await?);
         }
         for source in &input.sources {
-            let from_link = peer.filter(|(id, _)| id == source);
+            let from_link = peer.filter(|(id, _)| id == &source.namespace);
             if let Some((_, types)) = from_link {
-                let ty = types
-                    .iter()
-                    .find(|ty| ty.name == topic_type(contract))
-                    .context("link peer Hello lacks a declared input type")?;
-                ensure!(
-                    ty.hash == reiny_link::wire::type_hash(&ty.name),
-                    "link peer type hash differs from its declared name"
-                );
-                let role = if contract.kind == PortKind::Rpc {
-                    reiny_link::wire::flags::SERVE
-                } else {
-                    reiny_link::wire::flags::PUB
-                };
-                ensure!(
-                    ty.flags & role != 0,
-                    "link peer does not implement the declared input direction"
-                );
-                merge_schema(&mut schemas, &contract.type_name, ty.schema)?;
-                if let Some(response) = &contract.response {
-                    let response_type = response.as_str();
-                    let ty = types
-                        .iter()
-                        .find(|ty| ty.name == response_type)
-                        .context("link peer Hello lacks the declared RPC response type")?;
-                    ensure!(
-                        ty.hash == reiny_link::wire::type_hash(&ty.name),
-                        "link peer response hash differs from its declared name"
-                    );
-                    merge_schema(&mut schemas, response, ty.schema)?;
-                }
+                merge_peer_schema(&mut schemas, contract, source, types)?;
             } else {
                 let matches: Vec<_> = descriptors
                     .iter()
                     .filter(|descriptor| {
-                        descriptor.source == *source && descriptor.message == contract.type_name
+                        descriptor.source == source.namespace
+                            && descriptor.source_port == source.port
+                            && descriptor.message == contract.type_name
                     })
                     .collect();
                 ensure!(
                     !matches.is_empty(),
-                    "no descriptor from declared source {source} for {}",
+                    "no descriptor from declared source {}:{} for {}",
+                    source.namespace,
+                    source.port,
                     contract.type_name
                 );
                 for descriptor in matches {
@@ -238,7 +213,11 @@ async fn bridge_schemas(
                 descriptors.extend(other.schemas(response_type).await?);
             }
             for descriptor in descriptors.iter().filter(|descriptor| {
-                descriptor.message == *response && input.sources.contains(&descriptor.source)
+                descriptor.message == *response
+                    && input.sources.iter().any(|source| {
+                        source.namespace == descriptor.source
+                            && source.port == descriptor.source_port
+                    })
             }) {
                 merge_schema(
                     &mut schemas,
@@ -253,7 +232,10 @@ async fn bridge_schemas(
         }
         // A descriptor for a Link-backed type must agree with its negotiated Hello fingerprint.
         for descriptor in descriptors.iter().filter(|descriptor| {
-            descriptor.message == contract.type_name && input.sources.contains(&descriptor.source)
+            descriptor.message == contract.type_name
+                && input.sources.iter().any(|source| {
+                    source.namespace == descriptor.source && source.port == descriptor.source_port
+                })
         }) {
             merge_schema(
                 &mut schemas,
@@ -263,6 +245,41 @@ async fn bridge_schemas(
         }
     }
     Ok(schemas)
+}
+
+fn merge_peer_schema(
+    schemas: &mut BTreeMap<String, u64>,
+    contract: &EndpointContract,
+    source: &EndpointAddress,
+    types: &[PeerType],
+) -> Result<()> {
+    let role = if contract.kind == PortKind::Rpc {
+        reiny_link::wire::flags::SERVE
+    } else {
+        reiny_link::wire::flags::PUB
+    };
+    let ty = types
+        .iter()
+        .find(|ty| ty.port == source.port && ty.flags & role != 0)
+        .context("link peer Hello lacks the declared source output")?;
+    ensure!(
+        ty.name == contract.type_name
+            && ty.hash == reiny_link::wire::endpoint_hash(&source.namespace, &source.port),
+        "link peer endpoint address or type differs from its declared source"
+    );
+    merge_schema(schemas, &contract.type_name, ty.schema)?;
+    if let Some(response) = &contract.response {
+        let (name, schema) = ty
+            .response
+            .as_ref()
+            .context("link peer Hello lacks the declared RPC response contract")?;
+        ensure!(
+            name == response,
+            "link peer response type differs from its declared contract"
+        );
+        merge_schema(schemas, response, *schema)?;
+    }
+    Ok(())
 }
 
 fn link_engine<T: reiny_link::transport::Transport + 'static>(
@@ -281,7 +298,7 @@ mod tests {
 
     fn bindings() -> ModuleBindings {
         serde_yaml::from_str(
-            "version: 2\nnamespace: bridge\nendpoint_namespace: bridge\ninputs:\n  incoming:\n    contract: {type: e2e.Probe}\n    sources: [mcu]\noutputs:\n  outgoing:\n    contract: {type: e2e.Probe}\n",
+            "version: 3\nnamespace: bridge\nendpoint_namespace: bridge\ninputs:\n  state:\n    contract: {type: e2e.Probe}\n    sources: [{namespace: mcu, port: sensor}]\noutputs:\n  state:\n    contract: {type: e2e.Probe}\n",
         ).unwrap()
     }
 
@@ -291,10 +308,19 @@ mod tests {
         validate_bridge_ports(&bindings).unwrap();
         bindings
             .outputs
-            .get_mut("outgoing")
+            .get_mut("state")
             .unwrap()
             .contract
             .type_name = "e2e.Other".into();
+        assert!(validate_bridge_ports(&bindings).is_err());
+        bindings
+            .outputs
+            .get_mut("state")
+            .unwrap()
+            .contract
+            .type_name = "e2e.Probe".into();
+        let output = bindings.outputs.remove("state").unwrap();
+        bindings.outputs.insert("other".into(), output);
         assert!(validate_bridge_ports(&bindings).is_err());
         bindings.outputs.clear();
         assert!(validate_bridge_ports(&bindings).is_err());
@@ -323,25 +349,39 @@ mod tests {
         let mut peer = (
             "mcu".into(),
             vec![PeerType {
-                hash: reiny_link::wire::type_hash("e2e.Probe"),
+                hash: reiny_link::wire::endpoint_hash("mcu", "sensor"),
                 name: "e2e.Probe".into(),
+                port: "sensor".into(),
+                response: None,
+                sources: Vec::new(),
                 flags: reiny_link::wire::flags::PUB,
                 schema: 42,
             }],
         );
+        let mut incoming = peer.1[0].clone();
+        incoming.flags = reiny_link::wire::flags::SUB;
+        peer.1.insert(0, incoming);
         let schemas = bridge_schemas(&zenoh, &other, &bindings, Some(&peer))
             .await
             .unwrap();
         assert_eq!(schemas["e2e.Probe"], 42);
+        peer.1.remove(0);
         peer.1[0].hash ^= 1;
         assert!(
             bridge_schemas(&zenoh, &other, &bindings, Some(&peer))
                 .await
                 .is_err()
         );
-        peer.1[0].hash = reiny_link::wire::type_hash("e2e.Probe");
+        peer.1[0].hash = reiny_link::wire::endpoint_hash("mcu", "sensor");
+        peer.1[0].port = "unwired".into();
+        assert!(
+            bridge_schemas(&zenoh, &other, &bindings, Some(&peer))
+                .await
+                .is_err()
+        );
+        peer.1[0].port = "sensor".into();
         let mut rpc = bindings.clone();
-        let contract = &mut rpc.inputs.get_mut("incoming").unwrap().contract;
+        let contract = &mut rpc.inputs.get_mut("state").unwrap().contract;
         contract.kind = PortKind::Rpc;
         contract.response = Some("e2e.Response".into());
         peer.1[0].flags = reiny_link::wire::flags::SERVE;
@@ -350,28 +390,23 @@ mod tests {
                 .await
                 .is_err()
         );
-        peer.1.push(PeerType {
-            hash: reiny_link::wire::type_hash("e2e.Response"),
-            name: "e2e.Response".into(),
-            flags: 0,
-            schema: 7,
-        });
+        peer.1[0].response = Some(("e2e.Response".into(), 7));
         let schemas = bridge_schemas(&zenoh, &other, &rpc, Some(&peer))
             .await
             .unwrap();
         assert_eq!(schemas["e2e.Probe"], 42);
         assert_eq!(schemas["e2e.Response"], 7);
-        peer.1[1].hash ^= 1;
+        peer.1[0].response = Some(("e2e.Other".into(), 7));
         assert!(
             bridge_schemas(&zenoh, &other, &rpc, Some(&peer))
                 .await
                 .is_err()
         );
-        peer.1[1].hash = reiny_link::wire::type_hash("e2e.Response");
+        peer.1[0].response = Some(("e2e.Response".into(), 7));
         let mut metadata_only = bindings.clone();
         metadata_only
             .inputs
-            .get_mut("incoming")
+            .get_mut("state")
             .unwrap()
             .contract
             .type_name = "e2e.Response".into();

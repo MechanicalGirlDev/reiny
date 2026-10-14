@@ -61,6 +61,11 @@ public:
         check(reiny_message_source(get(), &out));
         return Buffer(out).text();
     }
+    std::string source_port() const {
+        reiny_handle out = 0;
+        check(reiny_message_source_port(get(), &out));
+        return Buffer(out).text();
+    }
     std::optional<uint64_t> schema() const {
         uint8_t has = 0;
         uint64_t value = 0;

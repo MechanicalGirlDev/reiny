@@ -7,8 +7,8 @@
 //! caller's side, and the same `Link` runs on an MCU (embassy / RTIC / interrupts) and on a host.
 //!
 //! The types are the same [`MessageType`] / [`Service`] reiny proper uses (`reiny-core`). Only a 32-bit
-//! hash of `MessageType::TYPE_NAME` rides on the wire ([`wire::type_hash`]); type names and fingerprints are
-//! exchanged once, in the Hello, at connection time.
+//! hash of the namespace and output port rides on the wire ([`wire::endpoint_hash`]); complete
+//! named-port contracts and fingerprints are exchanged in the Hello at connection time.
 //!
 //! ```ignore
 //! // On the MCU (#![no_std], with alloc)
@@ -67,7 +67,9 @@ mod link;
 pub mod wire;
 
 pub use link::{Error, Event, Frame, ID_MAX, Link, LinkConfig, RemoteType, Stats};
-pub use reiny_core::{Descriptor, MessageType, PortDirection, PortType, Service, StaticPort};
+pub use reiny_core::{
+    Descriptor, MessageType, PortDirection, PortType, Service, StaticEndpointAddress, StaticPort,
+};
 
 #[cfg(feature = "engine")]
 mod engine;

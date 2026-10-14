@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "namespace": "receiver",
   "endpoint_namespace": "receiver",
   "inputs": {
@@ -8,8 +8,8 @@
         "type": "Binary"
       },
       "sources": [
-        "sender",
-        "other"
+        { "namespace": "sender", "port": "out" },
+        { "namespace": "other", "port": "out" }
       ]
     },
     "filtered": {
@@ -17,7 +17,7 @@
         "type": "Binary"
       },
       "sources": [
-        "sender"
+        { "namespace": "sender", "port": "out" }
       ]
     }
   },

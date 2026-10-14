@@ -74,6 +74,8 @@ internal static class Native
     internal static extern int MessagePayload(ulong message, out ulong handle);
     [DllImport(Library, EntryPoint = "reiny_message_source", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int MessageSource(ulong message, out ulong handle);
+    [DllImport(Library, EntryPoint = "reiny_message_source_port", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int MessageSourcePort(ulong message, out ulong handle);
     [DllImport(Library, EntryPoint = "reiny_message_schema", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int MessageSchema(ulong message, out byte has, out ulong value);
     [DllImport(Library, EntryPoint = "reiny_message_timestamp", CallingConvention = CallingConvention.Cdecl)]

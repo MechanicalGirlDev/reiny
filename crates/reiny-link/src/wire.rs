@@ -1,12 +1,12 @@
 //! The wire format — one frame = COBS(header + payload + CRC) followed by the `0x00` delimiter.
 //!
 //! ```text
-//! raw    : [kind u8][type_hash u32 LE][seq u8][payload …][crc16 LE]
+//! raw    : [RY][epoch 2][kind u8][endpoint_hash u32 LE][seq u8][payload …][crc16 LE]
 //! on wire: COBS(raw) 0x00
 //! ```
 //!
-//! - **The type travels as a hash** ([`type_hash`] = FNV-1a 32-bit of `MessageType::TYPE_NAME`). The type name
-//!   as a string rides only in [`Kind::Hello`]. type = topic in four bytes.
+//! - **Exact endpoints travel as a hash** ([`endpoint_hash`]). Complete named-port contracts,
+//!   type names, fingerprints, and source pairs travel in [`Kind::Hello`].
 //! - **COBS** allows resynchronization on `0x00` (start listening mid-stream and you are aligned
 //!   again from the next `0x00`). Datagrams (UDP) use the same shape — one receive path is worth
 //!   more than the byte it saves.
@@ -20,8 +20,10 @@
 
 use core::fmt;
 
-/// Header length (kind 1 + hash 4 + seq 1).
-pub const HEADER: usize = 6;
+/// Header length (magic 2 + epoch 1 + kind 1 + hash 4 + seq 1).
+pub const HEADER: usize = 9;
+/// Every frame carries this incompatible protocol epoch.
+pub const EPOCH: u8 = 2;
 /// Trailer length (CRC-16).
 pub const TRAILER: usize = 2;
 /// The length of a raw frame excluding the payload.
@@ -36,9 +38,9 @@ pub enum Kind {
     /// Own id plus the list of types being declared. Both sides send it on link up
     /// (§ `hello_write`).
     Hello = 0,
-    /// One published message. `hash` = the type, `seq` = the running counter.
+    /// One published message. `hash` identifies the sending output.
     Data = 1,
-    /// A service invocation. `hash` = the request type, `seq` = the correlation id.
+    /// A service invocation. `hash` identifies the destination server.
     Request = 2,
     /// The response to a [`Kind::Request`]. `hash` / `seq` match the request's.
     Reply = 3,
@@ -67,7 +69,7 @@ impl Kind {
 pub struct Header {
     /// The kind.
     pub kind: Kind,
-    /// The type hash ([`type_hash`]). Zero for Hello / Ping.
+    /// The endpoint hash ([`endpoint_hash`]). Zero for Hello / Ping.
     pub hash: u32,
     /// Running counter / correlation id.
     pub seq: u8,
@@ -86,6 +88,8 @@ pub enum WireError {
     Cobs,
     /// Unknown kind.
     Kind(u8),
+    /// Unsupported protocol magic or epoch.
+    Epoch,
     /// The Hello payload is not shaped like one.
     Malformed,
 }
@@ -98,6 +102,7 @@ impl fmt::Display for WireError {
             Self::Crc => f.write_str("crc mismatch"),
             Self::Cobs => f.write_str("malformed cobs"),
             Self::Kind(k) => write!(f, "unknown frame kind {k}"),
+            Self::Epoch => f.write_str("unsupported link epoch"),
             Self::Malformed => f.write_str("malformed hello"),
         }
     }
@@ -125,6 +130,20 @@ pub const fn type_hash(name: &str) -> u32 {
     h
 }
 
+/// FNV-1a of the two u32-length-prefixed UTF-8 address components.
+#[must_use]
+pub fn endpoint_hash(namespace: &str, port: &str) -> u32 {
+    let mut hash = 0x811c_9dc5u32;
+    for component in [namespace, port] {
+        // Wire strings are limited to 255 bytes; platform-sized lengths never reach the wire.
+        let length = u32::try_from(component.len()).unwrap_or(u32::MAX);
+        for byte in length.to_le_bytes().iter().chain(component.as_bytes()) {
+            hash = (hash ^ u32::from(*byte)).wrapping_mul(0x0100_0193);
+        }
+    }
+    hash
+}
+
 /// The **upper bound** on the length of a `raw_len`-byte raw frame once COBS-wrapped and
 /// delimited.
 #[must_use]
@@ -139,9 +158,10 @@ pub fn seal(buf: &mut [u8], header: Header, payload_len: usize) -> Result<usize,
     if raw_len > buf.len() {
         return Err(WireError::TooLarge);
     }
-    buf[0] = header.kind as u8;
-    buf[1..5].copy_from_slice(&header.hash.to_le_bytes());
-    buf[5] = header.seq;
+    buf[..3].copy_from_slice(&[b'R', b'Y', EPOCH]);
+    buf[3] = header.kind as u8;
+    buf[4..8].copy_from_slice(&header.hash.to_le_bytes());
+    buf[8] = header.seq;
     let crc = CRC.checksum(&buf[..HEADER + payload_len]);
     buf[HEADER + payload_len..raw_len].copy_from_slice(&crc.to_le_bytes());
     Ok(raw_len)
@@ -158,13 +178,16 @@ pub fn parse(frame: &[u8]) -> Result<(Header, &[u8]), WireError> {
     if CRC.checksum(&frame[..body_len]) != expected {
         return Err(WireError::Crc);
     }
-    let kind = Kind::from_u8(frame[0]).ok_or(WireError::Kind(frame[0]))?;
-    let hash = u32::from_le_bytes([frame[1], frame[2], frame[3], frame[4]]);
+    if frame[..3] != [b'R', b'Y', EPOCH] {
+        return Err(WireError::Epoch);
+    }
+    let kind = Kind::from_u8(frame[3]).ok_or(WireError::Kind(frame[3]))?;
+    let hash = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
     Ok((
         Header {
             kind,
             hash,
-            seq: frame[5],
+            seq: frame[8],
         },
         &frame[HEADER..body_len],
     ))
@@ -215,24 +238,83 @@ pub mod flags {
     pub const CALLS: u8 = 32;
 }
 
-/// One type's worth of a Hello.
+/// A borrowed exact endpoint address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HelloEntry<'a> {
-    /// See [`type_hash`].
-    pub hash: u32,
-    /// The OR of [`flags`].
-    pub flags: u8,
-    /// `MessageType::SCHEMA_FINGERPRINT`.
-    pub schema: u64,
-    /// `MessageType::TYPE_NAME`. It rides here and nowhere else, to recover the hash and to detect collisions.
-    pub name: &'a str,
+pub struct EndpointRef<'a> {
+    /// Canonical endpoint owner namespace.
+    pub namespace: &'a str,
+    /// Declared port name.
+    pub port: &'a str,
 }
 
-/// Write a Hello payload into `out` and return its length.
-///
-/// ```text
-/// [flags u8][id_len u8][id …][count u8] { [hash u32][flags u8][schema u64][name_len u8][name …] } × count
-/// ```
+/// A static source list or a validated borrowed wire source list.
+#[derive(Debug, Clone, Copy)]
+pub enum Sources<'a> {
+    /// A generated static source list.
+    Static(&'a [reiny_core::StaticEndpointAddress]),
+    /// Source bytes validated by the Hello parser.
+    Wire(&'a [u8]),
+}
+
+impl<'a> Sources<'a> {
+    /// Iterate exact source endpoint pairs without allocating.
+    pub fn iter(self) -> impl Iterator<Item = EndpointRef<'a>> {
+        let (mut static_iter, bytes) = match self {
+            Self::Static(sources) => (Some(sources.iter()), &[][..]),
+            Self::Wire(bytes) => (None, bytes),
+        };
+        let mut reader = Reader { buf: bytes, pos: 0 };
+        core::iter::from_fn(move || {
+            if let Some(sources) = &mut static_iter {
+                return sources.next().map(|source| EndpointRef {
+                    namespace: source.namespace,
+                    port: source.port,
+                });
+            }
+            Some(EndpointRef {
+                namespace: reader.str()?,
+                port: reader.str()?,
+            })
+        })
+    }
+}
+impl PartialEq for Sources<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.iter().eq(other.iter())
+    }
+}
+impl Eq for Sources<'_> {}
+
+/// An RPC response contract, carried on its port rather than as a permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HelloType<'a> {
+    /// Fully qualified protobuf message name.
+    pub name: &'a str,
+    /// Compiled schema fingerprint.
+    pub schema: u64,
+}
+
+/// One complete named port contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HelloEntry<'a> {
+    /// Hash of the peer namespace and this port name.
+    pub hash: u32,
+    /// Exactly one direction plus optional publication latching.
+    pub flags: u8,
+    /// Compiled schema fingerprint.
+    pub schema: u64,
+    /// Fully qualified protobuf message name.
+    pub name: &'a str,
+    /// Declared port name.
+    pub port: &'a str,
+    /// Required RPC response metadata; absent for streams.
+    pub response: Option<HelloType<'a>>,
+    /// Exact output endpoints selected by this input or caller.
+    pub sources: Sources<'a>,
+}
+
+/// Write a complete epoch-2 Hello. Fingerprints, response contracts, and exact
+/// source references are mandatory; the receiver validates the table atomically.
 pub fn hello_write<'a>(
     out: &mut [u8],
     ack: bool,
@@ -242,6 +324,7 @@ pub fn hello_write<'a>(
 ) -> Result<usize, WireError> {
     let mut w = Writer { out, pos: 0 };
     w.u8(if ack { HELLO_ACK } else { 0 } | if bridge { HELLO_BRIDGE } else { 0 })?;
+    w.bytes(&reiny_core::SCHEMA_FINGERPRINT_VERSION.to_le_bytes())?;
     w.str(id)?;
     let count_at = w.pos;
     w.u8(0)?;
@@ -249,30 +332,41 @@ pub fn hello_write<'a>(
     for e in entries {
         w.u32(e.hash)?;
         w.u8(e.flags | flags::SCHEMA_FINGERPRINT)?;
-        w.u64(e.schema)?;
+        w.str(e.port)?;
         w.str(e.name)?;
+        w.u64(e.schema)?;
+        w.u8(u8::from(e.response.is_some()))?;
+        if let Some(response) = e.response {
+            w.str(response.name)?;
+            w.u64(response.schema)?;
+        }
+        let sources = u8::try_from(e.sources.iter().count()).map_err(|_| WireError::TooLarge)?;
+        w.u8(sources)?;
+        for source in e.sources.iter() {
+            w.str(source.namespace)?;
+            w.str(source.port)?;
+        }
         count = count.checked_add(1).ok_or(WireError::TooLarge)?;
     }
     w.out[count_at] = count;
     Ok(w.pos)
 }
 
-/// A parsed Hello.
+/// A fully validated Hello. Nothing is exposed until its complete table parses.
 #[derive(Debug, Clone, Copy)]
 pub struct Hello<'a> {
-    /// Whether this is a reply to the peer's Hello.
+    /// This Hello acknowledges its peer.
     pub ack: bool,
-    /// Whether the peer is a bridge ([`HELLO_BRIDGE`]).
+    /// Internal transport tooling, not application permission.
     pub bridge: bool,
-    /// The peer's id.
+    /// Canonical peer namespace.
     pub id: &'a str,
     count: usize,
     entries: &'a [u8],
 }
-
 impl<'a> Hello<'a> {
-    /// The complete sequence of type entries, checked by [`hello_parse`].
     #[must_use]
+    /// Iterate the complete validated port table.
     pub fn entries(&self) -> HelloEntries<'a> {
         HelloEntries {
             r: Reader {
@@ -283,65 +377,162 @@ impl<'a> Hello<'a> {
         }
     }
 }
-
-/// The iterator behind [`Hello::entries`].
+/// Borrowed iterator over a validated Hello table.
 pub struct HelloEntries<'a> {
     r: Reader<'a>,
     remaining: usize,
 }
-
 impl<'a> Iterator for HelloEntries<'a> {
     type Item = HelloEntry<'a>;
-
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining == 0 {
             return None;
         }
         self.remaining -= 1;
-        let hash = self.r.u32()?;
-        let flags = self.r.u8()?;
-        let schema = self.r.u64()?;
-        let name = self.r.str()?;
-        Some(HelloEntry {
-            hash,
-            // The `SCHEMA_FINGERPRINT` bit is an encoding detail (whether `schema` is present). Do not surface it.
-            flags: flags & !flags::SCHEMA_FINGERPRINT,
-            schema,
-            name,
-        })
+        self.r.entry()
     }
 }
 
-/// Take a Hello payload apart.
+pub(crate) fn valid_port(port: &str) -> bool {
+    !port.is_empty()
+        && port
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+        && port != "."
+        && port != ".."
+}
+pub(crate) fn valid_namespace(namespace: &str) -> bool {
+    !namespace.is_empty() && namespace.split('/').all(valid_port)
+}
+fn valid_type(name: &str) -> bool {
+    !name.is_empty()
+        && name.split('.').all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                && !part.as_bytes()[0].is_ascii_digit()
+        })
+}
+
+/// Parse and validate a complete epoch-2 Hello atomically.
 pub fn hello_parse(payload: &[u8]) -> Result<Hello<'_>, WireError> {
     let mut r = Reader {
         buf: payload,
         pos: 0,
     };
-    let flags = r.u8().ok_or(WireError::Malformed)?;
-    let id = r.str().ok_or(WireError::Malformed)?;
+    let hello_flags = r.u8().ok_or(WireError::Malformed)?;
+    if hello_flags & !(HELLO_ACK | HELLO_BRIDGE) != 0
+        || r.bytes(2)
+            != Some(
+                reiny_core::SCHEMA_FINGERPRINT_VERSION
+                    .to_le_bytes()
+                    .as_slice(),
+            )
+    {
+        return Err(WireError::Malformed);
+    }
+    let id = r
+        .str()
+        .filter(|id| valid_namespace(id))
+        .ok_or(WireError::Malformed)?;
     let count = r.u8().ok_or(WireError::Malformed)?;
-    // Check the entire descriptor before exposing any of it. A truncated table must not look
-    // like a valid Hello announcing fewer types or losing the end of a namespace.
     let entries = &payload[r.pos..];
-    for _ in 0..count {
-        r.u32().ok_or(WireError::Malformed)?;
-        if r.u8().ok_or(WireError::Malformed)? & flags::SCHEMA_FINGERPRINT == 0 {
+    let hello = Hello {
+        ack: hello_flags & HELLO_ACK != 0,
+        bridge: hello_flags & HELLO_BRIDGE != 0,
+        id,
+        count: usize::from(count),
+        entries,
+    };
+    if hello.bridge && count != 0 {
+        return Err(WireError::Malformed);
+    }
+    for index in 0..count {
+        let entry = r.entry().ok_or(WireError::Malformed)?;
+        let direction = entry.flags & !flags::LATCHED;
+        if !matches!(
+            direction,
+            flags::PUB | flags::SUB | flags::SERVE | flags::CALLS
+        ) || (entry.flags & flags::LATCHED != 0 && direction != flags::PUB)
+            || !valid_port(entry.port)
+            || !valid_type(entry.name)
+            || entry.hash != endpoint_hash(id, entry.port)
+            || matches!(direction, flags::SERVE | flags::CALLS) != entry.response.is_some()
+            || entry
+                .response
+                .is_some_and(|response| !valid_type(response.name))
+        {
             return Err(WireError::Malformed);
         }
-        r.u64().ok_or(WireError::Malformed)?;
-        r.str().ok_or(WireError::Malformed)?;
+        let source_count = entry.sources.iter().count();
+        if (matches!(direction, flags::PUB | flags::SERVE) && source_count != 0)
+            || (direction == flags::SUB && source_count == 0)
+            || (direction == flags::CALLS && source_count != 1)
+        {
+            return Err(WireError::Malformed);
+        }
+        for (i, source) in entry.sources.iter().enumerate() {
+            if !valid_namespace(source.namespace)
+                || !valid_port(source.port)
+                || entry
+                    .sources
+                    .iter()
+                    .take(i)
+                    .any(|previous| previous == source)
+            {
+                return Err(WireError::Malformed);
+            }
+        }
+        for previous in hello.entries().take(usize::from(index)) {
+            let shared_source = previous
+                .sources
+                .iter()
+                .any(|source| entry.sources.iter().any(|other| other == source));
+            if shared_source
+                && (previous.name != entry.name
+                    || previous.schema != entry.schema
+                    || previous.response != entry.response
+                    || (previous.flags & flags::CALLS != 0) != (entry.flags & flags::CALLS != 0))
+            {
+                return Err(WireError::Malformed);
+            }
+            let same_slot = (previous.flags & (flags::PUB | flags::SERVE) != 0)
+                == (entry.flags & (flags::PUB | flags::SERVE) != 0);
+            if (previous.port == entry.port && same_slot)
+                || (previous.hash == entry.hash && previous.port != entry.port)
+            {
+                return Err(WireError::Malformed);
+            }
+        }
     }
     if r.pos != payload.len() {
         return Err(WireError::Malformed);
     }
-    Ok(Hello {
-        ack: flags & HELLO_ACK != 0,
-        bridge: flags & HELLO_BRIDGE != 0,
-        id,
-        count: usize::from(count),
-        entries,
-    })
+    validate_address_hashes(&hello)?;
+    Ok(hello)
+}
+
+// An address hash is never accepted for two different exact endpoint pairs,
+// including addresses supplied as source references.
+fn validate_address_hashes(hello: &Hello<'_>) -> Result<(), WireError> {
+    let addresses = || {
+        hello.entries().flat_map(|e| {
+            core::iter::once(EndpointRef {
+                namespace: hello.id,
+                port: e.port,
+            })
+            .chain(e.sources.iter())
+        })
+    };
+    for (index, address) in addresses().enumerate() {
+        if addresses().take(index).any(|previous| {
+            previous != address
+                && endpoint_hash(previous.namespace, previous.port)
+                    == endpoint_hash(address.namespace, address.port)
+        }) {
+            return Err(WireError::Malformed);
+        }
+    }
+    Ok(())
 }
 
 struct Writer<'a> {
@@ -399,6 +590,40 @@ impl<'a> Reader<'a> {
         let mut a = [0u8; 8];
         a.copy_from_slice(b);
         Some(u64::from_le_bytes(a))
+    }
+    fn entry(&mut self) -> Option<HelloEntry<'a>> {
+        let hash = self.u32()?;
+        let encoded_flags = self.u8()?;
+        if encoded_flags & flags::SCHEMA_FINGERPRINT == 0 {
+            return None;
+        }
+        let flags = encoded_flags & !flags::SCHEMA_FINGERPRINT;
+        let port = self.str()?;
+        let name = self.str()?;
+        let schema = self.u64()?;
+        let response = match self.u8()? {
+            0 => None,
+            1 => Some(HelloType {
+                name: self.str()?,
+                schema: self.u64()?,
+            }),
+            _ => return None,
+        };
+        let count = self.u8()?;
+        let start = self.pos;
+        for _ in 0..count {
+            self.str()?;
+            self.str()?;
+        }
+        Some(HelloEntry {
+            hash,
+            flags,
+            schema,
+            name,
+            port,
+            response,
+            sources: Sources::Wire(&self.buf[start..self.pos]),
+        })
     }
     fn str(&mut self) -> Option<&'a str> {
         let len = usize::from(self.u8()?);
@@ -482,7 +707,7 @@ mod tests {
                 &mut raw,
                 Header {
                     kind,
-                    hash: 1,
+                    hash: endpoint_hash("x", "stream"),
                     seq: 2,
                 },
                 0,
@@ -513,7 +738,7 @@ mod tests {
         assert_eq!(parse(&raw[..OVERHEAD - 1]), Err(WireError::Short));
 
         raw[5] ^= 1;
-        raw[0] = 9;
+        raw[3] = 9;
         let n = seal(
             &mut raw,
             Header {
@@ -524,7 +749,7 @@ mod tests {
             0,
         )
         .unwrap();
-        raw[0] = 9;
+        raw[3] = 9;
         let crc = CRC.checksum(&raw[..HEADER]);
         raw[HEADER..n].copy_from_slice(&crc.to_le_bytes());
         assert_eq!(parse(&raw[..n]), Err(WireError::Kind(9)));
@@ -598,22 +823,31 @@ mod tests {
     fn hello_roundtrip() {
         let entries = [
             HelloEntry {
-                hash: 1,
+                hash: endpoint_hash("motor", "state"),
                 flags: flags::PUB | flags::LATCHED,
                 schema: 0x1234,
                 name: "State",
+                port: "state",
+                response: None,
+                sources: Sources::Static(&[]),
             },
             HelloEntry {
-                hash: 2,
+                hash: endpoint_hash("motor", "command"),
                 flags: flags::SUB,
                 schema: 0x5678,
                 name: "Cmd",
+                port: "command",
+                response: None,
+                sources: Sources::Static(&[reiny_core::StaticEndpointAddress {
+                    namespace: "source",
+                    port: "command",
+                }]),
             },
         ];
         let mut buf = [0u8; 128];
-        let n = hello_write(&mut buf, true, true, "motor", entries.iter().copied()).unwrap();
+        let n = hello_write(&mut buf, true, false, "motor", entries.iter().copied()).unwrap();
         let hello = hello_parse(&buf[..n]).unwrap();
-        assert!(hello.ack && hello.bridge);
+        assert!(hello.ack && !hello.bridge);
         assert_eq!(hello.id, "motor");
         let got: Vec<HelloEntry<'_>> = hello.entries().collect();
         assert_eq!(got, entries);
@@ -645,10 +879,13 @@ mod tests {
             false,
             "x",
             [HelloEntry {
-                hash: 9,
+                hash: endpoint_hash("x", "stream"),
                 flags: flags::PUB,
                 schema: 0,
                 name: "S",
+                port: "stream",
+                response: None,
+                sources: Sources::Static(&[]),
             }]
             .into_iter(),
         )
@@ -672,15 +909,18 @@ mod tests {
             false,
             "x",
             [HelloEntry {
-                hash: 9,
+                hash: endpoint_hash("x", "stream"),
                 flags: flags::PUB,
                 schema: 0,
                 name: "S",
+                port: "stream",
+                response: None,
+                sources: Sources::Static(&[]),
             }]
             .into_iter(),
         )
         .unwrap();
-        buf[8] &= !flags::SCHEMA_FINGERPRINT;
+        buf[10] &= !flags::SCHEMA_FINGERPRINT;
         assert!(hello_parse(&buf[..n]).is_err());
     }
 
@@ -693,10 +933,13 @@ mod tests {
             false,
             "deployment/robot/controller",
             [HelloEntry {
-                hash: 1,
+                hash: endpoint_hash("deployment/robot/controller", "stream"),
                 flags: flags::PUB,
                 schema: 1,
                 name: "Long",
+                port: "stream",
+                response: None,
+                sources: Sources::Static(&[]),
             }]
             .into_iter(),
         )
@@ -727,15 +970,22 @@ mod tests {
             false,
             "x",
             [HelloEntry {
-                hash: 1,
+                hash: endpoint_hash("x", "stream"),
                 flags: flags::PUB,
                 schema: 1,
                 name: "AB",
+                port: "stream",
+                response: None,
+                sources: Sources::Static(&[]),
             }]
             .into_iter(),
         )
         .unwrap();
-        buf[n - 1] = 0xff; // wreck the last byte of the name
+        let name_at = buf[..n]
+            .windows(2)
+            .position(|bytes| bytes == b"AB")
+            .unwrap();
+        buf[name_at] = 0xff; // invalid UTF-8 inside the type name
         assert!(hello_parse(&buf[..n]).is_err());
     }
 
@@ -756,10 +1006,13 @@ mod tests {
                 false,
                 "deployment/robot",
                 [HelloEntry {
-                    hash: 1,
+                    hash: endpoint_hash("x", "stream"),
                     flags: flags::PUB,
                     schema: 1,
-                    name: &long
+                    name: &long,
+                    port: "stream",
+                    response: None,
+                    sources: Sources::Static(&[]),
                 }]
                 .into_iter()
             ),
@@ -768,10 +1021,13 @@ mod tests {
         // More than 255 entries: the count is a u8.
         let entries = core::iter::repeat_n(
             HelloEntry {
-                hash: 1,
+                hash: endpoint_hash("x", "stream"),
                 flags: flags::PUB,
                 schema: 1,
                 name: "",
+                port: "stream",
+                response: None,
+                sources: Sources::Static(&[]),
             },
             256,
         );
@@ -786,5 +1042,91 @@ mod tests {
             hello_write(&mut tiny, false, false, "toolong", core::iter::empty()),
             Err(WireError::TooLarge)
         );
+    }
+
+    #[test]
+    fn old_epoch_is_rejected_even_with_a_valid_crc() {
+        // Given an otherwise valid current frame with a legacy epoch.
+        let mut raw = [0; 32];
+        let n = seal(
+            &mut raw,
+            Header {
+                kind: Kind::Data,
+                hash: 7,
+                seq: 2,
+            },
+            0,
+        )
+        .unwrap();
+        raw[2] = EPOCH - 1;
+        let crc = CRC.checksum(&raw[..n - TRAILER]);
+        raw[n - TRAILER..n].copy_from_slice(&crc.to_le_bytes());
+        // When parsed, it cannot enter the current protocol.
+        assert_eq!(parse(&raw[..n]), Err(WireError::Epoch));
+    }
+
+    #[test]
+    fn hello_rejects_duplicate_colliding_and_incomplete_contracts() {
+        let output = HelloEntry {
+            hash: endpoint_hash("l", "p0edd4c2"),
+            flags: flags::PUB,
+            schema: 1,
+            name: "State",
+            port: "p0edd4c2",
+            response: None,
+            sources: Sources::Static(&[]),
+        };
+        let collision = HelloEntry {
+            port: "p0lzv8oe",
+            ..output
+        };
+        assert_eq!(output.hash, endpoint_hash("l", collision.port));
+        let missing_response = HelloEntry {
+            flags: flags::SERVE,
+            ..output
+        };
+        let missing_source = HelloEntry {
+            flags: flags::SUB,
+            ..output
+        };
+        let corrupt_hash = HelloEntry {
+            hash: output.hash ^ 1,
+            ..output
+        };
+        // Each malformed contract is rejected as a whole, never exposed as a partial iterator.
+        for entries in [
+            vec![output, output],
+            vec![output, collision],
+            vec![missing_response],
+            vec![missing_source],
+            vec![corrupt_hash],
+        ] {
+            let mut buf = [0; 512];
+            let n = hello_write(&mut buf, false, false, "l", entries.into_iter()).unwrap();
+            assert!(hello_parse(&buf[..n]).is_err());
+        }
+    }
+
+    #[test]
+    fn fingerprint_version_and_duplicate_sources_are_rejected() {
+        let sources = [reiny_core::StaticEndpointAddress {
+            namespace: "source",
+            port: "value",
+        }; 2];
+        let input = HelloEntry {
+            hash: endpoint_hash("l", "input"),
+            flags: flags::SUB,
+            schema: 1,
+            name: "State",
+            port: "input",
+            response: None,
+            sources: Sources::Static(&sources),
+        };
+        let mut buf = [0; 512];
+        let n = hello_write(&mut buf, false, false, "l", [input].into_iter()).unwrap();
+        assert!(hello_parse(&buf[..n]).is_err());
+        let n = hello_write(&mut buf, false, false, "l", core::iter::empty()).unwrap();
+        buf[1] = 1;
+        assert!(hello_parse(&buf[..n]).is_err());
     }
 }

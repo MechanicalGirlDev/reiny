@@ -35,7 +35,7 @@ async fn client(bus: Arc<dyn Engine>) -> ModuleContext {
         "request".into(),
         InputBinding {
             contract: rpc_contract(),
-            sources: vec![SENDER.into()],
+            sources: vec![endpoint(SENDER, "request")],
         },
     );
     ModuleContext::open(options(bus, binding))
@@ -83,7 +83,12 @@ async fn named_rpc_uses_exact_target_and_reports_both_compiled_schemas() {
         .expect("caller");
     let others = Arc::new(AtomicU64::new(0));
     let count = others.clone();
-    let other_key = Key::topic(DOMAIN, Some("deployment/other"), RequestProbe::TYPE_NAME);
+    let other_key = Key::output(
+        DOMAIN,
+        "deployment/other",
+        "request",
+        RequestProbe::TYPE_NAME,
+    );
     let reply_key = other_key.clone();
     let _other = bus
         .respond(
@@ -152,7 +157,12 @@ async fn server_rejects_unstamped_malformed_and_mismatching_requests() {
             assert_eq!(request.value.value, 2);
             request.reply(Probe { value: 2 }).await.expect("reply");
         });
-        let key = Key::topic(DOMAIN, Some(SENDER), RequestProbe::TYPE_NAME);
+        let key = Key::output(
+            DOMAIN,
+            SENDER,
+            if managed { "request" } else { "test" },
+            RequestProbe::TYPE_NAME,
+        );
         for attachment in [
             None,
             Some(vec![1]),
@@ -216,7 +226,12 @@ async fn caller_rejects_unstamped_malformed_and_mismatching_responses() {
         }
         .expect("caller");
         let count = AtomicU64::new(0);
-        let key = Key::topic(DOMAIN, Some(SENDER), RequestProbe::TYPE_NAME);
+        let key = Key::output(
+            DOMAIN,
+            SENDER,
+            if managed { "request" } else { "test" },
+            RequestProbe::TYPE_NAME,
+        );
         let reply_key = key.clone();
         let _server = bus
             .respond(
@@ -269,7 +284,7 @@ async fn operation_and_response_type_mismatches_cannot_register() {
         "request".into(),
         InputBinding {
             contract: wrong.clone(),
-            sources: vec![SENDER.into()],
+            sources: vec![endpoint(SENDER, "request")],
         },
     );
     binding
@@ -293,7 +308,10 @@ async fn rpc_multiple_targets_are_rejected_before_launch_presence() {
         "request".into(),
         InputBinding {
             contract: rpc_contract(),
-            sources: vec![SENDER.into(), "deployment/other".into()],
+            sources: vec![
+                endpoint(SENDER, "request"),
+                endpoint("deployment/other", "request"),
+            ],
         },
     );
     assert!(
@@ -308,4 +326,105 @@ async fn rpc_multiple_targets_are_rejected_before_launch_presence() {
             .len(),
         0
     );
+}
+
+#[tokio::test]
+async fn same_request_servers_are_isolated_by_declared_port() {
+    let bus = Arc::new(Local::new());
+    let mut server_binding = bindings(SENDER);
+    let mut client_binding = bindings(RECEIVER);
+    for name in ["first", "second"] {
+        server_binding.outputs.insert(
+            name.into(),
+            OutputBinding {
+                contract: rpc_contract(),
+            },
+        );
+        client_binding.inputs.insert(
+            name.into(),
+            InputBinding {
+                contract: rpc_contract(),
+                sources: vec![endpoint(SENDER, name)],
+            },
+        );
+    }
+    let server = ModuleContext::open(options(bus.clone(), server_binding))
+        .await
+        .expect("server");
+    let client = ModuleContext::open(options(bus, client_binding))
+        .await
+        .expect("client");
+    let mut first = server.rpc_server::<RequestProbe>("first").expect("first");
+    let mut second = server.rpc_server::<RequestProbe>("second").expect("second");
+    let a = client
+        .rpc_client::<RequestProbe>("first")
+        .expect("first caller");
+    let b = client
+        .rpc_client::<RequestProbe>("second")
+        .expect("second caller");
+    server.ready().expect("ready");
+    client.ready().expect("ready");
+    assert_eq!(
+        client.servers::<RequestProbe>().await.expect("servers"),
+        vec![endpoint(SENDER, "first"), endpoint(SENDER, "second")]
+    );
+    let (a, b, (), ()) = timeout(PATIENCE, async {
+        tokio::join!(
+            a.call(RequestProbe { value: 1 }),
+            b.call(RequestProbe { value: 2 }),
+            async {
+                let request = first.recv().await.expect("first request");
+                assert_eq!(request.value.value, 1);
+                request
+                    .reply(Probe { value: 101 })
+                    .await
+                    .expect("first reply");
+            },
+            async {
+                let request = second.recv().await.expect("second request");
+                assert_eq!(request.value.value, 2);
+                request
+                    .reply(Probe { value: 202 })
+                    .await
+                    .expect("second reply");
+            },
+        )
+    })
+    .await
+    .expect("bounded RPCs");
+    assert_eq!(
+        (a.expect("first").value, b.expect("second").value),
+        (101, 202)
+    );
+}
+
+#[tokio::test]
+async fn named_caller_rejects_a_reply_from_another_port_in_the_same_namespace() {
+    let bus = Arc::new(Local::new());
+    let client = client(bus.clone()).await;
+    let caller = client
+        .rpc_client::<RequestProbe>("request")
+        .expect("caller");
+    let target = Key::output(DOMAIN, SENDER, "request", RequestProbe::TYPE_NAME);
+    let foreign = Key::output(DOMAIN, SENDER, "other", RequestProbe::TYPE_NAME);
+    let _server = bus
+        .respond(
+            &target,
+            Box::new(move |query| {
+                query
+                    .reply(
+                        &foreign,
+                        Probe { value: 99 }.encode_to_vec(),
+                        crate::pubsub::fingerprint(Some(Probe::SCHEMA_FINGERPRINT)),
+                    )
+                    .expect("foreign reply");
+            }),
+        )
+        .expect("raw responder");
+    assert!(matches!(
+        timeout(PATIENCE, caller.call(RequestProbe { value: 1 }))
+            .await
+            .expect("deadline"),
+        Err(CallError::Engine(_))
+    ));
 }

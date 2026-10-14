@@ -7,12 +7,12 @@
 //!
 //! | reiny | link |
 //! | --- | --- |
-//! | subscribe `reiny/<d>/*/<T>` | Data from the peer (hash = T). The source is the peer's id, the attachment is the fingerprint from the Hello |
-//! | publish `reiny/<d>/<id>/<T>` | `send_raw(hash(T))`. Dropped unless the peer subscribes |
+//! | subscribe | Data uses the peer namespace and output port; the attachment is its Hello fingerprint |
+//! | publish | Only a peer input whose exact source matches the sending output receives data |
 //! | presence | derived from the peer's Hello: `@launch`, a token per PUB type, `@sub` per SUB type, `@service` per SERVE type. Disconnected retracts all of them. Our own tokens are local only (the peer never hears about them) |
-//! | query (with payload) | `call_raw(hash(S))` → Reply / Error |
+//! | query (with payload) | `call_raw(hash(namespace, server port))` returns Reply / Error |
 //! | query (no payload = latched) | the engine remembers the peer's most recent Data for LATCHED types and answers with it |
-//! | respond | a Request from the peer (hash = S) goes to the responder for the type `S`. Dropping it unanswered sends the peer `Error("no reply")` |
+//! | respond | A Request goes only to its declared destination server. Dropping it sends `Error("no reply")` |
 //!
 //! `Caps.attachment = false`: fingerprints travel in Hello, not arbitrary per-frame attachments.
 //! Outgoing data and requests must supply a matching fingerprint before reaching the link.
@@ -23,10 +23,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use reiny::engine::{
-    BoxFuture, Callback, Caps, Engine, Guard, Key, Presence, QueryCallback, QueryParams,
-    RawPublisher, RawQuery, RawReplies, ReplyResult, SERVICE_CHUNK, SUB_CHUNK, Sample, now_unix_ns,
+    BoxFuture, Callback, Caps, EndpointSlot, Engine, Guard, Key, Presence, QueryCallback,
+    QueryParams, RawPublisher, RawQuery, RawReplies, ReplyResult, SERVICE_CHUNK, SUB_CHUNK, Sample,
+    now_unix_ns,
 };
-use reiny::{Qos, Result};
+use reiny::{CongestionControl, Qos, Result};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
@@ -71,16 +72,16 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// The presence keys implied by the peer's Hello.
 fn peer_keys(domain: &str, peer: &PeerInfo) -> Vec<Key> {
-    let mut keys = vec![Key::launch(domain, Some(&peer.id))];
+    let mut keys = vec![Key::module(domain, Some(&peer.id), "@launch")];
     for t in &peer.types {
-        let topic = Key::topic(domain, Some(&peer.id), &t.name);
+        let topic = Key::output(domain, &peer.id, &t.port, &t.name);
         if t.flags & flags::PUB != 0 {
             keys.push(topic.clone());
         }
         // What the peer subscribes to is presence too: it is how the zenoh side's
         // `subscribers::<T>()` / `reiny topic list` can see what an MCU is listening for.
         if t.flags & flags::SUB != 0 {
-            keys.push(topic.with_chunk(SUB_CHUNK));
+            keys.push(Key::input(domain, &peer.id, &t.port, &t.name).with_chunk(SUB_CHUNK));
         }
         if t.flags & flags::SERVE != 0 {
             keys.push(topic.with_chunk(SERVICE_CHUNK));
@@ -170,14 +171,34 @@ fn type_of(key: &Key) -> Result<&str> {
     })
 }
 
+fn endpoint_of(key: &Key) -> Result<u32> {
+    type_of(key)?;
+    anyhow::ensure!(
+        matches!(key.endpoint, Some(EndpointSlot::Output(_))),
+        "link engine: an exact output endpoint is required"
+    );
+    let namespace = key
+        .source
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("link engine: an exact namespace is required"))?;
+    let port = key
+        .port()
+        .ok_or_else(|| anyhow::anyhow!("link engine: an output port is required"))?;
+    Ok(wire::endpoint_hash(namespace, port))
+}
+
 async fn run(host: Arc<Host>, domain: String, state: Arc<Mutex<State>>) {
     while let Some(event) = host.recv().await {
         match event {
             HostEvent::Connected { id, types } => {
-                if Key::launch(&domain, Some(&id)).validate().is_err()
+                if Key::module(&domain, Some(&id), "@launch")
+                    .validate()
+                    .is_err()
                     || types.iter().any(|t| {
-                        Key::topic(&domain, Some(&id), &t.name).validate().is_err()
-                            || wire::type_hash(&t.name) != t.hash
+                        Key::output(&domain, &id, &t.port, &t.name)
+                            .validate()
+                            .is_err()
+                            || wire::endpoint_hash(&id, &t.port) != t.hash
                     })
                 {
                     tracing::warn!(%id, "link: peer Hello has an invalid namespace or type identity");
@@ -205,11 +226,15 @@ async fn run(host: Arc<Host>, domain: String, state: Arc<Mutex<State>>) {
             HostEvent::Data { hash, payload, .. } => {
                 let mut st = lock(&state);
                 let Some(peer) = &st.peer else { continue };
-                let Some(t) = peer.types.iter().find(|t| t.hash == hash) else {
+                let Some(t) = peer
+                    .types
+                    .iter()
+                    .find(|t| t.hash == hash && t.flags & flags::PUB != 0)
+                else {
                     continue;
                 };
                 let sample = Sample {
-                    key: Key::topic(&domain, Some(&peer.id), &t.name),
+                    key: Key::output(&domain, &peer.id, &t.port, &t.name),
                     payload,
                     attachment: Some(fingerprint(t.schema)),
                     timestamp: now_unix_ns(),
@@ -228,19 +253,20 @@ async fn run(host: Arc<Host>, domain: String, state: Arc<Mutex<State>>) {
             } => {
                 let st = lock(&state);
                 let Some(peer) = &st.peer else { continue };
-                // A type the peer never announced with `rpc_client` has no name here, so refuse it.
-                let Some(t) = peer.types.iter().find(|t| t.hash == hash) else {
-                    let _ = host.reply_err_raw(
-                        seq,
-                        hash,
-                        "unknown request type (declare it with rpc_client())",
-                    );
+                let Some(t) = peer.types.iter().find(|t| {
+                    t.flags & flags::CALLS != 0
+                        && t.sources
+                            .iter()
+                            .any(|(namespace, port)| wire::endpoint_hash(namespace, port) == hash)
+                }) else {
+                    let _ = host.reply_err_raw(seq, hash, "undeclared source");
                     continue;
                 };
-                // A request on a link has no destination: any responder for the type `S` will do.
-                let pattern = Key::topic(&domain, None, &t.name);
-                let Some((_, _, cb)) = st.responders.iter().find(|(_, k, _)| pattern.matches(k))
-                else {
+                let Some((namespace, port)) = t.sources.first() else {
+                    continue;
+                };
+                let pattern = Key::output(&domain, namespace, port, &t.name);
+                let Some((_, _, cb)) = st.responders.iter().find(|(_, k, _)| *k == pattern) else {
                     let _ = host.reply_err_raw(seq, hash, "no such service");
                     continue;
                 };
@@ -251,6 +277,7 @@ async fn run(host: Arc<Host>, domain: String, state: Arc<Mutex<State>>) {
                     key: pattern,
                     payload: Some(payload),
                     attachment: fingerprint(t.schema),
+                    response: t.response.clone(),
                     answered: false,
                 }));
             }
@@ -280,11 +307,16 @@ impl Engine for LinkEngine {
             liveliness: true,
             query: true,
             attachment: true,
+            congestion_control: false,
         }
     }
 
-    fn publisher(&self, key: &Key, _qos: &Qos) -> Result<Box<dyn RawPublisher>> {
+    fn publisher(&self, key: &Key, qos: &Qos) -> Result<Box<dyn RawPublisher>> {
         key.validate()?;
+        anyhow::ensure!(
+            qos.congestion_control == CongestionControl::BackendDefault,
+            "link engine: explicit congestion control is unsupported; a full send buffer returns an error"
+        );
         anyhow::ensure!(
             key.domain == self.domain && key.chunk.is_none() && !key.is_verbatim_type(),
             "link engine: key '{key}' is not a data topic in domain '{}'",
@@ -293,7 +325,8 @@ impl Engine for LinkEngine {
         Ok(Box::new(LinkPublisher {
             host: Arc::clone(&self.host),
             state: Arc::clone(&self.state),
-            hash: wire::type_hash(type_of(key)?),
+            key: key.clone(),
+            hash: endpoint_of(key)?,
         }))
     }
 
@@ -353,7 +386,7 @@ impl Engine for LinkEngine {
     fn query(&self, key: &Key, params: QueryParams) -> Result<Box<dyn RawReplies>> {
         key.validate()?;
         let ty = type_of(key)?.to_string();
-        let hash = wire::type_hash(&ty);
+        let hash = endpoint_of(key)?;
         let Some(payload) = params.payload else {
             // A latched query: the engine is holding the peer's most recent value.
             let hit = lock(&self.state)
@@ -364,17 +397,24 @@ impl Engine for LinkEngine {
             return Ok(Box::new(Ready(hit.map(Ok))));
         };
         let peer_id = lock(&self.state).peer.as_ref().map(|p| p.id.clone());
-        let peer_key = Key::topic(&self.domain, peer_id.as_deref(), &ty);
+        let Some(peer_id) = peer_id else {
+            return Ok(Box::new(Ready(None)));
+        };
+        let port = key
+            .port()
+            .ok_or_else(|| anyhow::anyhow!("missing output port"))?
+            .to_string();
+        let peer_key = Key::output(&self.domain, &peer_id, &port, &ty);
         if !key.matches(&peer_key) {
             return Ok(Box::new(Ready(None))); // wrong namespace, domain or chunk: no replies
         }
         {
             let st = lock(&self.state);
-            let Some(t) = st
-                .peer
-                .as_ref()
-                .and_then(|p| p.types.iter().find(|t| t.hash == hash))
-            else {
+            let Some(t) = st.peer.as_ref().and_then(|p| {
+                p.types
+                    .iter()
+                    .find(|t| t.hash == hash && t.flags & flags::SERVE != 0 && t.name == ty)
+            }) else {
                 return Ok(Box::new(Ready(None)));
             };
             check_fingerprint(params.attachment.as_deref(), t.schema)?;
@@ -385,7 +425,7 @@ impl Engine for LinkEngine {
         tokio::spawn(async move {
             let result = match host.call_raw(hash, payload, params.timeout).await {
                 Ok((schema, bytes)) => Some(Ok(Sample {
-                    key: Key::topic(&domain, peer_id.as_deref(), &ty),
+                    key: Key::output(&domain, &peer_id, &port, &ty),
                     payload: bytes,
                     attachment: Some(schema.to_le_bytes().to_vec()),
                     timestamp: now_unix_ns(),
@@ -435,6 +475,7 @@ impl Drop for LinkGuard {
 }
 
 struct LinkPublisher {
+    key: Key,
     host: Arc<Host>,
     state: Arc<Mutex<State>>,
     hash: u32,
@@ -444,11 +485,16 @@ impl RawPublisher for LinkPublisher {
     fn put(&self, payload: Vec<u8>, attachment: Option<Vec<u8>>) -> Result<()> {
         {
             let st = lock(&self.state);
-            let Some(t) = st
-                .peer
-                .as_ref()
-                .and_then(|p| p.types.iter().find(|t| t.hash == self.hash))
-            else {
+            let Some(t) = st.peer.as_ref().and_then(|p| {
+                p.types.iter().find(|t| {
+                    t.flags & flags::SUB != 0
+                        && t.name == self.key.ty.as_deref().unwrap_or("")
+                        && t.sources.iter().any(|(namespace, port)| {
+                            self.key.source.as_deref() == Some(namespace.as_str())
+                                && self.key.port() == Some(port.as_str())
+                        })
+                })
+            }) else {
                 return Ok(()); // no subscriber
             };
             check_fingerprint(attachment.as_deref(), t.schema)?;
@@ -468,6 +514,7 @@ struct LinkQuery {
     key: Key,
     payload: Option<Vec<u8>>,
     attachment: Vec<u8>,
+    response: Option<(String, u64)>,
     answered: bool,
 }
 
@@ -486,7 +533,7 @@ impl RawQuery for LinkQuery {
 
     fn reply(
         mut self: Box<Self>,
-        _key: &Key,
+        key: &Key,
         payload: Vec<u8>,
         attachment: Option<Vec<u8>>,
     ) -> Result<()> {
@@ -495,6 +542,16 @@ impl RawQuery for LinkQuery {
             .and_then(|a| a.try_into().ok())
             .map(u64::from_le_bytes)
             .ok_or_else(|| anyhow::anyhow!("link reply requires a schema fingerprint"))?;
+        anyhow::ensure!(
+            *key == self.key,
+            "link reply must preserve its destination server endpoint"
+        );
+        anyhow::ensure!(
+            self.response
+                .as_ref()
+                .is_some_and(|(_, expected)| *expected == schema),
+            "link response fingerprint mismatch"
+        );
         self.answered = true;
         self.host
             .reply_raw(self.seq, self.hash, schema, &payload)

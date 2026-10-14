@@ -18,7 +18,7 @@ async fn input_readiness_replays_only_bound_source_modules() {
     let mut ready = receiver.watch_input_ready("incoming").expect("bound watch");
 
     // Then history and later departure retain exactly the configured namespace.
-    let key = Key::topic(DOMAIN, Some(SENDER), "@ready");
+    let key = Key::module(DOMAIN, Some(SENDER), "@ready");
     assert_eq!(
         timeout(PATIENCE, ready.recv()).await.expect("history"),
         Some(Presence::Joined(key.clone()))
@@ -35,7 +35,7 @@ async fn readiness_requires_every_declared_port_to_have_a_live_handle() {
     // Given a declared input that has not been opened.
     let bus = Arc::new(Local::new());
     let cloudy = consumer(bus.clone()).await;
-    let ready = Key::topic(DOMAIN, Some(RECEIVER), "@ready");
+    let ready = Key::module(DOMAIN, Some(RECEIVER), "@ready");
     assert_eq!(
         bus.alive(&ready, PATIENCE).await.expect("alive"),
         Vec::<Key>::new()
@@ -104,7 +104,7 @@ async fn ready_publishes_report_and_stop_only_acknowledges_request() {
     let cloudy = ModuleContext::open(opts).await.expect("managed module");
     let mut incoming = cloudy.input::<Probe>("incoming").expect("input");
     let _outgoing = cloudy.output::<Probe>("outgoing").expect("output");
-    let ready = Key::topic(DOMAIN, Some(RECEIVER), "@ready");
+    let ready = Key::module(DOMAIN, Some(RECEIVER), "@ready");
     let (events, mut observed) = tokio::sync::mpsc::unbounded_channel();
     let _watch = bus
         .watch_alive(
@@ -128,13 +128,30 @@ async fn ready_publishes_report_and_stop_only_acknowledges_request() {
             .expect("report JSON");
     assert_eq!(report.version, MODULE_REPORT_VERSION);
     assert_eq!(report.namespace, RECEIVER);
+    assert_eq!(report.endpoint_namespace, RECEIVER);
+    assert_eq!(
+        report.fingerprint_version,
+        reiny_core::SCHEMA_FINGERPRINT_VERSION
+    );
+    assert_eq!(
+        report.inputs["incoming"].endpoint,
+        crate::bindings::PortEndpoint::Input {
+            sources: vec![endpoint(SENDER, "outgoing")],
+        }
+    );
+    assert_eq!(
+        report.outputs["outgoing"].endpoint,
+        crate::bindings::PortEndpoint::Output {
+            address: endpoint(RECEIVER, "outgoing"),
+        }
+    );
     assert_eq!(report.inputs["incoming"].type_name, "test.Probe");
     assert_eq!(report.inputs["incoming"].schema, 0x1234);
     assert_eq!(report.outputs["outgoing"].type_name, "test.Probe");
     assert_eq!(report.outputs["outgoing"].schema, 0x1234);
     let mut replies = bus
         .query(
-            &Key::topic(DOMAIN, Some(RECEIVER), "@stop"),
+            &Key::module(DOMAIN, Some(RECEIVER), "@stop"),
             QueryParams {
                 payload: Some(Vec::new()),
                 attachment: None,
@@ -185,7 +202,7 @@ async fn report_failure_prevents_readiness() {
     // When report publication fails, then the supervisor cannot see a ready token.
     assert!(cloudy.ready().is_err());
     assert_eq!(
-        bus.alive(&Key::topic(DOMAIN, Some(RECEIVER), "@ready"), PATIENCE)
+        bus.alive(&Key::module(DOMAIN, Some(RECEIVER), "@ready"), PATIENCE)
             .await
             .expect("alive"),
         Vec::<Key>::new()
@@ -197,7 +214,7 @@ async fn dropping_a_named_handle_after_ready_withdraws_readiness() {
     let bus = Arc::new(Local::new());
     let cloudy = producer(bus.clone(), SENDER).await;
     let output = cloudy.output::<Probe>("outgoing").expect("output");
-    let key = Key::topic(DOMAIN, Some(SENDER), "@ready");
+    let key = Key::module(DOMAIN, Some(SENDER), "@ready");
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     let _watch = bus
         .watch_alive(

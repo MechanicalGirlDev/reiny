@@ -3,11 +3,12 @@
 use std::sync::Arc;
 
 use reiny_core::bindings::{
-    EndpointContract, PortKind, PortReport, QosProfile, ReceiveBuffer, Replay, Retention,
+    EndpointContract, PortEndpoint, PortKind, PortReport, QosProfile, ReceiveBuffer, Replay,
+    Retention,
 };
 
 use super::{ManagedPort, Registration};
-use crate::engine::SUB_CHUNK;
+use crate::engine::{Key, SUB_CHUNK};
 use crate::pubsub::{Core, PublisherCore};
 use crate::{Durability, ModuleContext, Qos, RawSubscriber, Result, validate_segment};
 
@@ -28,6 +29,7 @@ fn registration(
     contract: &EndpointContract,
     type_name: &str,
     schema: u64,
+    endpoint: PortEndpoint,
     live: &Arc<()>,
 ) -> Result<Registration> {
     anyhow::ensure!(
@@ -43,6 +45,7 @@ fn registration(
             schema,
             contract: contract.clone(),
             response: None,
+            endpoint,
         },
         transport_type: transport_type.to_owned(),
         live: Arc::downgrade(live),
@@ -55,7 +58,13 @@ impl ModuleContext {
         let contract = self.named_contract(name, true, PortKind::Stream)?;
         let mut ports = self.lock_ports(name, true)?;
         let live = Arc::new(());
-        let registration = registration(contract, type_name, schema, &live)?;
+        let registration = registration(
+            contract,
+            type_name,
+            schema,
+            self.port_endpoint(name, true)?,
+            &live,
+        )?;
         let sources = self
             .module
             .bindings
@@ -78,8 +87,10 @@ impl ModuleContext {
             contract.replay == Replay::Last,
             latest,
         )?;
-        let key = self.key_for(
-            Some(self.endpoint_namespace()),
+        let key = Key::input(
+            self.domain(),
+            self.endpoint_namespace(),
+            name,
             &registration.transport_type,
         );
         let presence = self.engine.declare_alive(&key.with_chunk(SUB_CHUNK))?;
@@ -103,17 +114,16 @@ impl ModuleContext {
         let contract = self.named_contract(name, false, PortKind::Stream)?;
         let mut ports = self.lock_ports(name, false)?;
         let live = Arc::new(());
-        let registration = registration(contract, type_name, schema, &live)?;
-        anyhow::ensure!(
-            !ports
-                .outputs
-                .values()
-                .any(|port| port.transport_type == registration.transport_type),
-            "output transport type '{}' already created",
-            registration.transport_type
-        );
+        let registration = registration(
+            contract,
+            type_name,
+            schema,
+            self.port_endpoint(name, false)?,
+            &live,
+        )?;
         let mut qos = match contract.qos {
-            QosProfile::Reliable => Qos::DEFAULT,
+            QosProfile::Default => Qos::DEFAULT,
+            QosProfile::Command => Qos::COMMAND,
             QosProfile::Sensor => Qos::SENSOR,
         };
         let retained = contract.retention == Retention::Last;
@@ -122,8 +132,10 @@ impl ModuleContext {
         } else {
             Durability::Volatile
         };
-        let key = self.key_for(
-            Some(self.endpoint_namespace()),
+        let key = Key::output(
+            self.domain(),
+            self.endpoint_namespace(),
+            name,
             &registration.transport_type,
         );
         let core = PublisherCore::declare(self, &key, &qos, schema)?;

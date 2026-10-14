@@ -1,0 +1,10 @@
+version: 3
+schema:
+  project:
+    name: schema_fingerprint
+    version: 0.1.0
+  exported_types:
+    Envelope: { proto: proof.proto, message: qa.Envelope }
+    Node: { proto: proof.proto, message: qa.Node }
+    Left: { proto: proof.proto, message: qa.Left }
+    Right: { proto: proof.proto, message: qa.Right }

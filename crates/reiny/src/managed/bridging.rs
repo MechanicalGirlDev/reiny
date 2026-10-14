@@ -17,20 +17,12 @@ impl ModuleContext {
         let mut ports = self.lock_ports(name, input)?;
         let transport_type = contract.type_name.as_str();
         validate_segment("transport type", transport_type)?;
-        if !input {
-            anyhow::ensure!(
-                ports
-                    .outputs
-                    .values()
-                    .all(|port| port.transport_type != transport_type),
-                "duplicate output transport type '{transport_type}'"
-            );
-        }
         let live = Arc::new(());
         let registration = Registration {
             contract: PortReport {
                 type_name: contract.type_name.clone(),
                 schema,
+                endpoint: self.port_endpoint(name, input)?,
                 contract: contract.clone(),
                 response: Some(ResponseReport {
                     type_name: contract

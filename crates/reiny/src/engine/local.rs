@@ -17,7 +17,7 @@ use super::{
     BoxFuture, Callback, Caps, Engine, Guard, Key, Presence, QueryCallback, QueryParams,
     RawPublisher, RawQuery, RawReplies, ReplyResult, Sample, now_unix_ns,
 };
-use crate::{Qos, Result};
+use crate::{CongestionControl, Qos, Result};
 
 /// The in-process bus. A clone points at the same bus.
 #[derive(Clone)]
@@ -65,11 +65,18 @@ fn next_id() -> u64 {
 
 impl Engine for Local {
     fn caps(&self) -> Caps {
-        Caps::ALL
+        Caps {
+            congestion_control: false,
+            ..Caps::ALL
+        }
     }
 
-    fn publisher(&self, key: &Key, _qos: &Qos) -> Result<Box<dyn RawPublisher>> {
+    fn publisher(&self, key: &Key, qos: &Qos) -> Result<Box<dyn RawPublisher>> {
         key.validate()?;
+        anyhow::ensure!(
+            qos.congestion_control == CongestionControl::BackendDefault,
+            "local engine: explicit congestion control is unsupported; its send queue is unbounded"
+        );
         Ok(Box::new(LocalPublisher {
             key: key.clone(),
             tx: self.tx.clone(),
@@ -362,7 +369,23 @@ mod tests {
     }
 
     fn topic(source: &str) -> Key {
-        Key::topic("lab", Some(source), "T")
+        Key::output("lab", source, "test", "T")
+    }
+
+    #[test]
+    fn congestion_capability_and_policy_rejection_are_consistent() {
+        const { assert!(Caps::ALL.congestion_control) };
+        assert!(!Caps::default().congestion_control);
+        let bus = Local::new();
+        assert!(!bus.caps().congestion_control);
+        assert!(bus.publisher(&topic("a"), &Qos::DEFAULT).is_ok());
+        for qos in [Qos::SENSOR, Qos::COMMAND] {
+            let error = bus
+                .publisher(&topic("a"), &qos)
+                .err()
+                .expect("explicit congestion policy must be rejected");
+            assert!(error.to_string().contains("congestion"));
+        }
     }
 
     /// One dispatcher thread owns all state, so a declaration and the publishes that follow it are
@@ -372,7 +395,15 @@ mod tests {
     async fn declaration_then_publishes_are_ordered() {
         let bus = Local::new();
         let (cb, rx) = collector::<Sample>();
-        let _sub = bus.subscribe(&Key::topic("lab", None, "T"), cb).unwrap();
+        let _sub = bus
+            .subscribe(
+                &Key {
+                    ty: Some("T".into()),
+                    ..Key::all("lab")
+                },
+                cb,
+            )
+            .unwrap();
 
         let publisher = bus.publisher(&topic("a"), &Qos::DEFAULT).unwrap();
         for i in 0..5u8 {
@@ -391,7 +422,13 @@ mod tests {
         let bus = Local::new();
         let (any_cb, any_rx) = collector::<Sample>();
         let _any = bus
-            .subscribe(&Key::topic("lab", None, "T"), any_cb)
+            .subscribe(
+                &Key {
+                    ty: Some("T".into()),
+                    ..Key::all("lab")
+                },
+                any_cb,
+            )
             .unwrap();
         let (one_cb, one_rx) = collector::<Sample>();
         let _one = bus.subscribe(&topic("a"), one_cb).unwrap();
@@ -416,7 +453,15 @@ mod tests {
     async fn dropping_a_guard_undeclares() {
         let bus = Local::new();
         let (cb, rx) = collector::<Sample>();
-        let sub = bus.subscribe(&Key::topic("lab", None, "T"), cb).unwrap();
+        let sub = bus
+            .subscribe(
+                &Key {
+                    ty: Some("T".into()),
+                    ..Key::all("lab")
+                },
+                cb,
+            )
+            .unwrap();
         let publisher = bus.publisher(&topic("a"), &Qos::DEFAULT).unwrap();
         publisher.put(vec![1], None).unwrap();
         assert_eq!(recv(&rx).payload, vec![1]);
@@ -426,7 +471,15 @@ mod tests {
         // Ordering is total, so a sample delivered to a later subscriber proves the undeclare and the
         // publish above have both been processed.
         let (cb2, rx2) = collector::<Sample>();
-        let _sub2 = bus.subscribe(&Key::topic("lab", None, "T"), cb2).unwrap();
+        let _sub2 = bus
+            .subscribe(
+                &Key {
+                    ty: Some("T".into()),
+                    ..Key::all("lab")
+                },
+                cb2,
+            )
+            .unwrap();
         publisher.put(vec![3], None).unwrap();
         assert_eq!(recv(&rx2).payload, vec![3]);
         assert!(
@@ -472,7 +525,15 @@ mod tests {
             attachment: None,
             timeout: Duration::from_secs(30), // far longer than this test may take
         };
-        let mut replies = bus.query(&Key::topic("lab", None, "T"), params).unwrap();
+        let mut replies = bus
+            .query(
+                &Key {
+                    ty: Some("T".into()),
+                    ..Key::all("lab")
+                },
+                params,
+            )
+            .unwrap();
         let started = tokio::time::Instant::now();
         assert!(replies.next().await.is_none());
         assert!(
@@ -498,7 +559,15 @@ mod tests {
             attachment: None,
             timeout: Duration::from_secs(30),
         };
-        let mut replies = bus.query(&Key::topic("lab", None, "T"), params).unwrap();
+        let mut replies = bus
+            .query(
+                &Key {
+                    ty: Some("T".into()),
+                    ..Key::all("lab")
+                },
+                params,
+            )
+            .unwrap();
         assert!(replies.next().await.is_none(), "expected no reply");
         assert_eq!(recv(&rx), Some(vec![7]), "the responder did see the query");
     }
@@ -513,7 +582,7 @@ mod tests {
             if payload == [0] {
                 let _ = q.reply_err(b"refused".to_vec());
             } else {
-                let key = Key::topic("lab", Some("a"), "T");
+                let key = Key::output("lab", "a", "test", "T");
                 let _ = q.reply(&key, vec![payload[0] + 1], None);
             }
         });
@@ -521,7 +590,10 @@ mod tests {
 
         let ask = |payload: Vec<u8>| {
             bus.query(
-                &Key::topic("lab", None, "T"),
+                &Key {
+                    ty: Some("T".into()),
+                    ..Key::all("lab")
+                },
                 QueryParams {
                     payload: Some(payload),
                     attachment: None,

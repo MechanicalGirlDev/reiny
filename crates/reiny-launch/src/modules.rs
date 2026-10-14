@@ -4,9 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use reiny_core::bindings::{
-    EndpointContract, InputBinding, MODULE_BINDINGS_VERSION, MODULE_MANIFEST_VERSION,
-    ModuleBindings, OutputBinding, PortDelegation, PortKind, QosProfile, ReceiveBuffer, Replay,
-    Retention,
+    EndpointAddress, EndpointContract, InputBinding, MODULE_BINDINGS_VERSION,
+    MODULE_MANIFEST_VERSION, ModuleBindings, OutputBinding, PortDelegation, PortKind, QosProfile,
+    ReceiveBuffer, Replay, Retention,
 };
 use serde::{Deserialize, Serialize};
 
@@ -998,20 +998,12 @@ fn validate_executable_outputs(
     namespace: &str,
     manifest: &ModuleManifest,
 ) -> Result<(), ModuleError> {
-    let mut types = BTreeSet::new();
     for port in manifest.outputs.values() {
         validate_contract(namespace, &port.contract(), false)?;
         if port.from.is_some() {
             return Err(invalid(
                 namespace,
                 "executable outputs cannot forward another module",
-            ));
-        }
-        let segment = &port.type_name;
-        if !types.insert(segment) {
-            return Err(invalid(
-                namespace,
-                format!("multiple independent outputs use transport type '{segment}'"),
             ));
         }
     }
@@ -1051,13 +1043,17 @@ impl Instance {
                         "replay last requires retained output",
                     ));
                 }
-                if sources.contains(&route.source.namespace) {
+                let source = EndpointAddress {
+                    namespace: route.source.namespace.clone(),
+                    port: route.source.name.clone(),
+                };
+                if sources.contains(&source) {
                     return Err(invalid(
                         address.to_string(),
                         "multiple aliases resolve to the same publisher",
                     ));
                 }
-                sources.push(route.source.namespace.clone());
+                sources.push(source);
                 connections.push(ResolvedConnection {
                     source: route.source.clone(),
                     destination: address.clone(),
@@ -1195,7 +1191,7 @@ fn resolve_endpoint(
 fn validate_connection(namespace: &str, port: &PortSpec) -> Result<(), ModuleError> {
     if port.kind != PortKind::Stream
         || port.response.is_some()
-        || port.qos != QosProfile::Reliable
+        || port.qos != QosProfile::Default
         || port.retention != Retention::Volatile
         || port.replay != Replay::Live
         || port.buffer != ReceiveBuffer::Fifo

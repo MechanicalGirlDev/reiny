@@ -18,14 +18,14 @@ use reiny::bindings::{
     PortKind,
 };
 use reiny::engine::Local;
-use reiny::{MessageType, ModuleContext, Qos, RuntimeOptions, Service};
-use reiny_ros2::Ros;
+use reiny::{MessageType, ModuleContext, RuntimeOptions, Service};
 use reiny_ros2::ros2_client::dds::rustdds::DomainParticipantBuilder;
 use reiny_ros2::ros2_client::ros2::{QosPolicyBuilder, policy};
 use reiny_ros2::ros2_client::{
     Context, Message, MessageTypeName, Name, NodeName, NodeOptions, QosProfile, ServiceMapping,
     ServiceTypeName,
 };
+use reiny_ros2::{DdsQos, Ros};
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 
@@ -195,7 +195,10 @@ fn bindings(
                     name.to_string(),
                     InputBinding {
                         contract: contract(ty, response),
-                        sources: vec![source.to_string()],
+                        sources: vec![reiny::bindings::EndpointAddress {
+                            namespace: source.to_string(),
+                            port: name.to_string(),
+                        }],
                     },
                 )
             })
@@ -331,13 +334,35 @@ async fn bridge_round_trips_with_a_ros_node() {
 
     // --- the bridge (another Context on the same DDS domain) ---
     let ros = Ros::with_context(&cloudy, context(domain_id), "reiny_bridge").unwrap();
+    let bridge_matches = ros.node().lock().unwrap().status_receiver().unwrap();
+    let state_reader = format!("guid:{:?}", ros_states.guid());
+    // Drain from registration onward: the node's eight-event status channel drops events
+    // when full. Reader-side discovery alone does not mean this volatile writer has matched.
+    let state_matched = tokio::spawn(async move {
+        timeout(WAIT, async {
+            while let Ok(event) = bridge_matches.recv().await {
+                if matches!(
+                    event,
+                    reiny_ros2::ros2_client::NodeEvent::Graph(
+                        reiny_ros2::ros2_client::graph::GraphEvent::EntityDeclared(entity)
+                    ) if entity.kind == reiny_ros2::ros2_client::graph::EntityKind::Subscription
+                        && entity.node_name == state_reader
+                ) {
+                    return;
+                }
+            }
+            panic!("bridge discovery stream closed before state reader matched");
+        })
+        .await
+        .expect("bridge state writer matched its reader");
+    });
     for port in ["missing", "cmd", "add"] {
         assert!(
             ros.export::<State, RosState, _>(
                 port,
                 "/state",
                 MessageTypeName::new("test_msgs", "State"),
-                Qos::COMMAND,
+                DdsQos::COMMAND,
                 |s| RosState { x: s.x },
             )
             .is_err(),
@@ -349,7 +374,7 @@ async fn bridge_round_trips_with_a_ros_node() {
             "state",
             "/cmd",
             MessageTypeName::new("test_msgs", "Cmd"),
-            Qos::COMMAND,
+            DdsQos::COMMAND,
             |c| RosCmd { v: c.v },
         )
         .is_err(),
@@ -359,7 +384,7 @@ async fn bridge_round_trips_with_a_ros_node() {
         "state",
         "/state",
         MessageTypeName::new("test_msgs", "State"),
-        Qos::COMMAND,
+        DdsQos::COMMAND,
         |s| RosState { x: s.x },
     )
     .unwrap();
@@ -367,7 +392,7 @@ async fn bridge_round_trips_with_a_ros_node() {
         "cmd",
         "/cmd",
         MessageTypeName::new("test_msgs", "Cmd"),
-        Qos::COMMAND,
+        DdsQos::COMMAND,
         |c| Cmd { v: c.v },
     )
     .unwrap();
@@ -409,6 +434,7 @@ async fn bridge_round_trips_with_a_ros_node() {
     timeout(WAIT, ros_add.wait_for_service(&ros_node))
         .await
         .expect("bridge service discovered");
+    state_matched.await.expect("state match task");
 
     // reiny → ROS
     states.send(State { x: 1.5 }).await.unwrap();
@@ -425,6 +451,7 @@ async fn bridge_round_trips_with_a_ros_node() {
         .expect("cmd within patience")
         .unwrap();
     assert_eq!((envelope.value.v, envelope.source.as_str()), (7, "bridge"));
+    assert_eq!(envelope.source_port, "cmd");
 
     // a ROS client → a reiny service
     let res = timeout(WAIT, ros_add.async_call_service(RosAddReq { a: 2, b: 3 }))

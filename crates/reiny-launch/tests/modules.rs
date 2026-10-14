@@ -2,7 +2,7 @@
 
 #![allow(clippy::expect_used)]
 
-use reiny_core::bindings::{QosProfile, ReceiveBuffer, Replay, Retention};
+use reiny_core::bindings::{EndpointAddress, QosProfile, ReceiveBuffer, Replay, Retention};
 use reiny_launch::{DeploymentPlan, ModuleError, PortAddress};
 
 fn write(dir: &std::path::Path, name: &str, text: &str) {
@@ -17,12 +17,90 @@ const PRODUCER: &str =
 const CONSUMER: &str =
     "version: 3\nrun: {provider: process, bin: consumer}\nin:\n  state: {type: test.State}\n";
 
+#[test]
+fn manifest_qos_profiles_are_explicit_and_legacy_reliable_is_rejected() {
+    for (tag, expected) in [
+        ("default", QosProfile::Default),
+        ("command", QosProfile::Command),
+        ("sensor", QosProfile::Sensor),
+    ] {
+        let fixture = tempfile::tempdir().expect("fixture");
+        write(
+            fixture.path(),
+            "main.yaml",
+            &format!("{PROVIDER}modules:\n  a: {{source: a}}\n"),
+        );
+        write(
+            fixture.path(),
+            "a/main.yaml",
+            &format!(
+                "version: 3\nrun: {{provider: process, bin: producer}}\nout:\n  state: {{type: test.State, qos: {tag}}}\n"
+            ),
+        );
+        let plan = DeploymentPlan::load(fixture.path(), false).expect("profile is valid");
+        assert_eq!(
+            plan.nodes[0].bindings.outputs["state"].contract.qos,
+            expected
+        );
+        write(
+            fixture.path(),
+            "a/main.yaml",
+            "version: 3\nrun: {provider: process, bin: producer}\nout:\n  state: {type: test.State, qos: reliable}\n",
+        );
+        assert!(DeploymentPlan::load(fixture.path(), false).is_err());
+    }
+}
+
 fn address(namespace: &str, input: bool, name: &str) -> PortAddress {
     PortAddress {
         namespace: namespace.to_string(),
         input,
         name: name.to_string(),
     }
+}
+
+fn endpoint(namespace: &str, port: &str) -> EndpointAddress {
+    EndpointAddress {
+        namespace: namespace.to_string(),
+        port: port.to_string(),
+    }
+}
+
+#[test]
+fn same_type_outputs_and_same_request_services_keep_distinct_source_ports() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    write(
+        fixture.path(),
+        "main.yaml",
+        &format!(
+            "{PROVIDER}modules:\n  a: {{source: a}}\n  c:\n    source: c\n    in:\n      state: {{from: [a.left, a.right]}}\n      first: {{from: a.first}}\n      second: {{from: a.second}}\n"
+        ),
+    );
+    write(
+        fixture.path(),
+        "a/main.yaml",
+        "version: 3\nrun: {provider: process, bin: producer}\nout:\n  left: {type: test.State}\n  right: {type: test.State}\n  first: {kind: rpc, type: test.Request, response: test.Response}\n  second: {kind: rpc, type: test.Request, response: test.Response}\n",
+    );
+    write(
+        fixture.path(),
+        "c/main.yaml",
+        "version: 3\nrun: {provider: process, bin: consumer}\nin:\n  state: {type: test.State}\n  first: {kind: rpc, type: test.Request, response: test.Response}\n  second: {kind: rpc, type: test.Request, response: test.Response}\n",
+    );
+    let plan = DeploymentPlan::load(fixture.path(), false).expect("distinct output addresses");
+    let consumer = &plan.nodes[1].bindings;
+    assert_eq!(
+        consumer.inputs["state"].sources,
+        [endpoint("test/a", "left"), endpoint("test/a", "right")]
+    );
+    assert_eq!(
+        consumer.inputs["first"].sources,
+        [endpoint("test/a", "first")]
+    );
+    assert_eq!(
+        consumer.inputs["second"].sources,
+        [endpoint("test/a", "second")]
+    );
+    assert_eq!(plan.connections.len(), 4);
 }
 
 #[test]
@@ -51,8 +129,14 @@ fn sibling_connection_resolves_exact_namespace_when_types_match() {
         .iter()
         .find(|node| node.namespace == "test/c")
         .expect("consumer");
-    assert_eq!(consumer.bindings.inputs["first"].sources, vec!["test/b"]);
-    assert_eq!(consumer.bindings.inputs["second"].sources, vec!["test/a"]);
+    assert_eq!(
+        consumer.bindings.inputs["first"].sources,
+        vec![endpoint("test/b", "state")]
+    );
+    assert_eq!(
+        consumer.bindings.inputs["second"].sources,
+        vec![endpoint("test/a", "state")]
+    );
     assert_eq!(plan.connections.len(), 2);
     assert_eq!(
         plan.connections[0].source,
@@ -107,7 +191,7 @@ fn parent_forwarding_resolves_original_publisher_without_relay() {
     assert_eq!(plan.nodes.len(), 2);
     assert_eq!(
         plan.nodes[1].bindings.inputs["state"].sources,
-        vec!["test/branch/producer"]
+        vec![endpoint("test/branch/producer", "state")]
     );
     assert_eq!(plan.connections.len(), 1);
     let connection = &plan.connections[0];
@@ -159,7 +243,10 @@ fn fan_in_preserves_declared_order_through_cached_aliases() {
     let plan = DeploymentPlan::load(fixture.path(), false).expect("fan-in");
     assert_eq!(
         plan.nodes[2].bindings.inputs["state"].sources,
-        ["test/branch/b", "test/branch/a"]
+        [
+            endpoint("test/branch/b", "state"),
+            endpoint("test/branch/a", "state")
+        ]
     );
     assert_eq!(plan.connections.len(), 2);
     for (connection, (publisher, alias)) in plan
@@ -261,11 +348,11 @@ fn feedback_between_executable_modules_is_not_an_alias_cycle() {
     // Then both exact-source connections exist without a startup order.
     assert_eq!(
         plan.nodes[0].bindings.inputs["state"].sources,
-        vec!["test/b"]
+        vec![endpoint("test/b", "state")]
     );
     assert_eq!(
         plan.nodes[1].bindings.inputs["state"].sources,
-        vec!["test/a"]
+        vec![endpoint("test/a", "state")]
     );
 }
 
@@ -478,7 +565,7 @@ fn app_contract_is_reused_without_caller_type_or_output_redeclarations() {
     // Then only the two explicitly wired sources are selected.
     assert_eq!(
         plan.nodes[2].bindings.inputs["state"].sources,
-        ["test/a", "test/b"]
+        [endpoint("test/a", "state"), endpoint("test/b", "state")]
     );
     assert_eq!(
         plan.nodes[2].bindings.inputs["state"].contract.type_name,
@@ -733,7 +820,7 @@ fn rpc_alias_preserves_request_and_response_without_caller_redeclarations() {
     let plan = DeploymentPlan::load(fixture.path(), false).expect("RPC alias");
     // Then both type halves and the exact server identity survive.
     let input = &plan.nodes[0].bindings.inputs["command"];
-    assert_eq!(input.sources, ["test/service/server"]);
+    assert_eq!(input.sources, [endpoint("test/service/server", "command")]);
     assert_eq!(input.contract.response.as_deref(), Some("test.Response"));
     assert_eq!(
         plan.connections[0].contract,
@@ -802,13 +889,13 @@ fn malformed_reusable_definitions_are_rejected_without_a_deployment() {
 
 #[test]
 fn explicit_caller_defaults_preserve_app_owned_endpoint_policies() {
-    // Given an old-style invocation that explicitly serializes default policies.
+    // Given an invocation that explicitly serializes default policies.
     let fixture = tempfile::tempdir().expect("fixture");
     write(
         fixture.path(),
         "main.yaml",
         &format!(
-            "{PROVIDER}modules:\n  a: {{source: a}}\n  c:\n    source: c\n    in:\n      state: {{type: test.State, from: a.state, kind: stream, response: null, qos: reliable, retention: volatile, replay: live, buffer: fifo}}\n"
+            "{PROVIDER}modules:\n  a: {{source: a}}\n  c:\n    source: c\n    in:\n      state: {{type: test.State, from: a.state, kind: stream, response: null, qos: default, retention: volatile, replay: live, buffer: fifo}}\n"
         ),
     );
     write(
@@ -836,5 +923,8 @@ fn explicit_caller_defaults_preserve_app_owned_endpoint_policies() {
         plan.nodes[0].bindings.outputs["state"].contract.qos,
         QosProfile::Sensor
     );
-    assert_eq!(plan.nodes[1].bindings.inputs["state"].sources, ["test/a"]);
+    assert_eq!(
+        plan.nodes[1].bindings.inputs["state"].sources,
+        [endpoint("test/a", "state")]
+    );
 }

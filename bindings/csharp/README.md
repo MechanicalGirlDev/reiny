@@ -49,8 +49,10 @@ The smoke uses real local pub/sub, embedded NUL payloads, schema
 values, provenance, readiness, multiple sessions, source/domain isolation,
 invalid input, and deterministic disposal. It requires the native library.
 
-Session constructors require an absolute prepared version-2 module-bindings JSON path.
+Session constructors require an absolute prepared version-3 module-bindings JSON path.
 Ports take a declared name, the contract type name, and a mandatory uint64 schema
 fingerprint. Source routing and policies come from the prepared contract, not caller
 overrides. Register all declared ports, then call `Ready()` before sending.
 Publisher discovery is not exposed by this managed facade.
+Received messages expose `Source` (namespace) and `SourcePort` (output name);
+same-type outputs retain distinct identities.

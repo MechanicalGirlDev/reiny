@@ -6,15 +6,16 @@
 //!
 //! ```ignore
 //! use reiny_ros2::ros2_client::{MessageTypeName, ServiceTypeName};
+//! use reiny_ros2::DdsQos;
 //!
 //! #[reiny::main]
 //! async fn main(cloudy: ModuleContext) -> reiny::Result<()> {
 //!     let ros = reiny_ros2::Ros::new(&cloudy, "reiny_bridge")?;          // ROS_DOMAIN_ID from the env
 //!     ros.export::<RobotState, JointState>(                                 // reiny → ROS
-//!         "state", "/joint_states", MessageTypeName::new("sensor_msgs", "JointState"), Qos::SENSOR,
+//!         "state", "/joint_states", MessageTypeName::new("sensor_msgs", "JointState"), DdsQos::SENSOR,
 //!         |s| JointState { .. })?;
 //!     ros.import::<Twist, CmdVel>(                                          // ROS → reiny
-//!         "cmd", "/cmd_vel", MessageTypeName::new("geometry_msgs", "Twist"), Qos::COMMAND,
+//!         "cmd", "/cmd_vel", MessageTypeName::new("geometry_msgs", "Twist"), DdsQos::COMMAND,
 //!         |t| CmdVel { .. })?;
 //!     ros.export_service::<Calibrate, SetBoolReq, SetBoolRes, _, _>(       // a ROS client → a reiny service
 //!         "calibrate", "/calibrate", &ServiceTypeName::new("std_srvs", "SetBool"), |q| .., |r| ..)?;
@@ -36,12 +37,12 @@
 //!   Reiny sources, buffering, replay, and publication policy come only from module bindings.
 //! - presence: `import` publishes under the configured endpoint namespace. The ROS graph is not mirrored.
 //! - `qos` configures only the ROS endpoint; it cannot override the reiny port's policy.
-//!   Reliability / durability / history map one to one. `priority` / `express` are dropped.
+//!   [`DdsQos`] specifies DDS reliability independently of reiny congestion control.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use prost::Message as ProstMessage;
-use reiny::{Durability, History, MessageType, ModuleContext, Qos, Reliability, Result, Service};
+use reiny::{Durability, History, MessageType, ModuleContext, Result, Service};
 use ros2_client::dds::rustdds::DomainParticipantBuilder;
 use ros2_client::ros2::{QosPolicies, QosPolicyBuilder, policy};
 use ros2_client::{
@@ -53,6 +54,56 @@ use tokio::task::JoinHandle;
 pub use ros2_client;
 
 mod auto;
+
+/// DDS delivery reliability, independent of reiny send-path congestion control.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DdsReliability {
+    /// DDS does not repair lost samples.
+    BestEffort,
+    /// DDS acknowledges and retransmits according to its reliability policy.
+    #[default]
+    Reliable,
+}
+
+/// Policies for the ROS endpoint only. Reiny endpoint policies remain app-owned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DdsQos {
+    /// DDS delivery reliability.
+    pub reliability: DdsReliability,
+    /// DDS history depth.
+    pub history: History,
+    /// DDS retained history for late readers.
+    pub durability: Durability,
+}
+
+impl DdsQos {
+    /// Reliable / keep-all / volatile DDS delivery.
+    pub const DEFAULT: Self = Self {
+        reliability: DdsReliability::Reliable,
+        history: History::KeepAll,
+        durability: Durability::Volatile,
+    };
+    /// Best-effort / keep-last one / volatile sensor samples.
+    pub const SENSOR: Self = Self {
+        reliability: DdsReliability::BestEffort,
+        history: History::KeepLast(1),
+        ..Self::DEFAULT
+    };
+    /// Reliable / keep-all / volatile command samples.
+    pub const COMMAND: Self = Self::DEFAULT;
+    /// Reliable / keep-last one / transient-local state samples.
+    pub const STATE: Self = Self {
+        history: History::KeepLast(1),
+        durability: Durability::TransientLocal,
+        ..Self::DEFAULT
+    };
+}
+
+impl Default for DdsQos {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
 
 /// `max_blocking_time` for `Reliable`. A starting point, matched to ROS 2's rmw default.
 const RELIABLE_BLOCKING_MS: i64 = 100;
@@ -142,7 +193,7 @@ impl<'c> Ros<'c> {
         port: &str,
         topic: &str,
         ty: MessageTypeName,
-        qos: Qos,
+        qos: DdsQos,
         convert: F,
     ) -> Result<()>
     where
@@ -160,7 +211,7 @@ impl<'c> Ros<'c> {
         port: &str,
         topic: &str,
         ty: MessageTypeName,
-        qos: Qos,
+        qos: DdsQos,
     ) -> Result<()>
     where
         T: ProstMessage + Default + MessageType + Send + 'static,
@@ -177,7 +228,7 @@ impl<'c> Ros<'c> {
         port: &str,
         topic: &str,
         ty: MessageTypeName,
-        qos: Qos,
+        qos: DdsQos,
         convert: F,
     ) -> Result<()>
     where
@@ -219,7 +270,7 @@ impl<'c> Ros<'c> {
         port: &str,
         topic: &str,
         ty: MessageTypeName,
-        qos: Qos,
+        qos: DdsQos,
         convert: F,
     ) -> Result<()>
     where
@@ -236,7 +287,7 @@ impl<'c> Ros<'c> {
         port: &str,
         topic: &str,
         ty: MessageTypeName,
-        qos: Qos,
+        qos: DdsQos,
     ) -> Result<()>
     where
         R: Message + Send + Sync + 'static,
@@ -253,7 +304,7 @@ impl<'c> Ros<'c> {
         port: &str,
         topic: &str,
         ty: MessageTypeName,
-        qos: Qos,
+        qos: DdsQos,
         convert: F,
     ) -> Result<()>
     where
@@ -429,12 +480,12 @@ fn parse_name(name: &str) -> Result<Name> {
     Name::parse(&absolute).map_err(|e| anyhow::anyhow!("ros2: bad name '{name}': {e:?}"))
 }
 
-/// reiny's [`Qos`] → DDS `QoS` (the ROS 2 column of §2.3). `priority` / `express` are dropped.
-fn qos_policies(qos: Qos) -> QosPolicies {
+/// DDS policies are explicit; reiny congestion control is never converted into delivery reliability.
+fn qos_policies(qos: DdsQos) -> QosPolicies {
     QosPolicyBuilder::new()
         .reliability(match qos.reliability {
-            Reliability::BestEffort => policy::Reliability::BestEffort,
-            Reliability::Reliable => policy::Reliability::Reliable {
+            DdsReliability::BestEffort => policy::Reliability::BestEffort,
+            DdsReliability::Reliable => policy::Reliability::Reliable {
                 max_blocking_time: ros2_client::ros2::Duration::from_millis(RELIABLE_BLOCKING_MS),
             },
         })
@@ -467,6 +518,22 @@ fn service_qos() -> QosPolicies {
 mod tests {
     use super::*;
 
+    #[test]
+    fn dds_default_is_explicit_and_independent_of_congestion() {
+        assert_eq!(DdsQos::default(), DdsQos::DEFAULT);
+        assert_eq!(DdsReliability::default(), DdsQos::DEFAULT.reliability);
+        assert_eq!(DdsQos::SENSOR.reliability, DdsReliability::BestEffort);
+        assert_eq!(DdsQos::COMMAND.reliability, DdsReliability::Reliable);
+        assert_eq!(
+            qos_policies(DdsQos {
+                reliability: DdsReliability::BestEffort,
+                ..DdsQos::STATE
+            })
+            .reliability(),
+            Some(policy::Reliability::BestEffort)
+        );
+    }
+
     /// ROS names are absolute. A relative one gets a `/` so `export("joint_states")` and
     /// `export("/joint_states")` reach the same topic, and a name ROS would reject fails here rather
     /// than at DDS discovery time, where nothing would ever arrive and nothing would say why.
@@ -495,23 +562,23 @@ mod tests {
         }
     }
 
-    /// The `QoS` mapping is the documented contract with ROS 2 (`docs/design/0.5.0.md` §2.3), and it is
+    /// The DDS policy mapping is the contract with ROS 2, and it is
     /// what decides whether a ROS subscriber and a reiny publisher are compatible at all — DDS refuses
     /// to connect a `BestEffort` writer to a `Reliable` reader.
     #[test]
     fn qos_maps_onto_the_ros_2_profiles() {
         // SENSOR: BestEffort / Volatile / KeepLast(1) — ROS 2's SensorDataQoS.
-        let sensor = qos_policies(Qos::SENSOR);
+        let sensor = qos_policies(DdsQos::SENSOR);
         assert!(!sensor.is_reliable());
         assert!(sensor.is_volatile());
 
         // COMMAND (= the default): Reliable / Volatile / KeepAll.
-        let command = qos_policies(Qos::COMMAND);
+        let command = qos_policies(DdsQos::COMMAND);
         assert!(command.is_reliable());
         assert!(command.is_volatile());
 
         // STATE: Reliable / TransientLocal / KeepLast(1) — reiny's latched, ROS 2's transient local.
-        let state = qos_policies(Qos::STATE);
+        let state = qos_policies(DdsQos::STATE);
         assert!(state.is_reliable());
         assert!(!state.is_volatile());
         assert_eq!(
@@ -529,9 +596,9 @@ mod tests {
     /// DDS can express clamps instead of wrapping into a negative depth.
     #[test]
     fn a_history_depth_too_large_for_dds_clamps() {
-        let huge = Qos {
+        let huge = DdsQos {
             history: History::KeepLast(usize::MAX),
-            ..Qos::DEFAULT
+            ..DdsQos::DEFAULT
         };
         let expected = QosPolicyBuilder::new()
             .reliability(policy::Reliability::Reliable {

@@ -363,7 +363,7 @@ impl ModuleContext {
         let observed_ports = Arc::downgrade(&self.module.ports);
         let observed_name = name.to_string();
         let shutdown = self.shutdown.clone();
-        let key = Key::topic(&self.domain, Some(namespace), READY_CHUNK);
+        let key = Key::module(&self.domain, Some(namespace), READY_CHUNK);
         let guard = self.engine.watch_alive(
             &key,
             Box::new(move |event| {
@@ -399,7 +399,7 @@ fn supervise_child(
     let process_name = name.to_string();
     let shutdown = cloudy.shutdown.clone();
     let engine = Arc::clone(&cloudy.engine);
-    let stop_key = Key::topic(
+    let stop_key = Key::module(
         &cloudy.domain,
         Some(&format!("{}/owned/{name}", cloudy.id)),
         STOP_CHUNK,
@@ -491,9 +491,33 @@ pub(super) fn delegated_bindings(bindings: &ModuleBindings, name: &str) -> Resul
 
 fn validate_report(bindings: &ModuleBindings, report: &ModuleReport) -> Result<()> {
     anyhow::ensure!(
-        report.version == MODULE_REPORT_VERSION && report.namespace == bindings.namespace,
+        report.version == MODULE_REPORT_VERSION
+            && report.namespace == bindings.namespace
+            && report.endpoint_namespace == bindings.endpoint_namespace
+            && report.fingerprint_version == reiny_core::SCHEMA_FINGERPRINT_VERSION,
         "owned child report identity differs"
     );
+    for (name, input) in &bindings.inputs {
+        anyhow::ensure!(
+            report.inputs.get(name).is_some_and(|port| port.endpoint
+                == crate::bindings::PortEndpoint::Input {
+                    sources: input.sources.clone()
+                }),
+            "owned child changed input endpoint sources"
+        );
+    }
+    for name in bindings.outputs.keys() {
+        anyhow::ensure!(
+            report.outputs.get(name).is_some_and(|port| port.endpoint
+                == crate::bindings::PortEndpoint::Output {
+                    address: crate::bindings::EndpointAddress {
+                        namespace: bindings.endpoint_namespace.clone(),
+                        port: name.clone(),
+                    }
+                }),
+            "owned child changed output endpoint address"
+        );
+    }
     for (declared, actual) in [
         (
             bindings

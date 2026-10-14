@@ -21,13 +21,15 @@
 
 use std::collections::BTreeMap;
 use std::env;
-// writeln! is used only by the codegen and by the fingerprint (the descriptors feature).
-#[cfg(feature = "descriptors")]
+#[cfg(feature = "compile")]
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+
+#[cfg(feature = "descriptors")]
+mod fingerprint;
 
 /// Version of the build-time type catalog language.
 pub const TYPE_CATALOG_VERSION: u32 = 3;
@@ -440,7 +442,12 @@ pub fn compile_with(customize: impl FnOnce(&mut prost_build::Config)) -> Result<
     } else {
         let plan = compile_plan(&resolution)?;
         let fds = compile_protos(&plan, &out_dir, customize)?;
-        let scan = scan_descriptors(&fds, &plan.own_names);
+        let fingerprint_names = plan
+            .entries
+            .iter()
+            .map(|entry| entry.fq_name())
+            .collect::<Vec<_>>();
+        let scan = scan_descriptors(&fds, &plan.own_names, &fingerprint_names)?;
         if let Some(meta) = &plan.emit_meta {
             emit_schema_metadata(meta, &scan.fqns)?;
         }
@@ -1152,10 +1159,15 @@ struct DescriptorScan {
 }
 
 /// Collect the FQNs of the files listed in `own_names` as "ours" (empty means all of them are ours).
-/// Fingerprints are computed for every message, imported ones included — only our own types are ever
-/// looked up, so it does no harm and it removes a branch.
+/// Fingerprint only generated catalog entries: other definitions may use unsupported features
+/// without participating in a generated message's reachable schema.
 #[cfg(feature = "compile")]
-fn scan_descriptors(fds: &prost_types::FileDescriptorSet, own_names: &[String]) -> DescriptorScan {
+fn scan_descriptors(
+    fds: &prost_types::FileDescriptorSet,
+    own_names: &[String],
+    fingerprint_names: &[String],
+) -> Result<DescriptorScan> {
+    let index = fingerprint::Index::new(fds)?;
     let mut scan = DescriptorScan {
         fqns: Vec::new(),
         fingerprints: BTreeMap::new(),
@@ -1177,7 +1189,15 @@ fn scan_descriptors(fds: &prost_types::FileDescriptorSet, own_names: &[String]) 
             }
         }
     }
-    scan
+    for name in fingerprint_names {
+        scan.fingerprints.insert(
+            name.clone(),
+            index
+                .message(name)?
+                .with_context(|| format!("missing schema fingerprint for message {name}"))?,
+        );
+    }
+    Ok(scan)
 }
 
 #[cfg(feature = "compile")]
@@ -1191,7 +1211,6 @@ fn walk_message(
     if mine {
         scan.fqns.push(fq.clone());
     }
-    scan.fingerprints.insert(fq.clone(), fingerprint(&fq, msg));
 
     let nested_prefix = format!("{fq}.");
     for nested in &msg.nested_type {
@@ -1212,47 +1231,6 @@ fn walk_message(
     }
 }
 
-/// One message's schema fingerprint.
-///
-/// The ingredients are **only the fields the message itself declares** (number / name / type / label /
-/// referenced type name / oneof membership). It does not follow a referenced message any deeper — what a
-/// fingerprint guards against is "a same-named but different type landing on the same topic", and the
-/// top-level shape settles that. If a leaf's changes must matter, that leaf should be the topic type.
-///
-/// The hash is FNV-1a 64. `DefaultHasher` is unusable because its values can change between Rust
-/// releases (a fingerprint is worthless unless it is stable across builds).
-#[cfg(feature = "descriptors")]
-fn fingerprint(fq_name: &str, msg: &prost_types::DescriptorProto) -> u64 {
-    let mut fields: Vec<&prost_types::FieldDescriptorProto> = msg.field.iter().collect();
-    fields.sort_by_key(|f| f.number());
-
-    let mut canonical = format!("m {fq_name}\n");
-    for f in fields {
-        writeln!(
-            canonical,
-            "f {} {} {} {} {} {}",
-            f.number(),
-            f.name(),
-            f.r#type() as i32,
-            f.label() as i32,
-            f.type_name(),
-            f.oneof_index.unwrap_or(-1)
-        )
-        .ok();
-    }
-    fnv1a64(canonical.as_bytes())
-}
-
-#[cfg(feature = "descriptors")]
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
 // ---------------------------------------------------------------------------
 // Reading an encoded descriptor set (what `reiny bag` uses on an `@schema` response)
 // ---------------------------------------------------------------------------
@@ -1260,10 +1238,15 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// Look up the fingerprint of the fully qualified message name `message` in an encoded
 /// `FileDescriptorSet`. `Ok(None)` when the set does not have it. It is the same computation as a
 /// generated type's `MessageType::SCHEMA_FINGERPRINT`, so it can be matched against what rides on the bus.
+///
+/// Includes the reachable message/enum closure, not unrelated types or source annotations.
+/// Unsupported syntax (including editions), reachable protobuf extensions, unresolved references,
+/// duplicate definitions and invalid oneof indexes are errors. The prost descriptor model does not
+/// retain unknown options or edition features; those cannot be interpreted by this API.
 #[cfg(feature = "descriptors")]
 pub fn message_fingerprint(file_set: &[u8], message: &str) -> Result<Option<u64>> {
     let fds = decode_file_set(file_set)?;
-    Ok(find_message(&fds, message).map(|(_, msg)| fingerprint(message, msg)))
+    fingerprint::Index::new(&fds)?.message(message)
 }
 
 /// The `FileDescriptorSet` (encoded) pruned to the file defining `message` plus its transitive imports.
@@ -2119,6 +2102,21 @@ mod tests {
     fn fingerprint_tracks_field_shape_not_order() {
         use prost_types::{DescriptorProto, FieldDescriptorProto};
 
+        let fingerprint = |fq: &str, message: &DescriptorProto| {
+            let (package, _) = fq.rsplit_once('.').unwrap();
+            let set = prost_types::FileDescriptorSet {
+                file: vec![prost_types::FileDescriptorProto {
+                    package: Some(package.to_owned()),
+                    message_type: vec![message.clone()],
+                    ..Default::default()
+                }],
+            };
+            fingerprint::Index::new(&set)
+                .unwrap()
+                .message(fq)
+                .unwrap()
+                .unwrap()
+        };
         let field = |number: i32, name: &str, ty: i32| FieldDescriptorProto {
             name: Some(name.to_string()),
             number: Some(number),
@@ -2413,10 +2411,12 @@ mod tests {
     fn message_fingerprint_matches_direct_fingerprint() {
         let set = two_file_set();
         let decoded: prost_types::FileDescriptorSet = prost::Message::decode(&*set).unwrap();
-        let (_, point) = find_message(&decoded, "geo.Point").unwrap();
         assert_eq!(
             message_fingerprint(&set, "geo.Point").unwrap(),
-            Some(fingerprint("geo.Point", point)),
+            fingerprint::Index::new(&decoded)
+                .unwrap()
+                .message("geo.Point")
+                .unwrap(),
         );
         assert_eq!(message_fingerprint(&set, "geo.Missing").unwrap(), None);
     }

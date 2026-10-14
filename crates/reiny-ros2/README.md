@@ -8,15 +8,16 @@ per type, how a reiny message becomes a ROS message and back:
 ```rust
 use reiny::prelude::*;
 use reiny_ros2::ros2_client::{MessageTypeName, ServiceTypeName};
+use reiny_ros2::DdsQos;
 
 #[reiny::main]
 async fn main(cloudy: ModuleContext) -> reiny::Result<()> {
     let ros = reiny_ros2::Ros::new(&cloudy, "reiny_bridge")?;      // ROS_DOMAIN_ID from the environment
     ros.export::<RobotState, JointState, _>(                          // reiny → ROS
-        "state", "/joint_states", MessageTypeName::new("sensor_msgs", "JointState"), Qos::SENSOR,
+        "state", "/joint_states", MessageTypeName::new("sensor_msgs", "JointState"), DdsQos::SENSOR,
         |s| JointState { /* … */ })?;
     ros.import::<Twist, CmdVel, _>(                                   // ROS → reiny
-        "cmd", "/cmd_vel", MessageTypeName::new("geometry_msgs", "Twist"), Qos::COMMAND,
+        "cmd", "/cmd_vel", MessageTypeName::new("geometry_msgs", "Twist"), DdsQos::COMMAND,
         |t| CmdVel { /* … */ })?;
     ros.export_service::<Calibrate, SetBoolReq, SetBoolRes, _, _>(    // ROS clients → a reiny service
         "calibrate", "/calibrate", &ServiceTypeName::new("std_srvs", "SetBool"), |q| Calibrate { .. }, |r| SetBoolRes { .. })?;
@@ -34,9 +35,12 @@ async fn main(cloudy: ModuleContext) -> reiny::Result<()> {
   and `calibrate` an RPC input with an exact service source. The automatic
   routes also require a port name; `import_service` uses a declared RPC output.
 - Reiny sources, buffering, replay, retention and transport policy come from
-  module bindings. The route's `qos` argument configures ROS only: reliability /
-  durability / history map onto DDS; `priority` and `express` are dropped.
-  Imported samples carry the configured endpoint namespace as source.
+  module bindings. The route's `DdsQos` argument configures ROS only: DDS
+  reliability, durability and history. `DdsReliability` is independent of
+  reiny's `CongestionControl`; blocking congestion never implies DDS delivery.
+  Imported samples carry the configured endpoint namespace and declared output
+  port as `source` and `source_port`. Exact namespace/port pairs route Reiny
+  traffic; sharing a protobuf type does not select or connect another port.
 - The ROS distribution is a feature (`jazzy` by default, `humble` … `lyrical`),
   passed through to `ros2-client`.
 

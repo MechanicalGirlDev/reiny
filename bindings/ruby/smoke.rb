@@ -15,6 +15,7 @@ publisher.send(payload)
 message = subscriber.receive(1000)
 raise "Missing or changed payload" unless message && message.payload == payload
 raise "Wrong source" unless message.source == "sender"
+raise "Wrong source port" unless message.source_port == "out"
 raise "Wrong schema" unless message.schema == 42
 receiver.shutdown
 raise "Receive continued after shutdown" unless subscriber.receive(1000).nil?

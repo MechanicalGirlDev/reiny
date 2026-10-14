@@ -52,6 +52,7 @@ REINY_API int32_t reiny_publisher_send(reiny_handle publisher, const uint8_t *da
 REINY_API int32_t reiny_subscription_receive(reiny_handle subscription, uint64_t timeout_ms, reiny_handle *out);
 REINY_API int32_t reiny_message_payload(reiny_handle message, reiny_handle *out);
 REINY_API int32_t reiny_message_source(reiny_handle message, reiny_handle *out);
+REINY_API int32_t reiny_message_source_port(reiny_handle message, reiny_handle *out);
 REINY_API int32_t reiny_message_schema(reiny_handle message, uint8_t *has, uint64_t *value);
 REINY_API int32_t reiny_message_timestamp(reiny_handle message, uint8_t *has, uint64_t *value);
 REINY_API int32_t reiny_buffer_len(reiny_handle buffer, size_t *out);

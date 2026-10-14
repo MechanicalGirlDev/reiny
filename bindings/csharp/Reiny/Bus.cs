@@ -97,7 +97,7 @@ public sealed class Publisher : Resource
     });
 }
 
-public sealed record Message(byte[] Payload, string Source, ulong? Schema, ulong? Timestamp);
+public sealed record Message(byte[] Payload, string Source, string SourcePort, ulong? Schema, ulong? Timestamp);
 
 public sealed class Subscription : Resource
 {
@@ -114,9 +114,11 @@ public sealed class Subscription : Resource
             var payload = Native.Buffer(payloadHandle);
             Native.Check(Native.MessageSource(message, out var sourceHandle));
             var source = Native.StringBuffer(sourceHandle);
+            Native.Check(Native.MessageSourcePort(message, out var sourcePortHandle));
+            var sourcePort = Native.StringBuffer(sourcePortHandle);
             Native.Check(Native.MessageSchema(message, out var hasSchema, out var schema));
             Native.Check(Native.MessageTimestamp(message, out var hasTimestamp, out var timestamp));
-            return new Message(payload, source, hasSchema != 0 ? schema : null,
+            return new Message(payload, source, sourcePort, hasSchema != 0 ? schema : null,
                 hasTimestamp != 0 ? timestamp : null);
         }
         finally { Native.Check(Native.Release(message)); }

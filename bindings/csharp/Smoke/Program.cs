@@ -34,6 +34,7 @@ publisher.Send(payload);
 var message = all.Receive(1000) ?? throw new Exception("Missing message");
 Require(message.Payload.SequenceEqual(payload), "Binary payload");
 Require(message.Source == "sender" && message.Schema == 42UL, "Provenance and schema");
+Require(message.SourcePort == "out", "Named source port");
 Require(filtered.Receive(1000)?.Payload.SequenceEqual(payload) == true, "Source filter delivery");
 otherPublisher.Send([2]);
 Require(all.Receive(1000)?.Source == "other", "Second session delivery");

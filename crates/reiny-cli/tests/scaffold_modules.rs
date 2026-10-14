@@ -101,7 +101,7 @@ fn runtime_plan_accepts_a_bare_manifest_filename_in_its_own_directory() {
     );
     assert_eq!(plan["nodes"][0]["namespace"], "bare-manifest");
     let recorded = reiny_launch::DeploymentStatus {
-        version: 1,
+        version: 2,
         root: sandbox.0.canonicalize().unwrap(),
         deployment: "bare-manifest".into(),
         domain: "bare-manifest".into(),
@@ -128,6 +128,19 @@ fn runtime_plan_accepts_a_bare_manifest_filename_in_its_own_directory() {
     );
     let observed: reiny_launch::DeploymentStatus = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(observed, recorded);
+    let mut legacy = recorded;
+    legacy.version = 1;
+    std::fs::write(
+        sandbox.0.join(".reiny/state.json"),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !sandbox
+            .run(&["status", "main.yaml", "--json"])
+            .status
+            .success()
+    );
 }
 
 #[test]

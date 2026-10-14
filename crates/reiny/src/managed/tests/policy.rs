@@ -7,6 +7,42 @@ use crate::{Durability, Result};
 use std::any::Any;
 use std::sync::Mutex;
 
+#[test]
+fn qos_profiles_serialize_exact_tags_and_reject_legacy_reliable() {
+    assert_eq!(QosProfile::default(), QosProfile::Default);
+    let default: EndpointContract =
+        serde_json::from_str(r#"{"type":"test.Probe"}"#).expect("default contract");
+    assert_eq!(default.qos, QosProfile::Default);
+    for (tag, profile) in [
+        ("default", QosProfile::Default),
+        ("command", QosProfile::Command),
+        ("sensor", QosProfile::Sensor),
+    ] {
+        let encoded = format!("\"{tag}\"");
+        assert_eq!(
+            serde_json::from_str::<QosProfile>(&encoded).expect("profile"),
+            profile
+        );
+        assert_eq!(
+            serde_json::to_string(&profile).expect("serialized profile"),
+            encoded
+        );
+    }
+    assert!(serde_json::from_str::<QosProfile>("\"reliable\"").is_err());
+    assert!(
+        serde_json::from_str::<EndpointContract>(r#"{"type":"test.Probe","qos":"reliable"}"#)
+            .is_err()
+    );
+    let mut rpc = contract("test.Request");
+    rpc.kind = crate::bindings::PortKind::Rpc;
+    rpc.response = Some("test.Response".into());
+    assert!(rpc.validate(false).is_ok());
+    for profile in [QosProfile::Command, QosProfile::Sensor] {
+        rpc.qos = profile;
+        assert!(rpc.validate(false).is_err());
+    }
+}
+
 #[derive(Default)]
 struct Declarations {
     subscriptions: Vec<Key>,
@@ -74,7 +110,94 @@ impl Engine for Observed {
 #[tokio::test]
 async fn typed_and_dynamic_publishers_share_qos_retention_and_presence_order() {
     for dynamic in [false, true] {
-        for profile in [QosProfile::Reliable, QosProfile::Sensor] {
+        for retention in [Retention::Volatile, Retention::Last] {
+            let bus = Arc::new(Observed::default());
+            let mut binding = bindings(SENDER);
+            let mut output = contract("test.Probe");
+            output.retention = retention;
+            binding
+                .outputs
+                .insert("outgoing".into(), OutputBinding { contract: output });
+            let sender = ModuleContext::open(options(bus.clone(), binding))
+                .await
+                .expect("sender");
+            let key = Key::output(DOMAIN, SENDER, "outgoing", Probe::TYPE_NAME);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let _subscription = bus
+                .subscribe(
+                    &key,
+                    Box::new(move |sample| {
+                        tx.send(sample).expect("live receiver");
+                    }),
+                )
+                .expect("subscription");
+            let typed = if dynamic {
+                None
+            } else {
+                Some(sender.output::<Probe>("outgoing").expect("typed"))
+            };
+            let raw = if dynamic {
+                Some(
+                    sender
+                        .raw_output("outgoing", "test.Probe", Probe::SCHEMA_FINGERPRINT)
+                        .expect("dynamic"),
+                )
+            } else {
+                None
+            };
+            for value in [7, 8] {
+                let message = Probe { value };
+                if let Some(publisher) = &typed {
+                    publisher.send(message).await.expect("typed send");
+                } else {
+                    raw.as_ref()
+                        .expect("dynamic publisher")
+                        .send(message.encode_to_vec())
+                        .expect("dynamic send");
+                }
+                let sample = timeout(PATIENCE, rx.recv())
+                    .await
+                    .expect("live sample")
+                    .expect("open");
+                assert_eq!(sample.payload, Probe { value }.encode_to_vec());
+                assert_eq!(
+                    sample.attachment,
+                    Some(Probe::SCHEMA_FINGERPRINT.to_le_bytes().to_vec())
+                );
+            }
+            {
+                let declarations = bus.declarations.lock().expect("declarations");
+                let mut qos = Qos::DEFAULT;
+                qos.durability = if retention == Retention::Last {
+                    Durability::TransientLocal
+                } else {
+                    Durability::Volatile
+                };
+                assert_eq!(declarations.publishers, vec![(key.clone(), qos)]);
+                let events: Vec<_> = declarations
+                    .publisher_events
+                    .iter()
+                    .filter(|(event_key, _)| event_key == &key)
+                    .map(|(_, event)| *event)
+                    .collect();
+                assert_eq!(
+                    events,
+                    if retention == Retention::Last {
+                        vec!["sender", "queryable", "presence"]
+                    } else {
+                        vec!["sender", "presence"]
+                    }
+                );
+            }
+            assert_retained_reply(bus.as_ref(), &key, retention).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn typed_and_dynamic_reject_explicit_congestion_before_side_effects() {
+    for dynamic in [false, true] {
+        for profile in [QosProfile::Command, QosProfile::Sensor] {
             for retention in [Retention::Volatile, Retention::Last] {
                 let bus = Arc::new(Observed::default());
                 let mut binding = bindings(SENDER);
@@ -87,78 +210,33 @@ async fn typed_and_dynamic_publishers_share_qos_retention_and_presence_order() {
                 let sender = ModuleContext::open(options(bus.clone(), binding))
                     .await
                     .expect("sender");
-                let key = Key::topic(DOMAIN, Some(SENDER), Probe::TYPE_NAME);
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-                let _subscription = bus
-                    .subscribe(
-                        &key,
-                        Box::new(move |sample| {
-                            tx.send(sample).expect("live receiver");
-                        }),
-                    )
-                    .expect("subscription");
-                let typed = if dynamic {
-                    None
+                let before = bus
+                    .declarations
+                    .lock()
+                    .expect("declarations")
+                    .publisher_events
+                    .clone();
+                let result = if dynamic {
+                    sender
+                        .raw_output("outgoing", "test.Probe", Probe::SCHEMA_FINGERPRINT)
+                        .map(|_| ())
                 } else {
-                    Some(sender.output::<Probe>("outgoing").expect("typed"))
+                    sender.output::<Probe>("outgoing").map(|_| ())
                 };
-                let raw = if dynamic {
-                    Some(
-                        sender
-                            .raw_output("outgoing", "test.Probe", Probe::SCHEMA_FINGERPRINT)
-                            .expect("dynamic"),
-                    )
-                } else {
-                    None
-                };
-                for value in [7, 8] {
-                    let message = Probe { value };
-                    if let Some(publisher) = &typed {
-                        publisher.send(message).await.expect("typed send");
-                    } else {
-                        raw.as_ref()
-                            .expect("dynamic publisher")
-                            .send(message.encode_to_vec())
-                            .expect("dynamic send");
-                    }
-                    let sample = timeout(PATIENCE, rx.recv())
-                        .await
-                        .expect("live sample")
-                        .expect("open");
-                    assert_eq!(sample.payload, Probe { value }.encode_to_vec());
-                    assert_eq!(
-                        sample.attachment,
-                        Some(Probe::SCHEMA_FINGERPRINT.to_le_bytes().to_vec())
-                    );
-                }
-                {
-                    let declarations = bus.declarations.lock().expect("declarations");
-                    let mut qos = match profile {
-                        QosProfile::Reliable => Qos::DEFAULT,
-                        QosProfile::Sensor => Qos::SENSOR,
-                    };
-                    qos.durability = if retention == Retention::Last {
-                        Durability::TransientLocal
-                    } else {
-                        Durability::Volatile
-                    };
-                    assert_eq!(declarations.publishers, vec![(key.clone(), qos)]);
-                    let events: Vec<_> = declarations
-                        .publisher_events
-                        .iter()
-                        .filter(|(event_key, _)| event_key == &key)
-                        .map(|(_, event)| *event)
-                        .collect();
-                    assert_eq!(
-                        events,
-                        if retention == Retention::Last {
-                            vec!["sender", "queryable", "presence"]
-                        } else {
-                            vec!["sender", "presence"]
-                        }
-                    );
-                }
-                assert_retained_reply(bus.as_ref(), &key, retention).await;
+                assert!(
+                    result
+                        .expect_err("Local rejects explicit congestion policies")
+                        .to_string()
+                        .contains("congestion")
+                );
+                assert_eq!(
+                    bus.declarations
+                        .lock()
+                        .expect("declarations")
+                        .publisher_events,
+                    before,
+                    "reject before declaring sender, retention, or presence"
+                );
             }
         }
     }
@@ -202,7 +280,7 @@ async fn fan_in_declares_exact_subscriptions_and_one_shared_latest_buffer() {
     let sources = [SENDER, "deployment/second"];
     let mut binding = bindings(RECEIVER);
     let mut incoming = input(SENDER);
-    incoming.sources = sources.map(str::to_string).to_vec();
+    incoming.sources = sources.map(|source| endpoint(source, "outgoing")).to_vec();
     incoming.contract.buffer = ReceiveBuffer::Latest(2);
     binding.inputs.insert("incoming".into(), incoming);
     let receiver = ModuleContext::open(options(bus.clone(), binding))
@@ -211,7 +289,7 @@ async fn fan_in_declares_exact_subscriptions_and_one_shared_latest_buffer() {
     let mut subscriber = receiver.input::<Probe>("incoming").expect("fan in");
     assert_eq!(
         bus.declarations.lock().expect("declarations").subscriptions,
-        sources.map(|source| Key::topic(DOMAIN, Some(source), Probe::TYPE_NAME)),
+        sources.map(|source| Key::output(DOMAIN, source, "outgoing", Probe::TYPE_NAME)),
     );
     let first = producer(bus.clone(), sources[0]).await;
     let second = producer(bus.clone(), sources[1]).await;
@@ -254,7 +332,7 @@ async fn manifest_controls_publisher_qos_retention_and_each_source_replay() {
     let mut publishers = Vec::new();
     for (source, qos) in sources
         .into_iter()
-        .zip([QosProfile::Sensor, QosProfile::Reliable])
+        .zip([QosProfile::Default, QosProfile::Default])
     {
         let mut binding = bindings(source);
         let mut output = contract("test.Probe");
@@ -274,7 +352,7 @@ async fn manifest_controls_publisher_qos_retention_and_each_source_replay() {
             declarations[0].1,
             Qos {
                 durability: Durability::TransientLocal,
-                ..Qos::SENSOR
+                ..Qos::DEFAULT
             }
         );
         assert_eq!(
@@ -295,7 +373,7 @@ async fn manifest_controls_publisher_qos_retention_and_each_source_replay() {
         .expect("retained");
     let mut binding = bindings(RECEIVER);
     let mut incoming = input(SENDER);
-    incoming.sources = sources.map(str::to_string).to_vec();
+    incoming.sources = sources.map(|source| endpoint(source, "outgoing")).to_vec();
     incoming.contract.replay = Replay::Last;
     binding.inputs.insert("incoming".into(), incoming);
     let receiver = ModuleContext::open(options(bus.clone(), binding))

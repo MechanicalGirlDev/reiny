@@ -82,7 +82,7 @@ async fn managed_input_rejects_missing_malformed_and_mismatching_schema() {
     let mut incoming = receiver.input::<Probe>("incoming").expect("input");
     let publisher = bus
         .publisher(
-            &Key::topic(DOMAIN, Some(SENDER), Probe::TYPE_NAME),
+            &Key::output(DOMAIN, SENDER, "outgoing", Probe::TYPE_NAME),
             &Qos::DEFAULT,
         )
         .expect("raw publisher");
@@ -127,7 +127,7 @@ async fn undefined_and_wrong_type_ports_fail_before_registration() {
         "incoming".to_string(),
         InputBinding {
             contract: super::contract("other.Probe"),
-            sources: vec![SENDER.to_string()],
+            sources: vec![endpoint(SENDER, "outgoing")],
         },
     );
     let cloudy = ModuleContext::open(options(Arc::new(Local::new()), contract))
@@ -148,7 +148,7 @@ async fn managed_ports_reject_incompatible_compiled_topic_metadata() {
         "incoming".to_string(),
         InputBinding {
             contract: super::contract("test.Probe"),
-            sources: vec![SENDER.to_string()],
+            sources: vec![endpoint(SENDER, "outgoing")],
         },
     );
     contract.outputs.insert(
@@ -166,7 +166,7 @@ async fn managed_ports_reject_incompatible_compiled_topic_metadata() {
 }
 
 #[tokio::test]
-async fn duplicate_transport_outputs_fail_even_when_declared_names_differ() {
+async fn same_type_outputs_keep_exact_names_and_source_provenance() {
     // Given two output names with the same exact transport type.
     let mut contract = bindings(SENDER);
     for (name, ty) in [("first", "test.Probe"), ("second", "test.Probe")] {
@@ -177,10 +177,197 @@ async fn duplicate_transport_outputs_fail_even_when_declared_names_differ() {
             },
         );
     }
-    // The shared contract validator rejects ambiguous addresses before opening the context.
-    assert!(
-        ModuleContext::open(options(Arc::new(Local::new()), contract))
+    let bus = Arc::new(Local::new());
+    let source = ModuleContext::open(options(bus.clone(), contract))
+        .await
+        .expect("source");
+    let first = source.output::<Probe>("first").expect("first output");
+    let second = source.output::<Probe>("second").expect("second output");
+    let mut binding = bindings(RECEIVER);
+    for name in ["first", "second"] {
+        binding.inputs.insert(
+            name.into(),
+            InputBinding {
+                contract: super::contract(Probe::TYPE_NAME),
+                sources: vec![endpoint(SENDER, name)],
+            },
+        );
+    }
+    let receiver = ModuleContext::open(options(bus, binding))
+        .await
+        .expect("receiver");
+    let mut first_in = receiver.input::<Probe>("first").expect("first input");
+    let mut second_in = receiver
+        .raw_input("second", Probe::TYPE_NAME, Probe::SCHEMA_FINGERPRINT)
+        .expect("second input");
+    source.ready().expect("source ready");
+    receiver.ready().expect("receiver ready");
+    second.send(Probe { value: 22 }).await.expect("second send");
+    first.send(Probe { value: 11 }).await.expect("first send");
+    let a = timeout(PATIENCE, first_in.recv_envelope())
+        .await
+        .expect("first deadline")
+        .expect("first");
+    let b = timeout(PATIENCE, second_in.recv())
+        .await
+        .expect("second deadline")
+        .expect("second");
+    assert_eq!(
+        (a.source.as_str(), a.source_port.as_str(), a.value.value),
+        (SENDER, "first", 11)
+    );
+    assert_eq!(
+        (
+            b.source.as_str(),
+            b.source_port.as_str(),
+            Probe::decode(b.payload.as_slice()).expect("decode").value
+        ),
+        (SENDER, "second", 22)
+    );
+    assert_eq!(first_in.stats().received, 1);
+    assert_eq!(second_in.stats().received, 1);
+}
+
+#[tokio::test]
+async fn retained_fan_in_and_discovery_keep_same_namespace_ports_distinct() {
+    let bus = Arc::new(Local::new());
+    let mut binding = bindings(SENDER);
+    for name in ["first", "second"] {
+        binding.outputs.insert(
+            name.into(),
+            OutputBinding {
+                contract: EndpointContract {
+                    retention: crate::bindings::Retention::Last,
+                    ..contract(Probe::TYPE_NAME)
+                },
+            },
+        );
+    }
+    let sender = ModuleContext::open(options(bus.clone(), binding))
+        .await
+        .expect("sender");
+    let first = sender.output::<Probe>("first").expect("first");
+    let second = sender.output::<Probe>("second").expect("second");
+    first
+        .send(Probe { value: 10 })
+        .await
+        .expect("first retained");
+    second
+        .send(Probe { value: 20 })
+        .await
+        .expect("second retained");
+    sender.ready().expect("ready");
+    let mut binding = bindings(RECEIVER);
+    binding.inputs.insert(
+        "both".into(),
+        InputBinding {
+            contract: EndpointContract {
+                replay: crate::bindings::Replay::Last,
+                ..contract(Probe::TYPE_NAME)
+            },
+            sources: vec![endpoint(SENDER, "first"), endpoint(SENDER, "second")],
+        },
+    );
+    let receiver = ModuleContext::open(options(bus.clone(), binding))
+        .await
+        .expect("receiver");
+    let mut incoming = receiver.input::<Probe>("both").expect("fan in");
+    let mut ready = receiver
+        .watch_input_ready("both")
+        .expect("module ready watch");
+    assert_eq!(
+        timeout(PATIENCE, ready.recv()).await.expect("ready event"),
+        Some(Presence::Joined(Key::module(
+            DOMAIN,
+            Some(SENDER),
+            "@ready"
+        )))
+    );
+    drop(first);
+    assert_eq!(
+        timeout(PATIENCE, ready.recv())
             .await
-            .is_err()
+            .expect("one module departure"),
+        Some(Presence::Left(Key::module(DOMAIN, Some(SENDER), "@ready")))
+    );
+    // The vanished first source must not suppress the other port's retained value.
+    let retained = timeout(PATIENCE, incoming.recv_envelope())
+        .await
+        .expect("retained")
+        .expect("sample");
+    assert_eq!(
+        (retained.source_port.as_str(), retained.value.value),
+        ("second", 20)
+    );
+    assert_eq!(
+        receiver.publishers::<Probe>().await.expect("publishers"),
+        vec![endpoint(SENDER, "second")]
+    );
+    let schemas = receiver.schemas(Probe::TYPE_NAME).await.expect("schemas");
+    assert!(
+        schemas
+            .iter()
+            .any(|schema| schema.source == SENDER && schema.source_port == "second")
+    );
+    assert!(
+        schemas
+            .iter()
+            .any(|schema| schema.source == RECEIVER && schema.source_port == "both")
+    );
+    drop(second);
+}
+
+#[tokio::test]
+async fn both_retained_outputs_in_one_namespace_replay_without_deduplicating_ports() {
+    let bus = Arc::new(Local::new());
+    let mut binding = bindings(SENDER);
+    for name in ["first", "second"] {
+        binding.outputs.insert(
+            name.into(),
+            OutputBinding {
+                contract: EndpointContract {
+                    retention: crate::bindings::Retention::Last,
+                    ..contract(Probe::TYPE_NAME)
+                },
+            },
+        );
+    }
+    let sender = ModuleContext::open(options(bus.clone(), binding))
+        .await
+        .expect("sender");
+    let first = sender.output::<Probe>("first").expect("first");
+    let second = sender.output::<Probe>("second").expect("second");
+    first.send(Probe { value: 10 }).await.expect("send");
+    second.send(Probe { value: 20 }).await.expect("send");
+    let mut binding = bindings(RECEIVER);
+    binding.inputs.insert(
+        "both".into(),
+        InputBinding {
+            contract: EndpointContract {
+                replay: crate::bindings::Replay::Last,
+                ..contract(Probe::TYPE_NAME)
+            },
+            sources: vec![endpoint(SENDER, "first"), endpoint(SENDER, "second")],
+        },
+    );
+    let receiver = ModuleContext::open(options(bus, binding))
+        .await
+        .expect("receiver");
+    let mut incoming = receiver.input::<Probe>("both").expect("fan in");
+    let mut actual = BTreeMap::new();
+    for _ in 0..2 {
+        let sample = timeout(PATIENCE, incoming.recv_envelope())
+            .await
+            .expect("replay")
+            .expect("sample");
+        actual.insert(sample.source_port, sample.value.value);
+    }
+    assert_eq!(
+        actual,
+        BTreeMap::from([("first".into(), 10), ("second".into(), 20)])
+    );
+    assert_eq!(
+        receiver.publishers::<Probe>().await.expect("publishers"),
+        vec![endpoint(SENDER, "first"), endpoint(SENDER, "second")]
     );
 }

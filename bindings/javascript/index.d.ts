@@ -2,6 +2,7 @@
 export interface Message {
   readonly payload: Uint8Array;
   readonly source: string;
+  readonly sourcePort: string;
   readonly schema: bigint | undefined;
   readonly timestamp: bigint | undefined;
 }

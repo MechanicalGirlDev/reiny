@@ -80,8 +80,8 @@ pub use service::{CallError, Request, RpcClient, RpcServer};
 /// The type vocabulary lives in `reiny-core` (`no_std`), so that places where zenoh does not run
 /// (`reiny-link`'s MCU side) share the same traits. The downstream path is still `reiny::MessageType`.
 pub use reiny_core::{
-    Descriptor, Durability, History, MessageType, PortDirection, PortType, Priority, Qos,
-    Reliability, Service, StaticPort,
+    CongestionControl, Descriptor, Durability, History, MessageType, PortDirection, PortType,
+    Priority, Qos, SCHEMA_FINGERPRINT_VERSION, Service, StaticEndpointAddress, StaticPort,
 };
 
 /// Transport dependency for engine implementations and control-plane tooling.
@@ -244,23 +244,28 @@ impl ModuleContext {
         SubscriberBuilder::new(self)
     }
 
-    /// The launch ids currently publishing the type `T` (ourselves included, sorted by id).
+    /// The exact endpoints currently publishing `T`, sorted by namespace and port.
     ///
     /// [`ModuleContext::output`] always accompanies a publisher with a liveliness token on the same key
     /// (there is no opt-out — allowing a publisher without one would make this return value
     /// untrustworthy), so an entry disappears the moment the process dies. No application-level
-    pub async fn publishers<T: MessageType>(&self) -> Result<Vec<String>> {
+    pub async fn publishers<T: MessageType>(&self) -> Result<Vec<bindings::EndpointAddress>> {
         self.alive_ids(self.key_for(None, T::TYPE_NAME)).await
     }
 
-    /// The `<id>`s of the tokens alive on the liveliness key `key` (sorted, deduplicated).
-    async fn alive_ids(&self, key: Key) -> Result<Vec<String>> {
-        let mut ids: Vec<String> = self
+    /// Exact endpoints alive on the key, sorted and deduplicated by namespace and port.
+    async fn alive_ids(&self, key: Key) -> Result<Vec<bindings::EndpointAddress>> {
+        let mut ids: Vec<bindings::EndpointAddress> = self
             .engine
             .alive(&key, ALIVE_TIMEOUT)
             .await?
             .into_iter()
-            .filter_map(|k| k.source)
+            .filter_map(|key| {
+                Some(bindings::EndpointAddress {
+                    port: key.port()?.to_owned(),
+                    namespace: key.source?,
+                })
+            })
             .collect();
         ids.sort();
         ids.dedup();
@@ -273,14 +278,14 @@ impl ModuleContext {
         self.watch_key(&self.key_for(None, T::TYPE_NAME))
     }
 
-    /// The launch ids currently subscribed to the type `T` (ourselves included, ascending).
+    /// The exact input endpoints currently subscribed to `T`, sorted by namespace and port.
     ///
     /// The counterpart to [`ModuleContext::publishers`], and the answer to the first question of every
     /// bring-up: "I am publishing and nothing reacts — is anyone actually listening?". Every
-    /// subscriber carries a token at `reiny/<domain>/<id>/<T>/@sub`, so this needs no heartbeat
-    /// either. It says who listens to the **type**, not who listens to whom: a subscriber narrowed
-    /// with `.from(id)` still reports itself here.
-    pub async fn subscribers<T: MessageType>(&self) -> Result<Vec<String>> {
+    /// subscriber carries a token at `reiny/v3/<domain>/<namespace>/@in/<port>/<T>/@sub`,
+    /// so this needs no heartbeat either. It identifies the receiver's input port,
+    /// independently of the output-source endpoints declared in its bindings.
+    pub async fn subscribers<T: MessageType>(&self) -> Result<Vec<bindings::EndpointAddress>> {
         self.alive_ids(self.key_for(None, T::TYPE_NAME).with_chunk(SUB_CHUNK))
             .await
     }
@@ -304,7 +309,7 @@ impl ModuleContext {
     #[cfg(any(test, feature = "conformance"))]
     pub(crate) fn serve<S: Service>(&self) -> Result<RpcServer<S>> {
         self.ensure_standalone()?;
-        RpcServer::declare(self)
+        RpcServer::declare(self, "test")
     }
 
     /// A caller builder for the request type `S`. Stack `.to(id)` / `.timeout(d)`, then `.build()`.
@@ -326,8 +331,8 @@ impl ModuleContext {
             .await
     }
 
-    /// The launch ids currently serving the request type `S` (ourselves included, sorted by id).
-    pub async fn servers<S: Service>(&self) -> Result<Vec<String>> {
+    /// The exact output endpoints currently serving `S`, sorted by namespace and port.
+    pub async fn servers<S: Service>(&self) -> Result<Vec<bindings::EndpointAddress>> {
         self.alive_ids(self.key_for(None, S::TYPE_NAME).with_chunk(SERVICE_CHUNK))
             .await
     }
@@ -378,6 +383,9 @@ impl ModuleContext {
         let mut found = Vec::new();
         while let Some(reply) = replies.next().await {
             let Ok(sample) = reply else { continue };
+            let Some(source_port) = sample.key.port().map(str::to_owned) else {
+                continue;
+            };
             let message = sample
                 .key
                 .chunk
@@ -386,6 +394,7 @@ impl ModuleContext {
             if let (Some(source), Some(message)) = (sample.key.source, message) {
                 found.push(RawDescriptor {
                     source,
+                    source_port,
                     message: message.to_string(),
                     file_set: sample.payload,
                 });
@@ -484,9 +493,15 @@ impl ModuleContext {
         self.shutdown.trigger();
     }
 
-    /// Build `reiny/<domain>/<source>/<ty>`. `source` is our own id, or `None` (= `*`).
+    /// An explicit type-filtered introspection pattern, never a concrete application route.
     pub(crate) fn key_for(&self, source: Option<&str>, ty: &str) -> Key {
-        Key::topic(&self.domain, source, ty)
+        Key {
+            domain: self.domain.clone(),
+            source: source.map(str::to_owned),
+            endpoint: None,
+            ty: Some(ty.to_owned()),
+            chunk: None,
+        }
     }
 
     pub(crate) fn shutdown_handle(&self) -> Shutdown {
@@ -515,8 +530,9 @@ fn validate_segment(what: &str, value: &str) -> Result<()> {
 /// The commonly used items, gathered. `use reiny::prelude::*;`
 pub mod prelude {
     pub use crate::{
-        CallError, Descriptor, Envelope, MessageType, ModuleContext, PresenceEvent, Priority,
-        Publisher, Qos, Reliability, Request, RpcClient, RpcServer, Service, Subscriber,
+        CallError, CongestionControl, Descriptor, Envelope, MessageType, ModuleContext,
+        PresenceEvent, Priority, Publisher, Qos, Request, RpcClient, RpcServer, Service,
+        Subscriber,
     };
 }
 

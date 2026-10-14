@@ -21,8 +21,8 @@ fn prepared(id: &str, source: &str) -> tempfile::NamedTempFile {
     let mut file = tempfile::NamedTempFile::with_suffix(".json").unwrap();
     write!(
         file,
-        r#"{{"version":2,"namespace":"{id}","endpoint_namespace":"{id}",
-        "inputs":{{"incoming":{{"contract":{{"type":"Ping"}},"sources":["{source}"]}}}},
+        r#"{{"version":3,"namespace":"{id}","endpoint_namespace":"{id}",
+        "inputs":{{"incoming":{{"contract":{{"type":"Ping"}},"sources":[{{"namespace":"{source}","port":"outgoing"}}]}}}},
         "outputs":{{"outgoing":{{"contract":{{"type":"Ping"}}}}}}}}"#
     )
     .unwrap();
@@ -68,6 +68,7 @@ fn ffi_receives_typed_rust_protobuf_with_provenance() {
     let message = subscriber.receive(1000).unwrap().unwrap();
     assert_eq!(Ping::decode(message.payload.as_slice()).unwrap(), ping);
     assert_eq!(message.source, "rust");
+    assert_eq!(message.source_port, "outgoing");
     assert_eq!(message.schema, Some(u64::MAX));
 }
 
@@ -111,7 +112,7 @@ fn subscription_filters_prepared_source_domain_and_schema() {
     let missing_schema = bus
         .engine
         .publisher(
-            &reiny::engine::Key::topic("test", Some("robot/right"), "Ping"),
+            &reiny::engine::Key::output("test", "robot/right", "outgoing", "Ping"),
             &reiny::Qos::DEFAULT,
         )
         .unwrap();
@@ -189,21 +190,41 @@ fn children_keep_session_and_bus_alive() {
 }
 
 #[test]
-fn dynamic_outputs_refuse_duplicate_exact_transport_types() {
+fn same_type_outputs_preserve_independent_named_provenance() {
     let bus = LocalBus::new();
     let mut bindings = tempfile::NamedTempFile::with_suffix(".json").unwrap();
     bindings
         .write_all(
-            br#"{"version":2,"namespace":"sender","endpoint_namespace":"sender",
-        "inputs":{},"outputs":{"first":{"contract":{"type":"a.Ping"}},
+            br#"{"version":3,"namespace":"sender","endpoint_namespace":"sender",
+        "inputs":{"first":{"contract":{"type":"a.Ping"},"sources":[{"namespace":"sender","port":"first"}]},
+        "second":{"contract":{"type":"a.Ping"},"sources":[{"namespace":"sender","port":"second"}]}},
+        "outputs":{"first":{"contract":{"type":"a.Ping"}},
         "second":{"contract":{"type":"a.Ping"}}}}"#,
         )
         .unwrap();
-    // Reject ambiguous wire addresses before opening the session or any publisher.
-    assert!(
-        bus.connect("sender".into(), "test".into(), path(&bindings))
-            .is_err()
-    );
+    let session = bus
+        .connect("sender".into(), "test".into(), path(&bindings))
+        .unwrap();
+    let first = session.publisher("first", "a.Ping", 42).unwrap();
+    let second = session.publisher("second", "a.Ping", 42).unwrap();
+    let first_input = session.subscriber("first", "a.Ping", 42).unwrap();
+    let second_input = session.subscriber("second", "a.Ping", 42).unwrap();
+    second.send(vec![2]).unwrap();
+    first.send(vec![1]).unwrap();
+    first.send(vec![3]).unwrap();
+    second.send(vec![4]).unwrap();
+    for (input, port, values) in [
+        (&first_input, "first", [1, 3]),
+        (&second_input, "second", [2, 4]),
+    ] {
+        for value in values {
+            let message = input.receive(1000).unwrap().unwrap();
+            assert_eq!(message.payload, vec![value]);
+            assert_eq!(message.source, "sender");
+            assert_eq!(message.source_port, port);
+        }
+    }
+    session.ready().unwrap();
 }
 
 #[test]
@@ -211,9 +232,9 @@ fn distinct_packages_use_distinct_dynamic_wire_addresses() {
     // Given two same-named protobuf messages in different packages.
     let bus = LocalBus::new();
     let mut bindings = tempfile::NamedTempFile::with_suffix(".json").unwrap();
-    bindings.write_all(br#"{"version":2,"namespace":"sender","endpoint_namespace":"sender",
-        "inputs":{"first":{"contract":{"type":"a.Ping"},"sources":["sender"]},
-        "second":{"contract":{"type":"b.Ping"},"sources":["sender"]}},
+    bindings.write_all(br#"{"version":3,"namespace":"sender","endpoint_namespace":"sender",
+        "inputs":{"first":{"contract":{"type":"a.Ping"},"sources":[{"namespace":"sender","port":"first"}]},
+        "second":{"contract":{"type":"b.Ping"},"sources":[{"namespace":"sender","port":"second"}]}},
         "outputs":{"first":{"contract":{"type":"a.Ping"}},"second":{"contract":{"type":"b.Ping"}}}}"#).unwrap();
     let session = bus
         .connect("sender".into(), "test".into(), path(&bindings))
@@ -239,9 +260,9 @@ fn dynamic_endpoints_apply_retention_replay_and_latest_buffer() {
     use reiny::engine::Engine as _;
     let bus = LocalBus::new();
     let mut bindings = tempfile::NamedTempFile::with_suffix(".json").unwrap();
-    bindings.write_all(br#"{"version":2,"namespace":"sender","endpoint_namespace":"sender",
-        "inputs":{"incoming":{"contract":{"type":"test.Ping","replay":"last","buffer":{"latest":1}},"sources":["sender"]}},
-        "outputs":{"outgoing":{"contract":{"type":"test.Ping","retention":"last","qos":"sensor"}}}}"#).unwrap();
+    bindings.write_all(br#"{"version":3,"namespace":"sender","endpoint_namespace":"sender",
+        "inputs":{"incoming":{"contract":{"type":"test.Ping","replay":"last","buffer":{"latest":1}},"sources":[{"namespace":"sender","port":"outgoing"}]}},
+        "outputs":{"outgoing":{"contract":{"type":"test.Ping","retention":"last","qos":"default"}}}}"#).unwrap();
     let session = bus
         .connect("sender".into(), "test".into(), path(&bindings))
         .unwrap();
@@ -255,7 +276,7 @@ fn dynamic_endpoints_apply_retention_replay_and_latest_buffer() {
     session
         .runtime
         .block_on(bus.engine.alive(
-            &reiny::engine::Key::topic("test", Some("sender"), "test.Ping"),
+            &reiny::engine::Key::output("test", "sender", "outgoing", "test.Ping"),
             Duration::from_secs(1),
         ))
         .unwrap();
@@ -264,12 +285,38 @@ fn dynamic_endpoints_apply_retention_replay_and_latest_buffer() {
 }
 
 #[test]
+fn prepared_qos_profiles_reject_legacy_tags_and_unsupported_local_policies() {
+    for profile in ["default", "command", "sensor", "reliable"] {
+        let bus = LocalBus::new();
+        let mut bindings = tempfile::NamedTempFile::with_suffix(".json").unwrap();
+        write!(
+            bindings,
+            r#"{{"version":{},"namespace":"sender","endpoint_namespace":"sender","inputs":{{}},
+            "outputs":{{"outgoing":{{"contract":{{"type":"Ping","qos":"{profile}"}}}}}}}}"#,
+            reiny::bindings::MODULE_BINDINGS_VERSION
+        )
+        .unwrap();
+        let session = bus.connect("sender".into(), "test".into(), path(&bindings));
+        if profile == "reliable" {
+            assert!(session.is_err(), "legacy spelling must not fall back");
+        } else {
+            let session = session.unwrap();
+            let publisher = session.publisher("outgoing", "Ping", 42);
+            assert_eq!(publisher.is_ok(), profile == "default");
+            if let Err(error) = publisher {
+                assert!(error.to_string().contains("congestion"));
+            }
+        }
+    }
+}
+
+#[test]
 fn publisher_presence_ends_when_last_handle_is_dropped() {
     use reiny::engine::Engine as _;
     let bus = LocalBus::new();
     let session = connect(&bus, "sender", "sender", "test");
     let publisher = session.publisher("outgoing", "Ping", 42).unwrap();
-    let key = reiny::engine::Key::topic("test", Some("sender"), "Ping");
+    let key = reiny::engine::Key::output("test", "sender", "outgoing", "Ping");
     assert_eq!(
         session
             .runtime
@@ -324,7 +371,7 @@ fn network_sessions_exchange_protobuf_using_configuration_files() {
     )
     .unwrap();
     let observer = listener
-        .declare_publisher("reiny/ffi-test/network-sender/Ping")
+        .declare_publisher("reiny/v3/ffi-test/network-sender/@out/outgoing/Ping")
         .wait()
         .unwrap();
     let (tx, rx) = std::sync::mpsc::sync_channel(1);

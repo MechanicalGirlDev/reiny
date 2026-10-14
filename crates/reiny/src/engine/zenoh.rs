@@ -1,11 +1,12 @@
 //! The zenoh engine — what `ModuleContext` used to do directly up to 0.4, moved into [`Engine`]'s shape.
-//! The wire (key shape, attachments, verbatim chunks) is unchanged from 0.4.
+//! Named v3 keys preserve endpoint identity; old epochs and malformed selectors are rejected.
 
 use std::any::Any;
+use std::collections::VecDeque;
 use std::time::{Duration, UNIX_EPOCH};
 
 use zenoh::handlers::FifoChannelHandler;
-use zenoh::qos::{CongestionControl, Priority as ZPriority};
+use zenoh::qos::{CongestionControl as ZCongestionControl, Priority as ZPriority};
 use zenoh::query::{ConsolidationMode, Query, Reply};
 use zenoh::sample::{Sample as ZSample, SampleKind};
 use zenoh::{Session, Wait};
@@ -14,7 +15,7 @@ use super::{
     BoxFuture, Callback, Caps, Engine, Guard, Key, Presence, QueryCallback, QueryParams,
     RawPublisher, RawQuery, RawReplies, ReplyResult, Sample,
 };
-use crate::{Priority, Qos, Reliability, Result};
+use crate::{CongestionControl, Priority, Qos, Result};
 
 /// A zenoh session as an [`Engine`].
 pub struct Zenoh {
@@ -50,14 +51,15 @@ impl Engine for Zenoh {
         key.validate()?;
         // zenoh's `#[internal_trait]` also grows the QoS setters as inherent methods, so they are
         // callable without importing `QoSBuilderTrait` (= without opening the `internal` feature).
-        let publisher = self
+        let mut publisher = self
             .session
             .declare_publisher(key.to_string())
             .priority(zenoh_priority(qos.priority))
-            .congestion_control(zenoh_congestion(qos.reliability))
-            .express(qos.express)
-            .wait()
-            .map_err(anyhow::Error::msg)?;
+            .express(qos.express);
+        if let Some(congestion) = zenoh_congestion(qos.congestion_control) {
+            publisher = publisher.congestion_control(congestion);
+        }
+        let publisher = publisher.wait().map_err(anyhow::Error::msg)?;
         Ok(Box::new(ZenohPublisher { publisher }))
     }
 
@@ -149,11 +151,9 @@ impl Engine for Zenoh {
             .session
             .declare_queryable(key.to_string())
             .callback(move |query: Query| {
-                // Foreign Zenoh selectors can be valid without a logical Key
-                // representation (including the original one-depth wildcard).
-                // Zenoh already selected this responder at the requested depth.
-                let key =
-                    Key::parse(query.key_expr().as_str()).unwrap_or_else(|| responder.clone());
+                let Some(key) = Key::parse(query.key_expr().as_str()) else {
+                    return;
+                };
                 if !key.matches(&responder) {
                     return; // **/* may also intersect an ordinary segment inside a chunk.
                 }
@@ -175,18 +175,32 @@ impl Engine for Zenoh {
         key.validate()?;
         // Consolidation off: reiny's replies differ per key, and two replies on the same key are not
         // "duplicates" but "different answers" (services).
-        let mut get = self
-            .session
-            .get(key.to_string())
-            .timeout(params.timeout)
-            .consolidation(ConsolidationMode::None);
-        if let Some(payload) = params.payload {
-            get = get.payload(payload);
+        let mut selectors = vec![key.to_string()];
+        // Schema introspection spans both named input and output identities. Verbatim
+        // direction slots are deliberately not covered by Zenoh's ordinary wildcards.
+        if key.endpoint.is_none()
+            && key
+                .chunk
+                .as_deref()
+                .is_some_and(|chunk| chunk.starts_with("@schema/"))
+        {
+            selectors.push(key.to_string().replace("/@out/", "/@in/"));
         }
-        if let Some(attachment) = params.attachment {
-            get = get.attachment(attachment);
+        let mut replies = VecDeque::new();
+        for selector in selectors {
+            let mut get = self
+                .session
+                .get(selector)
+                .timeout(params.timeout)
+                .consolidation(ConsolidationMode::None);
+            if let Some(payload) = &params.payload {
+                get = get.payload(payload.clone());
+            }
+            if let Some(attachment) = &params.attachment {
+                get = get.attachment(attachment.clone());
+            }
+            replies.push_back(get.wait().map_err(anyhow::Error::msg)?);
         }
-        let replies = get.wait().map_err(anyhow::Error::msg)?;
         Ok(Box::new(ZenohReplies {
             replies,
             pattern: key.clone(),
@@ -256,7 +270,7 @@ impl RawQuery for ZenohQuery {
 }
 
 struct ZenohReplies {
-    replies: FifoChannelHandler<Reply>,
+    replies: VecDeque<FifoChannelHandler<Reply>>,
     pattern: Key,
 }
 
@@ -265,7 +279,11 @@ impl RawReplies for ZenohReplies {
         Box::pin(async move {
             loop {
                 // flume's `recv_async` is cancel-safe (no taken value is held across an await point).
-                let reply = self.replies.recv_async().await.ok()?;
+                let replies = self.replies.front()?;
+                let Ok(reply) = replies.recv_async().await else {
+                    self.replies.pop_front();
+                    continue;
+                };
                 match reply.result() {
                     Ok(sample) => {
                         if let Some(sample) = convert(sample)
@@ -311,13 +329,12 @@ fn zenoh_priority(priority: Priority) -> ZPriority {
     }
 }
 
-/// `Reliability` lowers to zenoh's `congestion_control` — "drop or wait" under congestion is the only
-/// knob that actually takes effect. zenoh's own `reliability()` is a marker that retransmits nothing,
-/// and is still `unstable` in 1.10 (`docs/design/0.5.0.md` §2.3).
-fn zenoh_congestion(reliability: Reliability) -> CongestionControl {
-    match reliability {
-        Reliability::BestEffort => CongestionControl::Drop,
-        Reliability::Reliable => CongestionControl::Block,
+/// Preserve backend defaults (including session configuration) unless explicitly selected.
+fn zenoh_congestion(congestion: CongestionControl) -> Option<ZCongestionControl> {
+    match congestion {
+        CongestionControl::BackendDefault => None,
+        CongestionControl::Drop => Some(ZCongestionControl::Drop),
+        CongestionControl::Block => Some(ZCongestionControl::Block),
     }
 }
 
@@ -326,15 +343,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normal_is_zenoh_default_and_reliable_blocks() {
+    fn congestion_maps_explicit_policies_and_delegates_default() {
         assert_eq!(zenoh_priority(Priority::Normal), ZPriority::DEFAULT);
         assert_eq!(
-            zenoh_congestion(Reliability::Reliable),
-            CongestionControl::Block
+            zenoh_congestion(CongestionControl::Block),
+            Some(ZCongestionControl::Block)
         );
         assert_eq!(
-            zenoh_congestion(Reliability::BestEffort),
-            CongestionControl::Drop
+            zenoh_congestion(CongestionControl::Drop),
+            Some(ZCongestionControl::Drop)
         );
+        assert_eq!(zenoh_congestion(CongestionControl::BackendDefault), None);
     }
 }

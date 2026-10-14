@@ -85,7 +85,7 @@ async fn announce_child_ready(bus: &Local, child: &ModuleContext) {
         .namespace;
     let (_watch, mut events) = watch_ready(bus, namespace);
     child.ready().expect("child initialization complete");
-    let key = Key::topic(DOMAIN, Some(namespace), READY_CHUNK);
+    let key = Key::module(DOMAIN, Some(namespace), READY_CHUNK);
     assert_eq!(
         timeout(PATIENCE, events.recv())
             .await
@@ -102,7 +102,7 @@ fn watch_ready(
     tokio::sync::mpsc::UnboundedReceiver<Presence>,
 ) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let key = Key::topic(DOMAIN, Some(namespace), READY_CHUNK);
+    let key = Key::module(DOMAIN, Some(namespace), READY_CHUNK);
     let guard = bus
         .watch_alive(
             &key,
@@ -168,7 +168,7 @@ async fn host_requires_child_report_and_live_readiness_then_withdraws_on_port_lo
         .expect("validated report");
     let (_watch, mut events) = watch_ready(&bus, SENDER);
     host.ready().expect("host initialization complete");
-    let key = Key::topic(DOMAIN, Some(SENDER), READY_CHUNK);
+    let key = Key::module(DOMAIN, Some(SENDER), READY_CHUNK);
     assert_eq!(
         timeout(PATIENCE, events.recv()).await.expect("joined"),
         Some(Presence::Joined(key.clone()))
@@ -178,6 +178,13 @@ async fn host_requires_child_report_and_live_readiness_then_withdraws_on_port_lo
     )
     .expect("parse report");
     assert_eq!(report.namespace, SENDER);
+    assert_eq!(report.endpoint_namespace, SENDER);
+    assert_eq!(
+        report.outputs["outgoing"].endpoint,
+        crate::bindings::PortEndpoint::Output {
+            address: endpoint(SENDER, "outgoing"),
+        }
+    );
     assert_eq!(report.outputs["outgoing"].schema, Probe::SCHEMA_FINGERPRINT);
     assert_eq!(report.outputs["outgoing"].contract, contract("test.Probe"));
     // The watch predates the child handle loss; no timer luck determines the assertion.
@@ -214,7 +221,7 @@ async fn process_exit_with_a_stale_child_token_withdraws_host_readiness() {
         .expect("report");
     let (_watch, mut events) = watch_ready(&bus, SENDER);
     host.ready().expect("host ready");
-    let key = Key::topic(DOMAIN, Some(SENDER), READY_CHUNK);
+    let key = Key::module(DOMAIN, Some(SENDER), READY_CHUNK);
     assert_eq!(
         timeout(PATIENCE, events.recv()).await.expect("joined"),
         Some(Presence::Joined(key.clone()))
@@ -230,7 +237,7 @@ async fn process_exit_with_a_stale_child_token_withdraws_host_readiness() {
     assert!(host.ready().is_err());
     assert_ne!(
         bus.alive(
-            &Key::topic(DOMAIN, Some(process.namespace()), READY_CHUNK),
+            &Key::module(DOMAIN, Some(process.namespace()), READY_CHUNK),
             PATIENCE
         )
         .await
@@ -342,7 +349,7 @@ async fn child_zenoh_configuration_connects_to_host_without_rebinding_its_listen
         serde_json::json!(["tcp/127.0.0.1:37463"])
     );
     let child_binding = delegated_bindings(&binding, "driver").expect("delegation");
-    let key = Key::topic(DOMAIN, Some(&child_binding.namespace), READY_CHUNK);
+    let key = Key::module(DOMAIN, Some(&child_binding.namespace), READY_CHUNK);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let _watch = host
         .engine

@@ -23,6 +23,7 @@ try {
   assert.ok(message);
   assert.deepEqual(message.payload, payload);
   assert.equal(message.source, "sender");
+  assert.equal(message.sourcePort, "out");
   assert.equal(message.schema, schema);
   console.log("TypeScript local pub/sub smoke passed");
 } finally {
