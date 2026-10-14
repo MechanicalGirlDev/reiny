@@ -6,8 +6,8 @@
 //! / RS-485 / UDP / TCP / pty / `tokio::io::duplex` — which one it sits on is a few lines on the
 //! caller's side, and the same `Link` runs on an MCU (embassy / RTIC / interrupts) and on a host.
 //!
-//! The types are the same [`Topic`] / [`Service`] reiny proper uses (`reiny-core`). Only a 32-bit
-//! hash of `Topic::TYPE` rides on the wire ([`wire::type_hash`]); type names and fingerprints are
+//! The types are the same [`MessageType`] / [`Service`] reiny proper uses (`reiny-core`). Only a 32-bit
+//! hash of `MessageType::TYPE_NAME` rides on the wire ([`wire::type_hash`]); type names and fingerprints are
 //! exchanged once, in the Hello, at connection time.
 //!
 //! ```ignore
@@ -17,7 +17,7 @@
 //! let mut link = Link::<_, 8>::new("motor-board", PORTS, [0u8; 512], [0u8; 512])?;
 //! link.publishes::<MotorState>("state")?;
 //! link.subscribes::<MotorCommand>("command")?;
-//! link.serves::<Calibrate>("calibrate")?;
+//! link.rpc_server::<Calibrate>("calibrate")?;
 //!
 //! loop {
 //!     link.feed(&uart_rx_bytes());                         // whatever arrived, as it arrived
@@ -50,12 +50,14 @@
 //! let mut host = Host::spawn(link, transport::serial::open("/dev/ttyACM0", 921_600)?);
 //! // let mut host = Host::spawn(link, transport::Udp::bind("0.0.0.0:7000").await?.with_peer(mcu));
 //! while let Some(ev) = host.recv().await {
-//!     if let Some(state) = ev.decode::<MotorState>() { … }
+//!     if let Some(state) = ev.decode::<MotorState>() {
+//!         println!("{state:?}");
+//!     }
 //! }
 //! ```
 //!
 //! Feature `engine` (on by default) adds [`LinkEngine`], which turns a `Host` into a reiny `Engine`
-//! and so puts a `Cloudy` on top of a link (the innards of `reiny bridge serial …`).
+//! and so puts a `ModuleContext` on top of a link (the innards of `reiny bridge serial …`).
 //!
 //! The design and the reasoning behind the wire format are in `docs/design/0.5.0.md` §3.
 
@@ -65,7 +67,7 @@ mod link;
 pub mod wire;
 
 pub use link::{Error, Event, Frame, ID_MAX, Link, LinkConfig, RemoteType, Stats};
-pub use reiny_core::{Descriptor, PortDirection, PortType, Service, StaticPort, Topic};
+pub use reiny_core::{Descriptor, MessageType, PortDirection, PortType, Service, StaticPort};
 
 #[cfg(feature = "engine")]
 mod engine;

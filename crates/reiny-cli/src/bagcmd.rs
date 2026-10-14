@@ -220,7 +220,7 @@ fn record_contracts(
 
 fn record_subscriber(
     runtime: &tokio::runtime::Runtime,
-    cloudy: &reiny::Cloudy,
+    cloudy: &reiny::ModuleContext,
     bindings: &reiny::bindings::ModuleBindings,
     domain: &str,
     fingerprints: &BTreeMap<String, u64>,
@@ -370,7 +370,7 @@ struct PlayArgs {
 
 /// What a channel needs at replay time: its output key and reiny's conventions.
 struct PlayChannel {
-    /// The output key `reiny/<domain>/<source>/<TYPE>` (with --domain / --as already applied).
+    /// The output key `reiny/<domain>/<source>/<TYPE_NAME>` (with --domain / --as already applied).
     key: String,
     ty: String,
     publisher: Arc<reiny::DeclaredPublisher>,
@@ -583,7 +583,7 @@ fn guard_live_publishers(
 }
 
 fn declare_play_channels(
-    cloudy: &reiny::Cloudy,
+    cloudy: &reiny::ModuleContext,
     plan: BTreeMap<u16, PlannedChannel>,
 ) -> Result<BTreeMap<u16, PlayChannel>> {
     let mut channels = BTreeMap::new();

@@ -1,4 +1,5 @@
 use super::*;
+use crate::bindings::MODULE_REPORT_VERSION;
 
 #[tokio::test]
 async fn input_readiness_replays_only_bound_source_modules() {
@@ -73,7 +74,9 @@ async fn readiness_requires_declared_outputs_as_well_as_inputs() {
             contract: super::contract("test.Probe"),
         },
     );
-    let cloudy = Cloudy::open(options(bus, contract)).await.expect("module");
+    let cloudy = ModuleContext::open(options(bus, contract))
+        .await
+        .expect("module");
     let _incoming = cloudy.input::<Probe>("incoming").expect("input");
 
     // When readiness is requested, then the uncreated output is still mandatory.
@@ -93,12 +96,12 @@ async fn ready_publishes_report_and_stop_only_acknowledges_request() {
     contract.outputs.insert(
         "outgoing".to_string(),
         OutputBinding {
-            contract: super::contract("Probe"),
+            contract: super::contract("test.Probe"),
         },
     );
     let mut opts = options(bus.clone(), contract);
     opts.module_report_path = Some(report_path.clone());
-    let cloudy = Cloudy::open(opts).await.expect("managed module");
+    let cloudy = ModuleContext::open(opts).await.expect("managed module");
     let mut incoming = cloudy.input::<Probe>("incoming").expect("input");
     let _outgoing = cloudy.output::<Probe>("outgoing").expect("output");
     let ready = Key::topic(DOMAIN, Some(RECEIVER), "@ready");
@@ -123,7 +126,7 @@ async fn ready_publishes_report_and_stop_only_acknowledges_request() {
     let report: ModuleReport =
         serde_json::from_slice(&std::fs::read(&report_path).expect("atomic report"))
             .expect("report JSON");
-    assert_eq!(report.version, CONTRACT_VERSION);
+    assert_eq!(report.version, MODULE_REPORT_VERSION);
     assert_eq!(report.namespace, RECEIVER);
     assert_eq!(report.inputs["incoming"].type_name, "test.Probe");
     assert_eq!(report.inputs["incoming"].schema, 0x1234);
@@ -177,7 +180,7 @@ async fn report_failure_prevents_readiness() {
     let directory = Directory::new();
     let mut opts = options(bus.clone(), bindings(RECEIVER));
     opts.module_report_path = Some(directory.0.join("absent").join("report.json"));
-    let cloudy = Cloudy::open(opts).await.expect("module");
+    let cloudy = ModuleContext::open(opts).await.expect("module");
 
     // When report publication fails, then the supervisor cannot see a ready token.
     assert!(cloudy.ready().is_err());

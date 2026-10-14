@@ -62,13 +62,11 @@ pub(crate) fn run(args: ServiceArgs) -> Result<()> {
 }
 
 /// The (request fqn, response fqn) pair from the descriptors a server's key `reiny/<d>/<id>/<Req>`
-/// announces: the request is the one whose short name matches the type segment, the response is the other.
+/// announces: the request is the one whose full protobuf name matches the type segment, the response is the other.
 type Named = (String, Vec<u8>);
 
 fn split_schemas<'a>(ty: &str, named: &'a [Named]) -> (Option<&'a Named>, Option<&'a Named>) {
-    let request = named
-        .iter()
-        .find(|(fqn, _)| fqn.rsplit('.').next() == Some(ty));
+    let request = named.iter().find(|(fqn, _)| fqn == ty);
     let response = named
         .iter()
         .find(|(fqn, _)| request.is_none_or(|r| r.0 != *fqn));
@@ -115,7 +113,7 @@ fn list(bus: &BusArgs) -> Result<()> {
         .max()
         .unwrap_or(0)
         .max(8);
-    println!("{:<w_ty$}  ->  {:<w_resp$}  SRV", "TYPE", "RESPONSE");
+    println!("{:<w_ty$}  ->  {:<w_resp$}  SRV", "TYPE_NAME", "RESPONSE");
     for (ty, (resp, servers)) in &rows {
         println!("{ty:<w_ty$}  ->  {resp:<w_resp$}  {}", servers.join(" "));
     }
@@ -126,7 +124,7 @@ fn call(args: &CallArgs) -> Result<()> {
     let bindings = args.bus.bindings()?;
     anyhow::ensure!(
         bindings.inputs.len() == 1 && bindings.outputs.is_empty(),
-        "service call requires a contract containing only its named uses endpoint"
+        "service call requires a contract containing only its named rpc_client endpoint"
     );
     let domain = args.bus.runtime_options("reiny-cli").domain;
     let (contract, keys) = input_keys(
@@ -155,7 +153,7 @@ fn call(args: &CallArgs) -> Result<()> {
         response.with_context(|| format!("@schema of `{}` lacks the response message", args.ty))?;
     anyhow::ensure!(
         *req_fqn == contract.type_name && Some(resp_fqn.as_str()) == contract.response.as_deref(),
-        "service descriptor types do not match the declared uses contract"
+        "service descriptor types do not match the declared rpc_client contract"
     );
     let req_codec = Codec::from_file_set(req_set, req_fqn)?;
     let resp_codec = Codec::from_file_set(resp_set, resp_fqn)?;
@@ -234,7 +232,7 @@ mod tests {
     fn the_request_is_the_one_matching_the_type_segment() {
         for order in [["calc.Add", "calc.Sum"], ["calc.Sum", "calc.Add"]] {
             let schemas = named(&order);
-            let (request, response) = split_schemas("Add", &schemas);
+            let (request, response) = split_schemas("calc.Add", &schemas);
             assert_eq!(request.map(|r| r.0.as_str()), Some("calc.Add"), "{order:?}");
             assert_eq!(
                 response.map(|r| r.0.as_str()),
@@ -244,11 +242,11 @@ mod tests {
         }
     }
 
-    /// The match is on the *short* name, so the proto package plays no part.
+    /// The complete package name participates in the request selection.
     #[test]
-    fn the_package_does_not_matter() {
+    fn the_complete_package_name_selects_the_request() {
         let schemas = named(&["some.deep.package.Add", "other.Sum"]);
-        let (request, response) = split_schemas("Add", &schemas);
+        let (request, response) = split_schemas("some.deep.package.Add", &schemas);
         assert_eq!(request.map(|r| r.0.as_str()), Some("some.deep.package.Add"));
         assert_eq!(response.map(|r| r.0.as_str()), Some("other.Sum"));
     }
@@ -258,7 +256,7 @@ mod tests {
     #[test]
     fn a_lone_request_has_no_response() {
         let schemas = named(&["calc.Add"]);
-        let (request, response) = split_schemas("Add", &schemas);
+        let (request, response) = split_schemas("calc.Add", &schemas);
         assert_eq!(request.map(|r| r.0.as_str()), Some("calc.Add"));
         assert!(response.is_none());
     }
@@ -268,11 +266,11 @@ mod tests {
     #[test]
     fn without_a_match_the_first_entry_is_the_response() {
         let schemas = named(&["calc.Other", "calc.Sum"]);
-        let (request, response) = split_schemas("Add", &schemas);
+        let (request, response) = split_schemas("calc.Add", &schemas);
         assert!(request.is_none());
         assert_eq!(response.map(|r| r.0.as_str()), Some("calc.Other"));
 
-        let (request, response) = split_schemas("Add", &[]);
+        let (request, response) = split_schemas("calc.Add", &[]);
         assert!(request.is_none());
         assert!(response.is_none());
     }

@@ -14,7 +14,7 @@ Deployments (every command takes a root directory or its `main.yaml`, default `.
 - `reiny run` - the same contract as `apply`, in the foreground
 - `reiny status` / `reiny stop` - read live state, or stop cooperatively and reap owned processes
 - `reiny update` - move Git module refs and rewrite `lock.yaml`
-- `reiny compress` - build and bundle a self-contained deployment
+- `reiny bundle` - build and bundle a self-contained deployment
 
 Modules and schema:
 

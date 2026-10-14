@@ -12,10 +12,11 @@ use tokio::sync::{mpsc, watch};
 
 use super::{BUNDLE_DIR_ENV, CONFIG_DIR_ENV, MODULE_REPORT_ENV, Ports, config};
 use crate::bindings::{
-    CONTRACT_VERSION, EndpointContract, ModuleBindings, ModuleReport, PortReport,
+    EndpointContract, MODULE_BINDINGS_VERSION, MODULE_REPORT_VERSION, ModuleBindings, ModuleReport,
+    PortReport,
 };
 use crate::engine::{Engine, Guard, Key, Presence, QueryParams, READY_CHUNK, STOP_CHUNK};
-use crate::{Cloudy, Result};
+use crate::{ModuleContext, Result};
 
 pub(super) struct ChildState {
     pub(super) ready: bool,
@@ -183,7 +184,7 @@ pub(crate) fn child_zenoh_config(mut config: zenoh::Config) -> Result<String> {
     Ok(serde_json::to_string(&config)?)
 }
 
-impl Cloudy {
+impl ModuleContext {
     /// Resolve a declared executable from the prepared bundle, never from a developer directory.
     pub fn artifact(&self, name: &str) -> Result<PathBuf> {
         let bindings = self
@@ -388,7 +389,7 @@ impl Cloudy {
 
 fn supervise_child(
     handle: &tokio::runtime::Handle,
-    cloudy: &Cloudy,
+    cloudy: &ModuleContext,
     name: &str,
     mut process: Child,
     mut kills: mpsc::UnboundedReceiver<()>,
@@ -468,7 +469,7 @@ pub(super) fn delegated_bindings(bindings: &ModuleBindings, name: &str) -> Resul
         .get(name)
         .ok_or_else(|| anyhow::anyhow!("undeclared owned child '{name}'"))?;
     let child = ModuleBindings {
-        version: CONTRACT_VERSION,
+        version: MODULE_BINDINGS_VERSION,
         namespace: format!("{}/owned/{name}", bindings.namespace),
         endpoint_namespace: bindings.endpoint_namespace.clone(),
         inputs: delegation
@@ -490,7 +491,7 @@ pub(super) fn delegated_bindings(bindings: &ModuleBindings, name: &str) -> Resul
 
 fn validate_report(bindings: &ModuleBindings, report: &ModuleReport) -> Result<()> {
     anyhow::ensure!(
-        report.version == CONTRACT_VERSION && report.namespace == bindings.namespace,
+        report.version == MODULE_REPORT_VERSION && report.namespace == bindings.namespace,
         "owned child report identity differs"
     );
     for (declared, actual) in [
@@ -530,9 +531,7 @@ fn validate_port_report(contract: &EndpointContract, report: &PortReport) -> Res
         contract == &report.contract,
         "owned child changed the endpoint contract"
     );
-    let matches = |declared: &str, actual: &str| {
-        declared == actual || actual.rsplit('.').next() == Some(declared)
-    };
+    let matches = |declared: &str, actual: &str| declared == actual;
     anyhow::ensure!(
         matches(&contract.type_name, &report.type_name),
         "owned child compiled type differs"

@@ -1,6 +1,6 @@
-version: 2
+version: 3
 schema:
-  internals:
+  shared_types:
     Point:
       proto: "proto/geometry/geometry.proto"
       message: "pingpong.Point"
@@ -10,22 +10,16 @@ schema:
     Pong:
       proto: "proto/msg/pingpong.proto"
       message: "pingpong.Pong"
-  schema:
+  schema_crates:
     geometry:
       crate: "pingpong-geometry"
       protos: ["proto/geometry/geometry.proto"]
     msg:
       crate: "pingpong-msg"
       protos: ["proto/msg/pingpong.proto"]
-      depends: ["geometry"]
+      depends_on: ["geometry"]
   projects:
     ping:
-      version: "0.3.0"
-      description: "ping module"
-      publications: ["Ping"]
-      dependencies: ["Pong"]
+      types: ["Ping", "Pong"]
     pong:
-      version: "0.3.0"
-      description: "pong module"
-      publications: ["Pong"]
-      dependencies: ["Ping"]
+      types: ["Pong", "Ping"]

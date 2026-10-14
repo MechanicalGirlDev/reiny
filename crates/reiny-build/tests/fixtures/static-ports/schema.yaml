@@ -1,7 +1,7 @@
-version: 2
+version: 3
 schema:
   project: { name: static-ports-fixture }
-  publications:
+  exported_types:
     State: { proto: types.proto, message: fixture.State }
     Request: { proto: types.proto, message: fixture.Request }
     Response: { proto: types.proto, message: fixture.Response }

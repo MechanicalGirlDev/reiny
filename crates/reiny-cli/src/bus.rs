@@ -1,6 +1,6 @@
 //! The bus vocabulary `reiny bag` / `reiny topic` / `reiny node` / `reiny service` share.
 //!
-//! The key shape (`reiny/<domain>/<id>/<TYPE>` plus the side chunks `@schema` / `@service` /
+//! The key shape (`reiny/<domain>/<id>/<TYPE_NAME>` plus the side chunks `@schema` / `@service` /
 //! `@launch`), building a session by the same path a launch does, and collecting the descriptors a
 //! running publisher / server announces. Only what cannot be written without knowing reiny's and
 //! zenoh's conventions lives here; the statistics and the printing belong to each subcommand.
@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
 use reiny::bindings::{
-    CONTRACT_VERSION, EndpointContract, ModuleBindings, ModuleReport, PortKind, PortReport,
+    EndpointContract, MODULE_REPORT_VERSION, ModuleBindings, ModuleReport, PortKind, PortReport,
     ReceiveBuffer, Replay,
 };
 use reiny::zenoh::{self, Wait};
@@ -57,14 +57,17 @@ impl BusArgs {
         &self,
         session: zenoh::Session,
         bindings: ModuleBindings,
-    ) -> Result<(tokio::runtime::Runtime, std::sync::Arc<reiny::Cloudy>)> {
+    ) -> Result<(
+        tokio::runtime::Runtime,
+        std::sync::Arc<reiny::ModuleContext>,
+    )> {
         let runtime = tokio::runtime::Runtime::new()?;
         let mut options = self.runtime_options(&bindings.namespace);
         options.module_bindings = Some(bindings);
         options.engine = Some(std::sync::Arc::new(reiny::engine::Zenoh::from_session(
             session,
         )));
-        let cloudy = runtime.block_on(reiny::Cloudy::open(options))?;
+        let cloudy = runtime.block_on(reiny::ModuleContext::open(options))?;
         Ok((runtime, std::sync::Arc::new(cloudy)))
     }
 
@@ -153,7 +156,7 @@ pub(crate) fn ready_inputs(
         );
     }
     let report = ModuleReport {
-        version: CONTRACT_VERSION,
+        version: MODULE_REPORT_VERSION,
         namespace: bindings.namespace.clone(),
         inputs,
         outputs: BTreeMap::new(),
@@ -220,11 +223,7 @@ pub(crate) fn validate_bindings(bindings: &ModuleBindings, domain: &str) -> Resu
 }
 
 pub(crate) fn topic_type(contract: &EndpointContract) -> &str {
-    contract
-        .type_name
-        .rsplit('.')
-        .next()
-        .unwrap_or(&contract.type_name)
+    &contract.type_name
 }
 
 pub(crate) fn contract_schema(
@@ -355,7 +354,7 @@ impl<'a> KeyParts<'a> {
         Some(Self { domain, source, ty })
     }
 
-    /// The form `reiny/<domain>/<source>/<TYPE>/<chunk>` (with a side chunk). `chunk` is `@service` and the like.
+    /// The form `reiny/<domain>/<source>/<TYPE_NAME>/<chunk>` (with a side chunk). `chunk` is `@service` and the like.
     pub(crate) fn parse_with_chunk(key: &'a str, chunk: &str) -> Option<Self> {
         let base = key.strip_suffix(chunk)?.strip_suffix('/')?;
         Self::parse(base)
@@ -398,7 +397,7 @@ pub(crate) fn alive_keys(session: &zenoh::Session, key: &str) -> Result<Vec<Stri
 }
 
 /// The subset of [`collect_schemas_all`] holding each key's **own type**'s descriptor (the one whose
-/// short fqn matches the key's type segment, else the first). Enough for a pub/sub type.
+/// full FQN matches the key's type segment). Enough for a pub/sub type.
 pub(crate) fn collect_schemas(
     session: &zenoh::Session,
     pattern: &str,
@@ -409,8 +408,7 @@ pub(crate) fn collect_schemas(
             let ty = KeyParts::parse(&base).map(|p| p.ty.to_string());
             let own = named
                 .iter()
-                .position(|(fqn, _)| fqn.rsplit('.').next() == ty.as_deref())
-                .unwrap_or(0);
+                .position(|(fqn, _)| Some(fqn.as_str()) == ty.as_deref())?;
             named.into_iter().nth(own).map(|n| (base, n))
         })
         .collect()
@@ -420,7 +418,7 @@ pub(crate) fn collect_schemas(
 /// The result is `<base key>` → `[(fqn, the FileDescriptorSet pruned to that message)]` (a service's
 /// key announces two: the request and the response).
 ///
-/// `pattern` is `reiny/<domain>/*/**` (every type) or `reiny/<domain>/**/<TYPE>` (one).
+/// `pattern` is `reiny/<domain>/*/**` (every type) or `reiny/<domain>/**/<TYPE_NAME>` (one).
 pub(crate) fn collect_schemas_all(
     session: &zenoh::Session,
     pattern: &str,
@@ -437,7 +435,7 @@ pub(crate) fn collect_schemas_all(
     for reply in &replies {
         let Ok(sample) = reply.result() else { continue };
         let full = sample.key_expr().as_str();
-        // reiny/<domain>/<id>/<TYPE>/@schema/<fqn>
+        // reiny/<domain>/<id>/<TYPE_NAME>/@schema/<fqn>
         let Some((base, fqn)) = full.split_once(&format!("/{SCHEMA_CHUNK}/")) else {
             continue;
         };
@@ -502,12 +500,12 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "reiny/lab/robot/control/State",
-                "reiny/lab/robot/simulation/State"
+                "reiny/lab/robot/control/robot.State",
+                "reiny/lab/robot/simulation/robot.State"
             ]
         );
         let (_, key) = output_key(&bindings, "lab", "command", PortKind::Stream, None).unwrap();
-        assert_eq!(key, "reiny/lab/tools/cli/Command");
+        assert_eq!(key, "reiny/lab/tools/cli/robot.Command");
         assert!(input_keys(&bindings, "lab", "State", PortKind::Stream, None).is_err());
         assert!(input_keys(&bindings, "lab", "state", PortKind::Stream, Some("**")).is_err());
         assert!(input_keys(&bindings, "lab", "calibrate", PortKind::Stream, None).is_err());
@@ -521,7 +519,7 @@ mod tests {
         bindings.namespace = "tools/cli/owned/inspector".into();
         validate_bindings(&bindings, "lab").unwrap();
         let (_, key) = output_key(&bindings, "lab", "command", PortKind::Stream, None).unwrap();
-        assert_eq!(key, "reiny/lab/tools/cli/Command");
+        assert_eq!(key, "reiny/lab/tools/cli/robot.Command");
     }
 
     #[test]

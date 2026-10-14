@@ -8,7 +8,7 @@
 //! use reiny_ros2::ros2_client::{MessageTypeName, ServiceTypeName};
 //!
 //! #[reiny::main]
-//! async fn main(cloudy: Cloudy) -> reiny::Result<()> {
+//! async fn main(cloudy: ModuleContext) -> reiny::Result<()> {
 //!     let ros = reiny_ros2::Ros::new(&cloudy, "reiny_bridge")?;          // ROS_DOMAIN_ID from the env
 //!     ros.export::<RobotState, JointState>(                                 // reiny → ROS
 //!         "state", "/joint_states", MessageTypeName::new("sensor_msgs", "JointState"), Qos::SENSOR,
@@ -29,7 +29,7 @@
 //! - A ROS type is a [`ros2_client::Message`] (a serde struct). Standard messages come from
 //!   `ros2-interfaces-<distro>`, or from three lines of struct of your own.
 //! - For identically shaped types there are [`Ros::export_auto`] / [`Ros::import_auto`], which map by
-//!   field name through `Topic::DESCRIPTOR` (the proto descriptor). Zero lines; a type that does not
+//!   field name through `MessageType::DESCRIPTOR` (the proto descriptor). Zero lines; a type that does not
 //!   fit that rule uses the closure form instead.
 //! - ROS's domain (`ROS_DOMAIN_ID`) and reiny's domain are different things; a bridge holds both.
 //! - Every route requires an explicit declared YAML port. Exports use inputs; imports use outputs.
@@ -41,7 +41,7 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use prost::Message as ProstMessage;
-use reiny::{Cloudy, Durability, History, Qos, Reliability, Result, Service, Topic};
+use reiny::{Durability, History, MessageType, ModuleContext, Qos, Reliability, Result, Service};
 use ros2_client::dds::rustdds::DomainParticipantBuilder;
 use ros2_client::ros2::{QosPolicies, QosPolicyBuilder, policy};
 use ros2_client::{
@@ -58,15 +58,15 @@ mod auto;
 const RELIABLE_BLOCKING_MS: i64 = 100;
 /// The `QoS` of a service's request / response topics (ROS 2's `rmw_qos_profile_services_default`).
 const SERVICE_DEPTH: i32 = 10;
-/// The deadline when calling a ROS service (10 s, the same as reiny's `Caller` default).
+/// The deadline when calling a ROS service (10 s, the same as reiny's `RpcClient` default).
 const ROS_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The way in to the ROS 2 side. One ROS node, with as many `export` / `import` routes as you like.
 ///
-/// Dropping it stops every route and the spinner. The routes also stop when the `Cloudy` shuts down
+/// Dropping it stops every route and the spinner. The routes also stop when the `ModuleContext` shuts down
 /// (the reiny-side subscription starts returning `None`).
 pub struct Ros<'c> {
-    cloudy: &'c Cloudy,
+    cloudy: &'c ModuleContext,
     context: Context,
     node: Mutex<Node>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -81,7 +81,7 @@ impl<'c> Ros<'c> {
     /// discovers its peers, but their loopback locators are lost when the discovery DB re-publishes
     /// the endpoint, so no user data is ever sent ("No locators for `RtpsReaderProxy`"). Leave it unset
     /// and separate the traffic with `ROS_DOMAIN_ID` until rustdds keeps that bucket.
-    pub fn new(cloudy: &'c Cloudy, node_name: &str) -> Result<Self> {
+    pub fn new(cloudy: &'c ModuleContext, node_name: &str) -> Result<Self> {
         let domain_id = std::env::var("ROS_DOMAIN_ID")
             .ok()
             .and_then(|v| v.parse::<u16>().ok())
@@ -100,7 +100,11 @@ impl<'c> Ros<'c> {
     }
 
     /// With a [`Context`] of your own (DDS domain / security settings).
-    pub fn with_context(cloudy: &'c Cloudy, context: Context, node_name: &str) -> Result<Self> {
+    pub fn with_context(
+        cloudy: &'c ModuleContext,
+        context: Context,
+        node_name: &str,
+    ) -> Result<Self> {
         let name = NodeName::new("/", node_name).map_err(err)?;
         let mut node = context
             .new_node(name, NodeOptions::new().enable_rosout(false))
@@ -142,7 +146,7 @@ impl<'c> Ros<'c> {
         convert: F,
     ) -> Result<()>
     where
-        T: ProstMessage + Default + Topic + Send + 'static,
+        T: ProstMessage + Default + MessageType + Send + 'static,
         R: Message + Send + Sync + 'static,
         F: Fn(T) -> R + Send + 'static,
     {
@@ -159,7 +163,7 @@ impl<'c> Ros<'c> {
         qos: Qos,
     ) -> Result<()>
     where
-        T: ProstMessage + Default + Topic + Send + 'static,
+        T: ProstMessage + Default + MessageType + Send + 'static,
         R: Message + Send + Sync + 'static,
     {
         let descriptor = auto::descriptor::<T>()?;
@@ -177,7 +181,7 @@ impl<'c> Ros<'c> {
         convert: F,
     ) -> Result<()>
     where
-        T: ProstMessage + Default + Topic + Send + 'static,
+        T: ProstMessage + Default + MessageType + Send + 'static,
         R: Message + Send + Sync + 'static,
         F: Fn(T) -> Result<R> + Send + 'static,
     {
@@ -220,7 +224,7 @@ impl<'c> Ros<'c> {
     ) -> Result<()>
     where
         R: Message + Send + Sync + 'static,
-        T: ProstMessage + Topic + Send + 'static,
+        T: ProstMessage + MessageType + Send + 'static,
         F: Fn(R) -> T + Send + 'static,
     {
         self.import_with(port, topic, ty, qos, move |r| Ok(convert(r)))
@@ -236,7 +240,7 @@ impl<'c> Ros<'c> {
     ) -> Result<()>
     where
         R: Message + Send + Sync + 'static,
-        T: ProstMessage + Default + Topic + Send + 'static,
+        T: ProstMessage + Default + MessageType + Send + 'static,
     {
         let descriptor = auto::descriptor::<T>()?;
         self.import_with(port, topic, ty, qos, move |r: R| {
@@ -254,7 +258,7 @@ impl<'c> Ros<'c> {
     ) -> Result<()>
     where
         R: Message + Send + Sync + 'static,
-        T: ProstMessage + Topic + Send + 'static,
+        T: ProstMessage + MessageType + Send + 'static,
         F: Fn(R) -> Result<T> + Send + 'static,
     {
         let publisher = self.cloudy.output::<T>(port)?;
@@ -308,7 +312,7 @@ impl<'c> Ros<'c> {
         FQ: Fn(Q) -> S + Send + 'static,
         FP: Fn(S::Response) -> P + Send + 'static,
     {
-        let caller = self.cloudy.uses::<S>(port)?;
+        let caller = self.cloudy.rpc_client::<S>(port)?;
         let service_name = parse_name(name)?;
         let server = lock(&self.node)
             .create_server::<Q, P>(
@@ -361,7 +365,7 @@ impl<'c> Ros<'c> {
         FQ: Fn(S) -> Q + Send + 'static,
         FP: Fn(P) -> S::Response + Send + 'static,
     {
-        let mut server = self.cloudy.provides::<S>(port)?;
+        let mut server = self.cloudy.rpc_server::<S>(port)?;
         let service_name = parse_name(name)?;
         let client = lock(&self.node)
             .create_client::<Q, P>(

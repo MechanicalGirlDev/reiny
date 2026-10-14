@@ -20,7 +20,7 @@ kilted = ["ros2-client/kilted"]
 lyrical = ["ros2-client/lyrical"]
 
 [dependencies]
-# `Cloudy` と `Engine` の語彙だけ(zenoh は引かない)。
+# `ModuleContext` と `Engine` の語彙だけ(zenoh は引かない)。
 reiny = { path = "../reiny", version = "0.10.1", default-features = false }
 ros2-client = { version = "0.11", default-features = false, features = ["dds"] }
 prost = { workspace = true }

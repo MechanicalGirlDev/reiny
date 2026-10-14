@@ -7,14 +7,14 @@ fn manifest_search_takes_the_nearest_one_upward() {
     f.write(
         "schema.yaml",
         r"
-{version: 2,schema: {internals: {Shared: {proto: proto/shared.proto,message: ws.Shared}},projects: {ping: {publications: [Shared]}}}}
+{version: 3,schema: {shared_types: {Shared: {proto: proto/shared.proto,message: ws.Shared}},projects: {ping: {types: [Shared]}}}}
 ",
     );
     f.write("ping/proto/ping.proto", "");
     f.write(
         "ping/schema.yaml",
         r"
-{version: 2,schema: {project: {name: ping,version: 0.1.0},publications: {Ping: {proto: proto/ping.proto,message: ping.Ping}}}}
+{version: 3,schema: {project: {name: ping,version: 0.1.0},exported_types: {Ping: {proto: proto/ping.proto,message: ping.Ping}}}}
 ",
     );
     std::fs::create_dir_all(f.path("ping/src")).unwrap();
@@ -38,11 +38,11 @@ fn runtime_only_modules_inherit_the_ancestor_catalog() {
     f.write("proto/shared.proto", "");
     f.write(
         "schema.yaml",
-        "version: 2\nschema:\n  internals:\n    Shared: { proto: proto/shared.proto, message: ws.Shared }\n",
+        "version: 3\nschema:\n  shared_types:\n    Shared: { proto: proto/shared.proto, message: ws.Shared }\n",
     );
     f.write(
         "modules/worker/main.yaml",
-        "version: 2\nproviders: runtime-only\nrun: { provider: remote, bin: worker }\n",
+        "version: 3\nproviders: runtime-only\nrun: { provider: remote, bin: worker }\n",
     );
     std::fs::create_dir_all(f.path("modules/worker/src")).unwrap();
 
@@ -56,13 +56,13 @@ fn runtime_only_modules_inherit_the_ancestor_catalog() {
 }
 
 #[test]
-fn v2_catalog_resolves_types_without_interpreting_runtime_contracts() {
-    // Given a v2 catalog beside a malformed runtime manifest.
-    let fixture = Fixture::new("v2-catalog");
+fn v3_catalog_resolves_types_without_interpreting_runtime_contracts() {
+    // Given a v3 catalog beside a malformed runtime manifest.
+    let fixture = Fixture::new("v3-catalog");
     fixture.write("proto/state.proto", "");
     fixture.write("main.yaml", "not valid yaml: [");
     fixture.write("schema.yaml",
-        "version: 2\nschema:\n  project: {name: app}\n  publications:\n    State: {proto: proto/state.proto, message: probe.State}\n");
+        "version: 3\nschema:\n  project: {name: app}\n  exported_types:\n    State: {proto: proto/state.proto, message: probe.State}\n");
     // When codegen resolves the app's catalog.
     let resolution = describe(fixture.root()).unwrap();
     // Then catalog-relative type resolution does not require a runtime deployment.
@@ -76,7 +76,7 @@ fn v2_catalog_resolves_types_without_interpreting_runtime_contracts() {
 #[test]
 fn main_yaml_catalogs_are_not_discovered_locally_or_in_ancestors() {
     let f = Fixture::new("no-main-fallback");
-    let catalog = "version: 2\nschema: { project: { name: old } }\n";
+    let catalog = "version: 3\nschema: { project: { name: old } }\n";
     f.write("main.yaml", catalog);
     f.write("worker/main.yaml", catalog);
     let err = describe_err(&f.path("worker"));
@@ -88,11 +88,11 @@ fn dependencies_require_their_own_schema_yaml() {
     let f = Fixture::new("dependency-no-main-fallback");
     f.write(
         "schema.yaml",
-        "version: 2\nschema: { project: { name: app }, dependencies: { old: { path: dep } } }\n",
+        "version: 3\nschema: { project: { name: app }, dependencies: { old: { path: dep } } }\n",
     );
     f.write(
         "dep/main.yaml",
-        "version: 2\nschema: { project: { name: old } }\n",
+        "version: 3\nschema: { project: { name: old } }\n",
     );
     let err = describe_err(f.root());
     assert!(err.contains("dependency 'old' schema.yaml"), "{err}");

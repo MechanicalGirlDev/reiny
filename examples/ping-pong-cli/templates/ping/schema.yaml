@@ -1,7 +1,7 @@
-version: 2
+version: 3
 schema:
   project: { name: ping }
-  publications:
+  exported_types:
     Ping: { proto: proto/ping.proto, message: ping.Ping }
   dependencies:
     pong: { path: ../pong }

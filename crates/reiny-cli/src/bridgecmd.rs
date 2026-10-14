@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand};
-use reiny::Cloudy;
+use reiny::ModuleContext;
 use reiny::bindings::{EndpointContract, ModuleBindings, PortKind};
 use reiny::engine::Engine;
 use reiny_link::transport::Udp;
@@ -59,7 +59,9 @@ pub(crate) fn run(args: BridgeArgs) -> Result<()> {
         let mut opts = args.bus.runtime_options(&id);
         opts.module_bindings = Some(bindings.clone());
         let domain = opts.domain.clone();
-        let zenoh_side = Cloudy::open(opts).await.context("opening zenoh side")?;
+        let zenoh_side = ModuleContext::open(opts)
+            .await
+            .context("opening zenoh side")?;
         let (engine, link): (Arc<dyn Engine>, Option<Arc<LinkEngine>>) = match args.engine {
             BridgeEngine::Serial { path, baud } => {
                 let port = reiny_link::transport::serial::open(&path, baud)
@@ -163,8 +165,8 @@ fn merge_schema(schemas: &mut BTreeMap<String, u64>, name: &str, schema: u64) ->
 }
 
 async fn bridge_schemas(
-    zenoh: &Cloudy,
-    other: &Cloudy,
+    zenoh: &ModuleContext,
+    other: &ModuleContext,
     bindings: &ModuleBindings,
     peer: Option<&(String, Vec<PeerType>)>,
 ) -> Result<BTreeMap<String, u64>> {
@@ -197,10 +199,10 @@ async fn bridge_schemas(
                 );
                 merge_schema(&mut schemas, &contract.type_name, ty.schema)?;
                 if let Some(response) = &contract.response {
-                    let short = response.rsplit('.').next().unwrap_or(response);
+                    let response_type = response.as_str();
                     let ty = types
                         .iter()
-                        .find(|ty| ty.name == short)
+                        .find(|ty| ty.name == response_type)
                         .context("link peer Hello lacks the declared RPC response type")?;
                     ensure!(
                         ty.hash == reiny_link::wire::type_hash(&ty.name),
@@ -230,10 +232,10 @@ async fn bridge_schemas(
             }
         }
         if let Some(response) = &contract.response {
-            let short = response.rsplit('.').next().unwrap_or(response);
-            descriptors.extend(zenoh.schemas(short).await?);
+            let response_type = response.as_str();
+            descriptors.extend(zenoh.schemas(response_type).await?);
             if peer.is_none() {
-                descriptors.extend(other.schemas(short).await?);
+                descriptors.extend(other.schemas(response_type).await?);
             }
             for descriptor in descriptors.iter().filter(|descriptor| {
                 descriptor.message == *response && input.sources.contains(&descriptor.source)
@@ -313,7 +315,7 @@ mod tests {
         let mut options = reiny::RuntimeOptions::new("bridge");
         options.module_bindings = Some(bindings.clone());
         options.engine = Some(Arc::new(reiny::engine::Local::new()));
-        let zenoh = Cloudy::open(options).await.unwrap();
+        let zenoh = ModuleContext::open(options).await.unwrap();
         let other = zenoh
             .with_engine(Arc::new(reiny::engine::Local::new()))
             .await
@@ -321,8 +323,8 @@ mod tests {
         let mut peer = (
             "mcu".into(),
             vec![PeerType {
-                hash: reiny_link::wire::type_hash("Probe"),
-                name: "Probe".into(),
+                hash: reiny_link::wire::type_hash("e2e.Probe"),
+                name: "e2e.Probe".into(),
                 flags: reiny_link::wire::flags::PUB,
                 schema: 42,
             }],
@@ -337,7 +339,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        peer.1[0].hash = reiny_link::wire::type_hash("Probe");
+        peer.1[0].hash = reiny_link::wire::type_hash("e2e.Probe");
         let mut rpc = bindings.clone();
         let contract = &mut rpc.inputs.get_mut("incoming").unwrap().contract;
         contract.kind = PortKind::Rpc;
@@ -349,8 +351,8 @@ mod tests {
                 .is_err()
         );
         peer.1.push(PeerType {
-            hash: reiny_link::wire::type_hash("Response"),
-            name: "Response".into(),
+            hash: reiny_link::wire::type_hash("e2e.Response"),
+            name: "e2e.Response".into(),
             flags: 0,
             schema: 7,
         });
@@ -365,7 +367,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        peer.1[1].hash = reiny_link::wire::type_hash("Response");
+        peer.1[1].hash = reiny_link::wire::type_hash("e2e.Response");
         let mut metadata_only = bindings.clone();
         metadata_only
             .inputs

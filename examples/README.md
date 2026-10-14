@@ -25,7 +25,7 @@ Communication cycles do not imply startup dependencies.
 
 Applications use `cloudy.input::<T>("port")` and `cloudy.output::<T>("port")`, then
 `cloudy.ready()?`. Types identify payload schemas; named ports identify wiring.
-Codegen searches upward for the nearest `schema.yaml`. `Cloudy::open` requires
+Codegen searches upward for the nearest `schema.yaml`. `ModuleContext::open` requires
 resolved module bindings from `apply` / `run`; schema catalogs alone cannot open endpoints.
 
 Build and run from the example directory with `cargo build --locked` and

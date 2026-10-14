@@ -394,12 +394,12 @@ fn list(args: &ListArgs) -> Result<()> {
     if show_domain {
         println!(
             "{:<w_dom$}  {:<w_ty$}  {:<w_pub$}  {:<w_listen$}  SRV",
-            "DOMAIN", "TYPE", "PUB", "SUB"
+            "DOMAIN", "TYPE_NAME", "PUB", "SUB"
         );
     } else {
         println!(
             "{:<w_ty$}  {:<w_pub$}  {:<w_listen$}  SRV",
-            "TYPE", "PUB", "SUB"
+            "TYPE_NAME", "PUB", "SUB"
         );
     }
     for ((d, t), roles) in &rows {

@@ -5,8 +5,8 @@
 //! client : query    reiny/<domain>/<id|*>/<Req>    payload = Req, reply payload = Req::Response
 //! ```
 //!
-//! It is the same key shape as publishing, so addressing ([`CallerBuilder::to`]) and presence
-//! ([`Cloudy::servers`] / [`Cloudy::watch_servers`]) work through the same machinery as pub/sub.
+//! It is the same key shape as publishing, so addressing ([`RpcClientBuilder::to`]) and presence
+//! ([`ModuleContext::servers`] / [`ModuleContext::watch_servers`]) work through the same machinery as pub/sub.
 //! It can even share a key with a latched publisher (`pubsub.rs`) — they are told apart by **whether
 //! there is a payload**: a latched subscriber's `get` carries none, a service call always does.
 //!
@@ -23,7 +23,7 @@ use prost::Message;
 use crate::engine::{Engine, Guard, Key, QueryParams, RawQuery, SERVICE_CHUNK};
 use crate::pubsub::{attachment_fingerprint, declare_schema, fingerprint};
 use crate::shutdown::Shutdown;
-use crate::{Cloudy, Result, Service, Topic};
+use crate::{MessageType, ModuleContext, Result, Service};
 
 /// The same as zenoh's `get` default.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,10 +36,10 @@ const QUERY_CAPACITY: usize = 256;
 // server
 // ---------------------------------------------------------------------------
 
-/// A typed server obtained from [`Cloudy::provides`].
+/// A typed server obtained from [`ModuleContext::rpc_server`].
 ///
-/// Dropping it drops the liveliness token too, and [`Cloudy::watch_servers`] reports a `Left`.
-pub struct Server<S> {
+/// Dropping it drops the liveliness token too, and [`ModuleContext::watch_servers`] reports a `Left`.
+pub struct RpcServer<S> {
     rx: flume::Receiver<Box<dyn RawQuery>>,
     /// The queryable handle (merely held).
     _guard: Guard,
@@ -54,17 +54,17 @@ pub struct Server<S> {
     pub(crate) managed: Option<crate::managed::ManagedPort>,
 }
 
-impl<S: Service> Server<S> {
-    pub(crate) fn declare(cloudy: &Cloudy) -> Result<Self> {
+impl<S: Service> RpcServer<S> {
+    pub(crate) fn declare(cloudy: &ModuleContext) -> Result<Self> {
         let engine = &cloudy.engine;
         let caps = engine.caps();
         if !(caps.query && caps.liveliness) {
             anyhow::bail!(
                 "server of {}: this engine has no query / liveliness, which services need",
-                S::TYPE
+                S::TYPE_NAME
             );
         }
-        let key = cloudy.key_for(Some(cloudy.endpoint_namespace()), S::TYPE);
+        let key = cloudy.key_for(Some(cloudy.endpoint_namespace()), S::TYPE_NAME);
         let (tx, rx) = flume::bounded(QUERY_CAPACITY);
         let guard = engine.respond(
             &key,
@@ -110,7 +110,7 @@ impl<S: Service> Server<S> {
             let Some(payload) = query.payload() else {
                 continue; // drop = finalize
             };
-            if attachment_fingerprint(query.attachment()) != Some(S::SCHEMA) {
+            if attachment_fingerprint(query.attachment()) != Some(S::SCHEMA_FINGERPRINT) {
                 reply_err(
                     query,
                     "missing or mismatching request schema fingerprint".to_string(),
@@ -126,7 +126,7 @@ impl<S: Service> Server<S> {
                     });
                 }
                 Err(e) => {
-                    tracing::warn!(ty = S::TYPE, error = %e, "skipping undecodable request");
+                    tracing::warn!(ty = S::TYPE_NAME, error = %e, "skipping undecodable request");
                     reply_err(query, format!("undecodable request: {e}"));
                 }
             }
@@ -154,12 +154,12 @@ pub struct Request<S: Service> {
 
 // Replies stay lazy futures, even though no engine today has an await point in them.
 impl<S: Service> Request<S> {
-    /// Send the reply. With an `S::Response::SCHEMA`, the fingerprint rides in the attachment.
+    /// Send the reply. With an `S::Response::SCHEMA_FINGERPRINT`, the fingerprint rides in the attachment.
     pub async fn reply(self, response: S::Response) -> Result<()> {
         std::future::ready(self.query.reply(
             &self.key,
             response.encode_to_vec(),
-            fingerprint(Some(S::Response::SCHEMA)),
+            fingerprint(Some(S::Response::SCHEMA_FINGERPRINT)),
         ))
         .await
     }
@@ -174,17 +174,17 @@ impl<S: Service> Request<S> {
 // client
 // ---------------------------------------------------------------------------
 
-/// The builder [`Cloudy::caller`] returns. With nothing set it is [`Cloudy::call`].
+/// The builder [`ModuleContext::caller`] returns. With nothing set it is [`ModuleContext::call`].
 #[must_use = "a builder does nothing until .build()"]
-pub(crate) struct CallerBuilder<'a, S> {
-    cloudy: &'a Cloudy,
+pub(crate) struct RpcClientBuilder<'a, S> {
+    cloudy: &'a ModuleContext,
     to: Option<String>,
     timeout: Duration,
     _marker: PhantomData<S>,
 }
 
-impl<'a, S> CallerBuilder<'a, S> {
-    pub(crate) fn new(cloudy: &'a Cloudy) -> Self {
+impl<'a, S> RpcClientBuilder<'a, S> {
+    pub(crate) fn new(cloudy: &'a ModuleContext) -> Self {
         Self {
             cloudy,
             to: None,
@@ -207,9 +207,9 @@ impl<'a, S> CallerBuilder<'a, S> {
         self
     }
 
-    /// Build a standalone caller. Managed code must use [`Cloudy::uses`].
+    /// Build a standalone caller. Managed code must use [`ModuleContext::rpc_client`].
     #[cfg(any(test, feature = "conformance"))]
-    pub(crate) fn build(self) -> Result<Caller<S>>
+    pub(crate) fn build(self) -> Result<RpcClient<S>>
     where
         S: Service,
     {
@@ -220,13 +220,13 @@ impl<'a, S> CallerBuilder<'a, S> {
         Ok(self.build_named())
     }
 
-    pub(crate) fn build_named(self) -> Caller<S>
+    pub(crate) fn build_named(self) -> RpcClient<S>
     where
         S: Service,
     {
-        Caller {
+        RpcClient {
             engine: Arc::clone(&self.cloudy.engine),
-            key: self.cloudy.key_for(self.to.as_deref(), S::TYPE),
+            key: self.cloudy.key_for(self.to.as_deref(), S::TYPE_NAME),
             timeout: self.timeout,
             _marker: PhantomData,
             managed: None,
@@ -234,8 +234,8 @@ impl<'a, S> CallerBuilder<'a, S> {
     }
 }
 
-/// A typed client opened through [`Cloudy::uses`]. It borrows no `Cloudy`, so it can live in a struct.
-pub struct Caller<S> {
+/// A typed client opened through [`ModuleContext::rpc_client`]. It borrows no `ModuleContext`, so it can live in a struct.
+pub struct RpcClient<S> {
     engine: Arc<dyn Engine>,
     key: Key,
     timeout: Duration,
@@ -243,14 +243,14 @@ pub struct Caller<S> {
     pub(crate) managed: Option<crate::managed::ManagedPort>,
 }
 
-impl<S: Service> Caller<S> {
+impl<S: Service> RpcClient<S> {
     /// Send the request and wait for the reply.
     pub async fn call(&self, request: S) -> std::result::Result<S::Response, CallError> {
         // Our own timer decides the deadline (→ `Timeout`) and the engine's deadline sits outside it —
         // zenoh shows its own expiry as nothing but "no replies", indistinguishable from `NoReply`.
         let params = QueryParams {
             payload: Some(request.encode_to_vec()),
-            attachment: fingerprint(Some(S::SCHEMA)),
+            attachment: fingerprint(Some(S::SCHEMA_FINGERPRINT)),
             timeout: self.timeout + ENGINE_TIMEOUT_MARGIN,
         };
         let mut replies = self
@@ -271,7 +271,7 @@ impl<S: Service> Caller<S> {
                         "response came from an undeclared target"
                     )));
                 }
-                let expected = S::Response::SCHEMA;
+                let expected = S::Response::SCHEMA_FINGERPRINT;
                 let Some(received) = attachment_fingerprint(sample.attachment.as_deref()) else {
                     return Err(CallError::MissingSchema);
                 };
@@ -287,7 +287,7 @@ impl<S: Service> Caller<S> {
     }
 }
 
-/// A [`Caller::call`] failure. `Remote` / `NoReply` are kept apart because callers do branch on
+/// A [`RpcClient::call`] failure. `Remote` / `NoReply` are kept apart because callers do branch on
 /// "there is no server" versus "the server refused" (whether to enable a GUI button, say).
 #[derive(Debug)]
 pub enum CallError {
@@ -297,9 +297,9 @@ pub enum CallError {
     Timeout,
     /// The server called [`Request::reply_err`]. The payload is the string it passed.
     Remote(String),
-    /// The reply's fingerprint differs from `Response::SCHEMA`.
+    /// The reply's fingerprint differs from `Response::SCHEMA_FINGERPRINT`.
     Schema {
-        /// Our own `Response::SCHEMA`.
+        /// Our own `Response::SCHEMA_FINGERPRINT`.
         expected: u64,
         /// The fingerprint that rode on the reply.
         received: u64,

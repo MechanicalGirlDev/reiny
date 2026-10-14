@@ -4,14 +4,14 @@ use std::path::Path;
 
 use crate::managed::{MODULE_REPORT_ENV, config as managed_config};
 use crate::shutdown::Shutdown;
-use crate::{Cloudy, Result, RuntimeOptions, validate_segment};
+use crate::{ModuleContext, Result, RuntimeOptions, validate_segment};
 
-impl Cloudy {
-    /// Open the engine from the options (or take `opts.engine`) and build a `Cloudy`.
+impl ModuleContext {
+    /// Open the engine from the options (or take `opts.engine`) and build a `ModuleContext`.
     ///
     /// Call it inside a tokio runtime. It watches no signals — it is the entry point for slotting
     /// [`crate::engine::Local`] into a `#[tokio::test]` and running a launch, and the one a bridge uses
-    /// to open its second `Cloudy`. The process's entry point is [`run_with`].
+    /// to open its second `ModuleContext`. The process's entry point is [`crate::run_with`].
     pub async fn open(mut opts: RuntimeOptions) -> Result<Self> {
         managed_config::validate_namespace(&opts.id)?;
         validate_segment("--domain", &opts.domain)?;

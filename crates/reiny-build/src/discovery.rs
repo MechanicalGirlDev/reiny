@@ -8,6 +8,7 @@ use serde::Deserialize;
 use super::Manifest;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CatalogManifest {
     version: u32,
     schema: Manifest,
@@ -34,11 +35,12 @@ pub(super) fn parse_manifest(path: &Path) -> Result<Manifest> {
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let manifest: CatalogManifest =
         serde_yaml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    if manifest.version != 2 {
+    if manifest.version != super::TYPE_CATALOG_VERSION {
         bail!(
-            "{}: unsupported schema.yaml version {} (expected 2)",
+            "{}: unsupported schema.yaml version {} (expected {})",
             path.display(),
-            manifest.version
+            manifest.version,
+            super::TYPE_CATALOG_VERSION
         );
     }
     Ok(manifest.schema)

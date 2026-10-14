@@ -9,7 +9,7 @@ use reiny_launch::{
 };
 
 /// Bundle a deployment and its launcher without flattening its invocation tree.
-pub(crate) fn compress(
+pub(crate) fn bundle(
     config: &Path,
     out: &Path,
     launcher: Option<&str>,
@@ -555,7 +555,7 @@ mod tests {
         std::fs::create_dir_all(root.join("configs"))?;
         std::fs::create_dir_all(root.join("assets"))?;
         std::fs::create_dir_all(root.join("installed"))?;
-        let manifest = "version: 2\ndeployment: robot\nproviders:\n  process: {type: process, bin_dir: installed}\nrun:\n  provider: process\n  bin: worker\n  config: configs/app.json\n  config_assets: [../assets/value.txt, include.json]\n  args: [instance-setting]\n";
+        let manifest = "version: 3\ndeployment: robot\nproviders:\n  process: {type: process, bin_dir: installed}\nrun:\n  provider: process\n  bin: worker\n  config: configs/app.json\n  config_assets: [../assets/value.txt, include.json]\n  args: [instance-setting]\n";
         std::fs::write(root.join("main.yaml"), manifest)?;
         std::fs::write(
             root.join("configs/app.json"),

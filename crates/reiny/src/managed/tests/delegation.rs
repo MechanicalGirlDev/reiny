@@ -33,8 +33,8 @@ fn host_bindings() -> ModuleBindings {
 async fn spawn_fixture(
     bus: Arc<Local>,
     directory: &Directory,
-) -> (Cloudy, OwnedChild, std::io::PipeWriter) {
-    let mut host = Cloudy::open(options(bus, host_bindings()))
+) -> (ModuleContext, OwnedChild, std::io::PipeWriter) {
+    let mut host = ModuleContext::open(options(bus, host_bindings()))
         .await
         .expect("host");
     host.module.bundle_dir = Some(directory.0.clone());
@@ -66,17 +66,17 @@ async fn spawn_fixture(
     (host, child, hold_stdin)
 }
 
-async fn open_child(bus: Arc<Local>, directory: &Directory) -> Cloudy {
+async fn open_child(bus: Arc<Local>, directory: &Directory) -> ModuleContext {
     let child_bindings: ModuleBindings = serde_json::from_slice(
         &std::fs::read(directory.0.join("driver/bindings.json")).expect("child bindings"),
     )
     .expect("parse child bindings");
     let mut opts = options(bus, child_bindings);
     opts.module_report_path = Some(directory.0.join("driver/report.json"));
-    Cloudy::open(opts).await.expect("child context")
+    ModuleContext::open(opts).await.expect("child context")
 }
 
-async fn announce_child_ready(bus: &Local, child: &Cloudy) {
+async fn announce_child_ready(bus: &Local, child: &ModuleContext) {
     let namespace = &child
         .module
         .bindings
@@ -123,13 +123,13 @@ async fn delegation_is_exclusive_and_child_runtime_identity_is_distinct() {
     assert_eq!(child_binding.endpoint_namespace, SENDER);
     assert!(child_binding.children.is_empty());
     assert_eq!(child_binding.executables, binding.executables);
-    let host = Cloudy::open(options(bus.clone(), binding))
+    let host = ModuleContext::open(options(bus.clone(), binding))
         .await
         .expect("host");
     assert!(host.input::<Probe>("incoming").is_err());
     assert!(host.output::<Probe>("outgoing").is_err());
     assert!(host.ready().is_err());
-    let child = Cloudy::open(options(bus.clone(), child_binding))
+    let child = ModuleContext::open(options(bus.clone(), child_binding))
         .await
         .expect("child");
     let output = child.output::<Probe>("outgoing").expect("child output");
@@ -178,7 +178,7 @@ async fn host_requires_child_report_and_live_readiness_then_withdraws_on_port_lo
     )
     .expect("parse report");
     assert_eq!(report.namespace, SENDER);
-    assert_eq!(report.outputs["outgoing"].schema, Probe::SCHEMA);
+    assert_eq!(report.outputs["outgoing"].schema, Probe::SCHEMA_FINGERPRINT);
     assert_eq!(report.outputs["outgoing"].contract, contract("test.Probe"));
     // The watch predates the child handle loss; no timer luck determines the assertion.
     drop(output);
@@ -329,7 +329,7 @@ async fn child_zenoh_configuration_connects_to_host_without_rebinding_its_listen
     opts.module_report_path = None;
     opts.module_bindings = Some(binding.clone());
     opts.zenoh = crate::ZenohSource::Config(Box::new(config));
-    let host = Cloudy::open(opts).await.expect("listening host");
+    let host = ModuleContext::open(opts).await.expect("listening host");
     let child_config = host
         .module
         .child_zenoh_config
@@ -360,7 +360,7 @@ async fn child_zenoh_configuration_connects_to_host_without_rebinding_its_listen
     opts.zenoh = crate::ZenohSource::Config(Box::new(
         zenoh::Config::from_json5(child_config).expect("child config"),
     ));
-    let child = Cloudy::open(opts)
+    let child = ModuleContext::open(opts)
         .await
         .expect("child opens without listener collision");
     let _input = child.input::<Probe>("incoming").expect("child input");

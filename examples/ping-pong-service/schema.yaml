@@ -1,6 +1,6 @@
-version: 2
+version: 3
 schema:
-  internals:
+  shared_types:
     Add:
       proto: "proto/calc.proto"
       message: "calc.Add"
@@ -13,10 +13,6 @@ schema:
       response: "Sum"
   projects:
     calc:
-      version: "0.1.0"
-      description: "calc module"
-      publications: ["Add","Sum"]
+      types: ["Add","Sum"]
     asker:
-      version: "0.1.0"
-      description: "asker module"
-      dependencies: ["Add","Sum"]
+      types: ["Add","Sum"]

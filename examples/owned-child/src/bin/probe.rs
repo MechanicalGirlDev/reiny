@@ -1,14 +1,14 @@
 use std::time::Duration;
 
-use owned_child_example::internals::{Add, State};
-use reiny::{Cloudy, RuntimeOptions};
+use owned_child_example::shared_types::{Add, State};
+use reiny::{ModuleContext, RuntimeOptions};
 
 #[tokio::main]
 async fn main() -> reiny::Result<()> {
-    let cloudy = Cloudy::open(RuntimeOptions::from_args("probe")).await?;
+    let cloudy = ModuleContext::open(RuntimeOptions::from_args("probe")).await?;
     let endpoint = "owned-child-example/host";
     let mut states = cloudy.input::<State>("state")?;
-    let caller = cloudy.uses::<Add>("adder")?;
+    let caller = cloudy.rpc_client::<Add>("adder")?;
     cloudy.ready()?;
     let state = tokio::time::timeout(Duration::from_secs(10), states.recv_envelope())
         .await?

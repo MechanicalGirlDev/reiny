@@ -5,7 +5,7 @@
 //! on wire: COBS(raw) 0x00
 //! ```
 //!
-//! - **The type travels as a hash** ([`type_hash`] = FNV-1a 32-bit of `Topic::TYPE`). The type name
+//! - **The type travels as a hash** ([`type_hash`] = FNV-1a 32-bit of `MessageType::TYPE_NAME`). The type name
 //!   as a string rides only in [`Kind::Hello`]. type = topic in four bytes.
 //! - **COBS** allows resynchronization on `0x00` (start listening mid-stream and you are aligned
 //!   again from the next `0x00`). Datagrams (UDP) use the same shape — one receive path is worth
@@ -107,7 +107,7 @@ impl core::error::Error for WireError {}
 
 const CRC: crc::Crc<u16> = crc::Crc::<u16>::new(&crc::CRC_16_KERMIT);
 
-/// `Topic::TYPE` → the on-wire type hash (FNV-1a 32-bit). It is a `const fn`, so it is computed at
+/// `MessageType::TYPE_NAME` → the on-wire type hash (FNV-1a 32-bit). It is a `const fn`, so it is computed at
 /// compile time.
 ///
 /// 32 bits keeps the per-frame fixed cost down. A collision is detectable at link up, because Hello
@@ -209,8 +209,8 @@ pub mod flags {
     /// The publication is latched (a promise to re-send the most recent value on link up).
     pub const LATCHED: u8 = 8;
     /// `schema` is present. Required for every declared type.
-    pub const SCHEMA: u8 = 16;
-    /// Calls this request type (`Link::calls`). When the peer is a bridge, this exists purely to
+    pub const SCHEMA_FINGERPRINT: u8 = 16;
+    /// Calls this request type (`Link::rpc_client`). When the peer is a bridge, this exists purely to
     /// tell it the type's name.
     pub const CALLS: u8 = 32;
 }
@@ -222,9 +222,9 @@ pub struct HelloEntry<'a> {
     pub hash: u32,
     /// The OR of [`flags`].
     pub flags: u8,
-    /// `Topic::SCHEMA`.
+    /// `MessageType::SCHEMA_FINGERPRINT`.
     pub schema: u64,
-    /// `Topic::TYPE`. It rides here and nowhere else, to recover the hash and to detect collisions.
+    /// `MessageType::TYPE_NAME`. It rides here and nowhere else, to recover the hash and to detect collisions.
     pub name: &'a str,
 }
 
@@ -248,7 +248,7 @@ pub fn hello_write<'a>(
     let mut count: u8 = 0;
     for e in entries {
         w.u32(e.hash)?;
-        w.u8(e.flags | flags::SCHEMA)?;
+        w.u8(e.flags | flags::SCHEMA_FINGERPRINT)?;
         w.u64(e.schema)?;
         w.str(e.name)?;
         count = count.checked_add(1).ok_or(WireError::TooLarge)?;
@@ -304,8 +304,8 @@ impl<'a> Iterator for HelloEntries<'a> {
         let name = self.r.str()?;
         Some(HelloEntry {
             hash,
-            // The SCHEMA bit is an encoding detail (whether `schema` is present). Do not surface it.
-            flags: flags & !flags::SCHEMA,
+            // The `SCHEMA_FINGERPRINT` bit is an encoding detail (whether `schema` is present). Do not surface it.
+            flags: flags & !flags::SCHEMA_FINGERPRINT,
             schema,
             name,
         })
@@ -326,7 +326,7 @@ pub fn hello_parse(payload: &[u8]) -> Result<Hello<'_>, WireError> {
     let entries = &payload[r.pos..];
     for _ in 0..count {
         r.u32().ok_or(WireError::Malformed)?;
-        if r.u8().ok_or(WireError::Malformed)? & flags::SCHEMA == 0 {
+        if r.u8().ok_or(WireError::Malformed)? & flags::SCHEMA_FINGERPRINT == 0 {
             return Err(WireError::Malformed);
         }
         r.u64().ok_or(WireError::Malformed)?;
@@ -634,7 +634,7 @@ mod tests {
         }
     }
 
-    /// The SCHEMA bit is purely an encoding device: it says whether the `schema` field is
+    /// The `SCHEMA_FINGERPRINT` bit is purely an encoding device: it says whether the `schema` field is
     /// meaningful and must never leak into the flags the caller sees.
     #[test]
     fn schema_bit_does_not_leak_into_flags() {
@@ -654,7 +654,11 @@ mod tests {
         )
         .unwrap();
         let e = hello_parse(&buf[..n]).unwrap().entries().next().unwrap();
-        assert_eq!(e.flags, flags::PUB, "SCHEMA bit leaked into the flags");
+        assert_eq!(
+            e.flags,
+            flags::PUB,
+            "SCHEMA_FINGERPRINT bit leaked into the flags"
+        );
         // Zero is a real fingerprint, not "absent" — the bit is what distinguishes them.
         assert_eq!(e.schema, 0);
     }
@@ -676,7 +680,7 @@ mod tests {
             .into_iter(),
         )
         .unwrap();
-        buf[8] &= !flags::SCHEMA;
+        buf[8] &= !flags::SCHEMA_FINGERPRINT;
         assert!(hello_parse(&buf[..n]).is_err());
     }
 

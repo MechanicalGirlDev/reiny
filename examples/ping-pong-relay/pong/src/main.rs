@@ -5,7 +5,7 @@ use reiny::prelude::*;
 use crate::dependencies::relay::Relayed;
 
 #[reiny::main]
-async fn main(cloudy: Cloudy) -> reiny::Result<()> {
+async fn main(cloudy: ModuleContext) -> reiny::Result<()> {
     let mut incoming = cloudy.input::<Relayed>("relayed")?;
     cloudy.ready()?;
 

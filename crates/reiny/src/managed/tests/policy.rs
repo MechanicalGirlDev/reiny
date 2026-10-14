@@ -84,10 +84,10 @@ async fn typed_and_dynamic_publishers_share_qos_retention_and_presence_order() {
                 binding
                     .outputs
                     .insert("outgoing".into(), OutputBinding { contract: output });
-                let sender = Cloudy::open(options(bus.clone(), binding))
+                let sender = ModuleContext::open(options(bus.clone(), binding))
                     .await
                     .expect("sender");
-                let key = Key::topic(DOMAIN, Some(SENDER), Probe::TYPE);
+                let key = Key::topic(DOMAIN, Some(SENDER), Probe::TYPE_NAME);
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                 let _subscription = bus
                     .subscribe(
@@ -105,7 +105,7 @@ async fn typed_and_dynamic_publishers_share_qos_retention_and_presence_order() {
                 let raw = if dynamic {
                     Some(
                         sender
-                            .raw_output("outgoing", "test.Probe", Probe::SCHEMA)
+                            .raw_output("outgoing", "test.Probe", Probe::SCHEMA_FINGERPRINT)
                             .expect("dynamic"),
                     )
                 } else {
@@ -128,7 +128,7 @@ async fn typed_and_dynamic_publishers_share_qos_retention_and_presence_order() {
                     assert_eq!(sample.payload, Probe { value }.encode_to_vec());
                     assert_eq!(
                         sample.attachment,
-                        Some(Probe::SCHEMA.to_le_bytes().to_vec())
+                        Some(Probe::SCHEMA_FINGERPRINT.to_le_bytes().to_vec())
                     );
                 }
                 {
@@ -183,7 +183,7 @@ async fn assert_retained_reply(bus: &Observed, key: &Key, retention: Retention) 
         assert_eq!(sample.payload, Probe { value: 8 }.encode_to_vec());
         assert_eq!(
             sample.attachment,
-            Some(Probe::SCHEMA.to_le_bytes().to_vec())
+            Some(Probe::SCHEMA_FINGERPRINT.to_le_bytes().to_vec())
         );
         assert!(
             timeout(PATIENCE, replies.next())
@@ -205,13 +205,13 @@ async fn fan_in_declares_exact_subscriptions_and_one_shared_latest_buffer() {
     incoming.sources = sources.map(str::to_string).to_vec();
     incoming.contract.buffer = ReceiveBuffer::Latest(2);
     binding.inputs.insert("incoming".into(), incoming);
-    let receiver = Cloudy::open(options(bus.clone(), binding))
+    let receiver = ModuleContext::open(options(bus.clone(), binding))
         .await
         .expect("receiver");
     let mut subscriber = receiver.input::<Probe>("incoming").expect("fan in");
     assert_eq!(
         bus.declarations.lock().expect("declarations").subscriptions,
-        sources.map(|source| Key::topic(DOMAIN, Some(source), Probe::TYPE)),
+        sources.map(|source| Key::topic(DOMAIN, Some(source), Probe::TYPE_NAME)),
     );
     let first = producer(bus.clone(), sources[0]).await;
     let second = producer(bus.clone(), sources[1]).await;
@@ -263,7 +263,7 @@ async fn manifest_controls_publisher_qos_retention_and_each_source_replay() {
         binding
             .outputs
             .insert("outgoing".into(), OutputBinding { contract: output });
-        let publisher = Cloudy::open(options(bus.clone(), binding))
+        let publisher = ModuleContext::open(options(bus.clone(), binding))
             .await
             .expect("publisher");
         publishers.push(publisher.output::<Probe>("outgoing").expect("output"));
@@ -298,7 +298,7 @@ async fn manifest_controls_publisher_qos_retention_and_each_source_replay() {
     incoming.sources = sources.map(str::to_string).to_vec();
     incoming.contract.replay = Replay::Last;
     binding.inputs.insert("incoming".into(), incoming);
-    let receiver = Cloudy::open(options(bus.clone(), binding))
+    let receiver = ModuleContext::open(options(bus.clone(), binding))
         .await
         .expect("receiver");
     let mut subscriber = receiver.input::<Probe>("incoming").expect("replay");
@@ -324,7 +324,7 @@ async fn raw_access_is_rejected_before_any_transport_declaration() {
     assert!(cloudy.subscribe::<Probe>().is_err());
     assert!(cloudy.publisher::<Probe>().latched().build().is_err());
     assert!(cloudy.subscriber::<Probe>().from(SENDER).build().is_err());
-    assert!(cloudy.raw_subscriber(Probe::TYPE).build().is_err());
+    assert!(cloudy.raw_subscriber(Probe::TYPE_NAME).build().is_err());
     assert!(cloudy.serve::<super::rpc::RequestProbe>().is_err());
     assert!(
         cloudy
@@ -362,13 +362,13 @@ async fn managed_engine_cannot_be_reopened_standalone_or_used_by_old_builders() 
     standalone.domain = DOMAIN.into();
     standalone.module_report_path = None;
     standalone.engine = Some(bus.clone());
-    assert!(Cloudy::open(standalone).await.is_err());
+    assert!(ModuleContext::open(standalone).await.is_err());
     let managed = consumer(bus.clone()).await;
     let mut reopening = RuntimeOptions::new("escape");
     reopening.domain = DOMAIN.into();
     reopening.engine = Some(bus.clone());
     reopening.module_report_path = None;
-    assert!(Cloudy::open(reopening).await.is_err());
+    assert!(ModuleContext::open(reopening).await.is_err());
     assert_eq!(
         bus.alive(&Key::launch(DOMAIN, Some("escape")), PATIENCE)
             .await
@@ -380,5 +380,5 @@ async fn managed_engine_cannot_be_reopened_standalone_or_used_by_old_builders() 
     let mut reopening = RuntimeOptions::new("escape");
     reopening.module_report_path = None;
     reopening.engine = Some(bus.clone());
-    assert!(Cloudy::open(reopening).await.is_err());
+    assert!(ModuleContext::open(reopening).await.is_err());
 }

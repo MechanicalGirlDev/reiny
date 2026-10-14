@@ -1,4 +1,4 @@
-version: 2
+version: 3
 deployment: owned-child-example
 providers:
   process: {type: process, bin_dir: target/debug}

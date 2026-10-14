@@ -3,7 +3,7 @@
 
 use super::*;
 use prost::Message as _;
-use reiny::Topic;
+use reiny::MessageType;
 use std::io::Write;
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -11,10 +11,10 @@ struct Ping {
     #[prost(bytes = "vec", tag = "1")]
     data: Vec<u8>,
 }
-impl Topic for Ping {
-    const TYPE: &'static str = "Ping";
+impl MessageType for Ping {
+    const TYPE_NAME: &'static str = "Ping";
     const DESCRIPTOR: Option<reiny::Descriptor> = None;
-    const SCHEMA: u64 = u64::MAX;
+    const SCHEMA_FINGERPRINT: u64 = u64::MAX;
 }
 
 fn prepared(id: &str, source: &str) -> tempfile::NamedTempFile {
@@ -36,14 +36,17 @@ fn connect(bus: &LocalBus, id: &str, source: &str, domain: &str) -> Arc<Session>
     bus.connect(id.into(), domain.into(), path(&bindings))
         .unwrap()
 }
-fn native(session: &Session, bus: &LocalBus) -> Cloudy {
+fn native(session: &Session, bus: &LocalBus) -> ModuleContext {
     let bindings = prepared("rust", "foreign");
     let mut options = RuntimeOptions::new("rust");
     options.domain = "test".into();
     options.engine = Some(bus.engine.clone());
     options.module_bindings_path = Some(bindings.path().to_owned());
     options.install_tracing = false;
-    session.runtime.block_on(Cloudy::open(options)).unwrap()
+    session
+        .runtime
+        .block_on(ModuleContext::open(options))
+        .unwrap()
 }
 
 #[test]
@@ -53,7 +56,7 @@ fn ffi_receives_typed_rust_protobuf_with_provenance() {
     let native = native(&foreign, &bus);
     let publisher = native.output::<Ping>("outgoing").unwrap();
     let subscriber = foreign
-        .subscriber("incoming", "Ping", Ping::SCHEMA)
+        .subscriber("incoming", "Ping", Ping::SCHEMA_FINGERPRINT)
         .unwrap();
     let ping = Ping {
         data: vec![0, 1, 255, 0],
@@ -74,7 +77,9 @@ fn rust_receives_ffi_encoded_protobuf() {
     let foreign = connect(&bus, "foreign", "rust", "test");
     let native = native(&foreign, &bus);
     let mut subscriber = native.input::<Ping>("incoming").unwrap();
-    let publisher = foreign.publisher("outgoing", "Ping", Ping::SCHEMA).unwrap();
+    let publisher = foreign
+        .publisher("outgoing", "Ping", Ping::SCHEMA_FINGERPRINT)
+        .unwrap();
     let ping = Ping {
         data: vec![0, 128, 255],
     };
@@ -184,14 +189,14 @@ fn children_keep_session_and_bus_alive() {
 }
 
 #[test]
-fn dynamic_outputs_refuse_duplicate_short_transport_types() {
+fn dynamic_outputs_refuse_duplicate_exact_transport_types() {
     let bus = LocalBus::new();
     let mut bindings = tempfile::NamedTempFile::with_suffix(".json").unwrap();
     bindings
         .write_all(
             br#"{"version":2,"namespace":"sender","endpoint_namespace":"sender",
         "inputs":{},"outputs":{"first":{"contract":{"type":"a.Ping"}},
-        "second":{"contract":{"type":"b.Ping"}}}}"#,
+        "second":{"contract":{"type":"a.Ping"}}}}"#,
         )
         .unwrap();
     // Reject ambiguous wire addresses before opening the session or any publisher.
@@ -199,6 +204,34 @@ fn dynamic_outputs_refuse_duplicate_short_transport_types() {
         bus.connect("sender".into(), "test".into(), path(&bindings))
             .is_err()
     );
+}
+
+#[test]
+fn distinct_packages_use_distinct_dynamic_wire_addresses() {
+    // Given two same-named protobuf messages in different packages.
+    let bus = LocalBus::new();
+    let mut bindings = tempfile::NamedTempFile::with_suffix(".json").unwrap();
+    bindings.write_all(br#"{"version":2,"namespace":"sender","endpoint_namespace":"sender",
+        "inputs":{"first":{"contract":{"type":"a.Ping"},"sources":["sender"]},
+        "second":{"contract":{"type":"b.Ping"},"sources":["sender"]}},
+        "outputs":{"first":{"contract":{"type":"a.Ping"}},"second":{"contract":{"type":"b.Ping"}}}}"#).unwrap();
+    let session = bus
+        .connect("sender".into(), "test".into(), path(&bindings))
+        .unwrap();
+    let first = session.publisher("first", "a.Ping", 42).unwrap();
+    let second = session.publisher("second", "b.Ping", 42).unwrap();
+    let first_input = session.subscriber("first", "a.Ping", 42).unwrap();
+    let second_input = session.subscriber("second", "b.Ping", 42).unwrap();
+    // When both packages publish under the same source and fingerprint.
+    first.send(vec![1]).unwrap();
+    second.send(vec![2]).unwrap();
+    // Then each exact type address receives only its own payload.
+    assert_eq!(first_input.receive(1000).unwrap().unwrap().payload, vec![1]);
+    assert_eq!(
+        second_input.receive(1000).unwrap().unwrap().payload,
+        vec![2]
+    );
+    session.ready().unwrap();
 }
 
 #[test]
@@ -222,7 +255,7 @@ fn dynamic_endpoints_apply_retention_replay_and_latest_buffer() {
     session
         .runtime
         .block_on(bus.engine.alive(
-            &reiny::engine::Key::topic("test", Some("sender"), "Ping"),
+            &reiny::engine::Key::topic("test", Some("sender"), "test.Ping"),
             Duration::from_secs(1),
         ))
         .unwrap();
@@ -305,10 +338,12 @@ fn network_sessions_exchange_protobuf_using_configuration_files() {
         .wait()
         .unwrap();
     let subscriber = receiver
-        .subscriber("incoming", "Ping", Ping::SCHEMA)
+        .subscriber("incoming", "Ping", Ping::SCHEMA_FINGERPRINT)
         .unwrap();
     rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    let publisher = sender.publisher("outgoing", "Ping", Ping::SCHEMA).unwrap();
+    let publisher = sender
+        .publisher("outgoing", "Ping", Ping::SCHEMA_FINGERPRINT)
+        .unwrap();
     let ping = Ping {
         data: vec![0, 128, 255],
     };
@@ -316,5 +351,5 @@ fn network_sessions_exchange_protobuf_using_configuration_files() {
     let message = subscriber.receive(5000).unwrap().unwrap();
     assert_eq!(Ping::decode(message.payload.as_slice()).unwrap(), ping);
     assert_eq!(message.source, "network-sender");
-    assert_eq!(message.schema, Some(Ping::SCHEMA));
+    assert_eq!(message.schema, Some(Ping::SCHEMA_FINGERPRINT));
 }

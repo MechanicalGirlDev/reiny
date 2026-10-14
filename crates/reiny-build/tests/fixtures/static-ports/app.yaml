@@ -1,9 +1,9 @@
-version: 2
+version: 3
 in:
   receive: { type: fixture.State }
 out:
   transmit: { type: fixture.State }
-uses:
+rpc_clients:
   calculate: { type: fixture.Request, response: fixture.Response }
-provides:
+rpc_servers:
   answer: { type: fixture.Request, response: fixture.Response }

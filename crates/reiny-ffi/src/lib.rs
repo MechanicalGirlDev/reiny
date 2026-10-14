@@ -1,7 +1,7 @@
 //! Foreign-language handles for prepared, named module endpoints.
 //! Synchronous methods run on ordinary threads; endpoint handles retain the session.
 
-use reiny::{Cloudy, DeclaredPublisher, RawEnvelope, RawSubscriber, RuntimeOptions};
+use reiny::{DeclaredPublisher, ModuleContext, RawEnvelope, RawSubscriber, RuntimeOptions};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -106,7 +106,7 @@ impl LocalBus {
 /// Managed module session with its own synchronous runtime.
 #[derive(uniffi::Object)]
 pub struct Session {
-    cloudy: Cloudy,
+    cloudy: ModuleContext,
     runtime: Runtime,
 }
 
@@ -118,7 +118,9 @@ impl Session {
             .enable_all()
             .build()
             .map_err(failure)?;
-        let cloudy = runtime.block_on(Cloudy::open(options)).map_err(failure)?;
+        let cloudy = runtime
+            .block_on(ModuleContext::open(options))
+            .map_err(failure)?;
         Ok(Arc::new(Self { cloudy, runtime }))
     }
 

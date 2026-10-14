@@ -3,10 +3,10 @@
 mod bagcmd;
 mod bridgecmd;
 mod buildcmd;
+mod bundle;
 mod bus;
 mod checkcmd;
 mod codec;
-mod compress;
 mod flowart;
 mod modulecmd;
 mod scaffold;
@@ -111,7 +111,7 @@ enum Command {
         json: bool,
     },
     /// Build and bundle a self-contained module deployment.
-    Compress {
+    Bundle {
         #[arg(default_value = ".")]
         config: PathBuf,
         #[arg(long, default_value = "dist")]
@@ -178,12 +178,12 @@ fn main() -> Result<()> {
             init_tracing("info");
             modulecmd::supervise(&prepared)
         }
-        Command::Compress {
+        Command::Bundle {
             config,
             out,
             launcher,
             include_system,
-        } => compress::compress(&config, &out, launcher.as_deref(), include_system),
+        } => bundle::bundle(&config, &out, launcher.as_deref(), include_system),
         Command::Bag(args) => {
             init_tracing("info");
             bagcmd::run(args)
@@ -220,7 +220,7 @@ fn positional_module(argv: &[String]) -> Option<PathBuf> {
         "status",
         "stop",
         "update",
-        "compress",
+        "bundle",
         "bag",
         "topic",
         "node",

@@ -1,4 +1,4 @@
-version: 2
+version: 3
 in: {}
 out:
   adder: { kind: rpc, type: calc.Add, response: calc.Sum }

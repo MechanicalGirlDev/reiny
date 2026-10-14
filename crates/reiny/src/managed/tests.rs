@@ -15,10 +15,11 @@ use prost::Message;
 use tokio::time::timeout;
 
 use crate::bindings::{
-    CONTRACT_VERSION, EndpointContract, InputBinding, ModuleBindings, ModuleReport, OutputBinding,
+    EndpointContract, InputBinding, MODULE_BINDINGS_VERSION, ModuleBindings, ModuleReport,
+    OutputBinding,
 };
 use crate::engine::{Engine, Key, Local, Presence, QueryParams};
-use crate::{Cloudy, Descriptor, Qos, RuntimeOptions, Topic};
+use crate::{Descriptor, MessageType, ModuleContext, Qos, RuntimeOptions};
 
 mod bridge;
 mod delegation;
@@ -40,9 +41,9 @@ struct Probe {
     value: u32,
 }
 
-impl Topic for Probe {
-    const TYPE: &'static str = "Probe";
-    const SCHEMA: u64 = 0x1234;
+impl MessageType for Probe {
+    const TYPE_NAME: &'static str = "test.Probe";
+    const SCHEMA_FINGERPRINT: u64 = 0x1234;
     const DESCRIPTOR: Option<Descriptor> = Some(Descriptor {
         message: "test.Probe",
         file_set: b"managed-test-descriptor",
@@ -55,9 +56,9 @@ struct OtherProbe {
     value: u32,
 }
 
-impl Topic for OtherProbe {
-    const TYPE: &'static str = "OtherProbe";
-    const SCHEMA: u64 = 0x5678;
+impl MessageType for OtherProbe {
+    const TYPE_NAME: &'static str = "test.OtherProbe";
+    const SCHEMA_FINGERPRINT: u64 = 0x5678;
     const DESCRIPTOR: Option<Descriptor> = Some(Descriptor {
         message: "test.OtherProbe",
         file_set: b"managed-test-descriptor",
@@ -66,7 +67,7 @@ impl Topic for OtherProbe {
 
 fn bindings(namespace: &str) -> ModuleBindings {
     ModuleBindings {
-        version: CONTRACT_VERSION,
+        version: MODULE_BINDINGS_VERSION,
         namespace: namespace.to_string(),
         endpoint_namespace: namespace.to_string(),
         inputs: BTreeMap::new(),
@@ -99,17 +100,17 @@ fn options(bus: Arc<dyn Engine>, bindings: ModuleBindings) -> RuntimeOptions {
     options
 }
 
-async fn consumer(bus: Arc<dyn Engine>) -> Cloudy {
+async fn consumer(bus: Arc<dyn Engine>) -> ModuleContext {
     let mut contract = bindings(RECEIVER);
     contract
         .inputs
         .insert("incoming".to_string(), input(SENDER));
-    Cloudy::open(options(bus, contract))
+    ModuleContext::open(options(bus, contract))
         .await
         .expect("consumer")
 }
 
-async fn producer(bus: Arc<dyn Engine>, namespace: &str) -> Cloudy {
+async fn producer(bus: Arc<dyn Engine>, namespace: &str) -> ModuleContext {
     let mut contract = bindings(namespace);
     contract.outputs.insert(
         "outgoing".to_string(),
@@ -117,7 +118,7 @@ async fn producer(bus: Arc<dyn Engine>, namespace: &str) -> Cloudy {
             contract: self::contract("test.Probe"),
         },
     );
-    Cloudy::open(options(bus, contract))
+    ModuleContext::open(options(bus, contract))
         .await
         .expect("producer")
 }

@@ -1,7 +1,7 @@
 use super::*;
-use crate::bindings::{CONTRACT_VERSION, InputBinding, OutputBinding, Replay, Retention};
+use crate::bindings::{InputBinding, MODULE_BINDINGS_VERSION, OutputBinding, Replay, Retention};
 use crate::engine::Local;
-use crate::{Descriptor, RuntimeOptions, Service, Topic};
+use crate::{Descriptor, MessageType, RuntimeOptions, Service};
 use tokio::time::timeout;
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -30,9 +30,9 @@ struct Sum {
 
 macro_rules! topic {
     ($ty:ty, $name:literal, $schema:literal) => {
-        impl Topic for $ty {
-            const TYPE: &'static str = $name;
-            const SCHEMA: u64 = $schema;
+        impl MessageType for $ty {
+            const TYPE_NAME: &'static str = concat!("bridge.", $name);
+            const SCHEMA_FINGERPRINT: u64 = $schema;
             const DESCRIPTOR: Option<Descriptor> = Some(Descriptor {
                 message: concat!("bridge.", $name),
                 file_set: b"bridge-test-descriptor",
@@ -53,7 +53,7 @@ const DOMAIN: &str = "bridge";
 
 fn bindings(id: &str) -> ModuleBindings {
     ModuleBindings {
-        version: CONTRACT_VERSION,
+        version: MODULE_BINDINGS_VERSION,
         namespace: id.into(),
         endpoint_namespace: id.into(),
         inputs: BTreeMap::new(),
@@ -92,25 +92,28 @@ fn output(b: &mut ModuleBindings, name: &str, contract: EndpointContract) {
     b.outputs.insert(name.into(), OutputBinding { contract });
 }
 
-async fn open(bus: Arc<Local>, bindings: ModuleBindings) -> Cloudy {
+async fn open(bus: Arc<Local>, bindings: ModuleBindings) -> ModuleContext {
     let mut opts = RuntimeOptions::new(&bindings.namespace);
     opts.domain = DOMAIN.into();
     opts.engine = Some(bus);
     opts.module_report_path = None;
     opts.module_bindings = Some(bindings);
-    Cloudy::open(opts).await.expect("bound context")
+    ModuleContext::open(opts).await.expect("bound context")
 }
 
 fn schemas() -> BTreeMap<String, u64> {
     BTreeMap::from([
-        ("bridge.Probe".into(), Probe::SCHEMA),
-        ("bridge.Command".into(), Command::SCHEMA),
-        ("bridge.Add".into(), Add::SCHEMA),
-        ("bridge.Sum".into(), Sum::SCHEMA),
+        ("bridge.Probe".into(), Probe::SCHEMA_FINGERPRINT),
+        ("bridge.Command".into(), Command::SCHEMA_FINGERPRINT),
+        ("bridge.Add".into(), Add::SCHEMA_FINGERPRINT),
+        ("bridge.Sum".into(), Sum::SCHEMA_FINGERPRINT),
     ])
 }
 
-async fn bridge_contexts(left: &Arc<Local>, right: &Arc<Local>) -> (Cloudy, Cloudy, Bridge) {
+async fn bridge_contexts(
+    left: &Arc<Local>,
+    right: &Arc<Local>,
+) -> (ModuleContext, ModuleContext, Bridge) {
     let mut a = bindings("bridge");
     input(&mut a, "state", "native", contract("Probe"));
     input(&mut a, "adder", "native", rpc());
@@ -145,7 +148,7 @@ async fn named_streams_and_rpc_follow_sources_policies_and_readiness() {
     input(&mut source, "command", "bridge", contract("Command"));
     let native = open(left.clone(), source).await;
     let state = native.output::<Probe>("state").expect("state");
-    let mut server = native.provides::<Add>("adder").expect("server");
+    let mut server = native.rpc_server::<Add>("adder").expect("server");
     let mut commands = native.input::<Command>("command").expect("commands");
     native.ready().expect("native ready");
     let mut destination = bindings("client");
@@ -154,7 +157,7 @@ async fn named_streams_and_rpc_follow_sources_policies_and_readiness() {
     output(&mut destination, "command", contract("Command"));
     let client = open(right.clone(), destination).await;
     let mut incoming = client.input::<Probe>("state").expect("state input");
-    let caller = client.uses::<Add>("adder").expect("caller");
+    let caller = client.rpc_client::<Add>("adder").expect("caller");
     let command = client.output::<Command>("command").expect("command output");
     client.ready().expect("client ready");
     let (bridge_a, bridge_b, bridge) = bridge_contexts(&left, &right).await;
@@ -165,14 +168,15 @@ async fn named_streams_and_rpc_follow_sources_policies_and_readiness() {
     });
     let intruder = left
         .publisher(
-            &Key::topic(DOMAIN, Some("undeclared"), Probe::TYPE),
+            &Key::topic(DOMAIN, Some("undeclared"), Probe::TYPE_NAME),
             &crate::Qos::DEFAULT,
         )
         .expect("raw transport fixture");
 
     // When declared streams and RPC cross the bridge after an unauthorized source sample.
+    let stamp = Probe::SCHEMA_FINGERPRINT.to_le_bytes().to_vec();
     intruder
-        .put(vec![8, 99], Some(Probe::SCHEMA.to_le_bytes().to_vec()))
+        .put(vec![8, 99], Some(stamp))
         .expect("foreign sample");
     state.send(Probe { value: 42 }).await.expect("state send");
     let received = timeout(PATIENCE, incoming.recv_envelope())
@@ -200,7 +204,7 @@ async fn named_streams_and_rpc_follow_sources_policies_and_readiness() {
         .send(Command { value: 7 })
         .await
         .expect("command send");
-    let received_command = timeout(PATIENCE, commands.recv_envelope())
+    let received_cmd = timeout(PATIENCE, commands.recv_envelope())
         .await
         .expect("command deadline")
         .expect("command");
@@ -220,17 +224,17 @@ async fn named_streams_and_rpc_follow_sources_policies_and_readiness() {
     );
     assert_eq!(replayed.value, 42);
     assert_eq!(
-        (
-            received_command.value.value,
-            received_command.source.as_str()
-        ),
+        (received_cmd.value.value, received_cmd.source.as_str()),
         (7, "bridge")
     );
     assert_eq!(response.value, 11);
     assert_eq!(
-        left.alive(&Key::topic(DOMAIN, Some("bridge"), Probe::TYPE), PATIENCE)
-            .await
-            .expect("left outputs"),
+        left.alive(
+            &Key::topic(DOMAIN, Some("bridge"), Probe::TYPE_NAME),
+            PATIENCE
+        )
+        .await
+        .expect("left outputs"),
         Vec::<Key>::new()
     );
     drop(bridge);
@@ -286,7 +290,7 @@ async fn rpc_bridge_rejects_invalid_request_and_response_fingerprints() {
     let right = Arc::new(Local::new());
     let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = count.clone();
-    let target = Key::topic(DOMAIN, Some("native"), Add::TYPE);
+    let target = Key::topic(DOMAIN, Some("native"), Add::TYPE_NAME);
     let reply_key = target.clone();
     let _server = left
         .respond(
@@ -312,7 +316,7 @@ async fn rpc_bridge_rejects_invalid_request_and_response_fingerprints() {
     let _bridge = forward(&a, &b, &schemas()).expect("RPC bridge");
     a.ready().expect("caller ready");
     b.ready().expect("service ready");
-    let endpoint = Key::topic(DOMAIN, Some("bridge"), Add::TYPE);
+    let endpoint = Key::topic(DOMAIN, Some("bridge"), Add::TYPE_NAME);
 
     // When malformed requests and then a valid request with a malformed reply cross the route.
     for stamp in [None, Some(vec![1]), Some(0xffff_u64.to_le_bytes().to_vec())] {
@@ -340,7 +344,7 @@ async fn rpc_bridge_rejects_invalid_request_and_response_fingerprints() {
             &endpoint,
             QueryParams {
                 payload: Some(vec![8, 10]),
-                attachment: Some(Add::SCHEMA.to_le_bytes().to_vec()),
+                attachment: Some(Add::SCHEMA_FINGERPRINT.to_le_bytes().to_vec()),
                 timeout: PATIENCE,
             },
         )

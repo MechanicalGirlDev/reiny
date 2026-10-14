@@ -17,13 +17,13 @@
 //!    `ping_interval_ms` (so whether the peer starts later or the cable is unplugged and back, the
 //!    link comes up the moment either Hello lands).
 //!
-//! The schema fingerprint (`Topic::SCHEMA`) is checked exactly once, at Hello, and Data of a
+//! The schema fingerprint (`MessageType::SCHEMA_FINGERPRINT`) is checked exactly once, at Hello, and Data of a
 //! mismatching type is dropped. Every declared type must carry a fingerprint.
 
 use core::fmt;
 
 use prost::Message;
-use reiny_core::{PortDirection, PortType, Service, StaticPort, Topic};
+use reiny_core::{MessageType, PortDirection, PortType, Service, StaticPort};
 
 use crate::wire::{self, DELIMITER, HEADER, HelloEntry, Kind, OVERHEAD, flags};
 
@@ -89,9 +89,9 @@ pub struct RemoteType {
     pub hash: u32,
     /// The OR of [`wire::flags`].
     pub flags: u8,
-    /// The peer's `Topic::SCHEMA`.
+    /// The peer's `MessageType::SCHEMA_FINGERPRINT`.
     pub schema: u64,
-    /// This and our own `SCHEMA` differ. Data of this type is dropped.
+    /// This and our own `SCHEMA_FINGERPRINT` differ. Data of this type is dropped.
     pub mismatch: bool,
 }
 
@@ -155,7 +155,7 @@ pub enum Error {
     IdTooLong,
     /// More than `N` types were declared.
     TableFull,
-    /// Two type names hashed to the same value. Change one of their `TYPE`s.
+    /// Two type names hashed to the same value. Change one of their `TYPE_NAME`s.
     HashCollision {
         /// The type name that was registered first.
         existing: &'static str,
@@ -279,7 +279,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         for (index, port) in ports.iter().enumerate() {
             let service = matches!(
                 port.direction,
-                PortDirection::Service | PortDirection::Client
+                PortDirection::RpcServer | PortDirection::RpcClient
             );
             if port.name.is_empty()
                 || port.ty.is_empty()
@@ -362,22 +362,22 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     ///
     /// ```compile_fail,E0061
     /// struct State;
-    /// impl reiny_link::Topic for State {
-    ///     const TYPE: &'static str = "State";
-    ///     const SCHEMA: u64 = 1;
+    /// impl reiny_link::MessageType for State {
+    ///     const TYPE_NAME: &'static str = "State";
+    ///     const SCHEMA_FINGERPRINT: u64 = 1;
     ///     const DESCRIPTOR: Option<reiny_link::Descriptor> = None;
     /// }
     /// let mut link = reiny_link::Link::<_, 8>::new("board", &[], [0u8; 512], [0u8; 512])
     ///     .unwrap();
     /// link.publishes::<State>();
     /// ```
-    pub fn publishes<T: Topic>(&mut self, name: &str) -> Result<(), Error> {
+    pub fn publishes<T: MessageType>(&mut self, name: &str) -> Result<(), Error> {
         self.declare::<T>(name, PortDirection::Output, flags::PUB, None)
     }
 
     /// Publish the type `T` latched — a promise to re-send the most recent value on every
     /// `Connected`. The re-sending itself is the caller's job (`Link` holds no values).
-    pub fn publishes_latched<T: Topic>(&mut self, name: &str) -> Result<(), Error> {
+    pub fn publishes_latched<T: MessageType>(&mut self, name: &str) -> Result<(), Error> {
         self.declare::<T>(
             name,
             PortDirection::Output,
@@ -387,18 +387,18 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     }
 
     /// Subscribe to the type `T`.
-    pub fn subscribes<T: Topic>(&mut self, name: &str) -> Result<(), Error> {
+    pub fn subscribes<T: MessageType>(&mut self, name: &str) -> Result<(), Error> {
         self.declare::<T>(name, PortDirection::Input, flags::SUB, None)
     }
 
     /// Serve the request type `S`.
-    pub fn serves<S: Service>(&mut self, name: &str) -> Result<(), Error> {
-        self.declare_rpc::<S>(name, PortDirection::Service, flags::SERVE)
+    pub fn rpc_server<S: Service>(&mut self, name: &str) -> Result<(), Error> {
+        self.declare_rpc::<S>(name, PortDirection::RpcServer, flags::SERVE)
     }
 
     /// Declare the named client port for request type `S`.
-    pub fn calls<S: Service>(&mut self, name: &str) -> Result<(), Error> {
-        self.declare_rpc::<S>(name, PortDirection::Client, flags::CALLS)
+    pub fn rpc_client<S: Service>(&mut self, name: &str) -> Result<(), Error> {
+        self.declare_rpc::<S>(name, PortDirection::RpcClient, flags::CALLS)
     }
 
     fn declare_rpc<S: Service>(
@@ -415,8 +415,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
                 direction,
                 flag,
                 Some(PortType {
-                    ty: S::Response::TYPE,
-                    schema: S::Response::SCHEMA,
+                    ty: S::Response::TYPE_NAME,
+                    schema: S::Response::SCHEMA_FINGERPRINT,
                 }),
             )
             .and_then(|()| {
@@ -430,7 +430,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         result
     }
 
-    fn port<T: Topic>(
+    fn port<T: MessageType>(
         &self,
         name: &str,
         direction: PortDirection,
@@ -447,10 +447,10 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
                     Error::UnknownPort
                 }
             })?;
-        if port.ty != T::TYPE || port.response.map(|ty| ty.ty) != response.map(|ty| ty.ty) {
+        if port.ty != T::TYPE_NAME || port.response.map(|ty| ty.ty) != response.map(|ty| ty.ty) {
             return Err(Error::WrongType);
         }
-        if port.schema != T::SCHEMA
+        if port.schema != T::SCHEMA_FINGERPRINT
             || port.response.map(|ty| ty.schema) != response.map(|ty| ty.schema)
         {
             return Err(Error::SchemaMismatch);
@@ -458,7 +458,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         Ok(port)
     }
 
-    pub(crate) fn check_port<T: Topic>(
+    pub(crate) fn check_port<T: MessageType>(
         &self,
         name: &str,
         direction: PortDirection,
@@ -476,7 +476,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         Ok(())
     }
 
-    fn declare<T: Topic>(
+    fn declare<T: MessageType>(
         &mut self,
         name: &str,
         direction: PortDirection,
@@ -507,17 +507,17 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
         Ok(())
     }
 
-    fn declare_type<T: Topic>(&mut self, flag: u8) -> Result<(), Error> {
-        let hash = wire::type_hash(T::TYPE);
+    fn declare_type<T: MessageType>(&mut self, flag: u8) -> Result<(), Error> {
+        let hash = wire::type_hash(T::TYPE_NAME);
         for slot in self.local.iter_mut().flatten() {
             if slot.hash == hash {
-                if slot.name != T::TYPE {
+                if slot.name != T::TYPE_NAME {
                     return Err(Error::HashCollision {
                         existing: slot.name,
-                        new: T::TYPE,
+                        new: T::TYPE_NAME,
                     });
                 }
-                if slot.schema != T::SCHEMA {
+                if slot.schema != T::SCHEMA_FINGERPRINT {
                     return Err(Error::SchemaMismatch);
                 }
                 slot.flags |= flag;
@@ -531,8 +531,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
             .ok_or(Error::TableFull)?;
         *free = Some(LocalType {
             hash,
-            name: T::TYPE,
-            schema: T::SCHEMA,
+            name: T::TYPE_NAME,
+            schema: T::SCHEMA_FINGERPRINT,
             flags: flag,
         });
         Ok(())
@@ -837,11 +837,14 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
 
     /// Send the type `T`. If the peer does not subscribe to `T` nothing reaches the wire and this
     /// returns `Ok(false)`.
-    pub fn send<T: Topic + Message>(&mut self, name: &str, msg: &T) -> Result<bool, Error> {
+    pub fn send<T: MessageType + Message>(&mut self, name: &str, msg: &T) -> Result<bool, Error> {
         self.check_port::<T>(name, PortDirection::Output, None)?;
-        let hash = wire::type_hash(T::TYPE);
+        let hash = wire::type_hash(T::TYPE_NAME);
         self.check_publishes(hash)?;
-        if self.local_type(hash).is_some_and(|t| t.schema != T::SCHEMA) {
+        if self
+            .local_type(hash)
+            .is_some_and(|t| t.schema != T::SCHEMA_FINGERPRINT)
+        {
             return Err(Error::SchemaMismatch);
         }
         if !self.peer_subscribes_hash(hash) {
@@ -869,19 +872,19 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     pub fn request<S: Service>(&mut self, name: &str, req: &S) -> Result<u8, Error> {
         self.check_port::<S>(
             name,
-            PortDirection::Client,
+            PortDirection::RpcClient,
             Some(PortType {
-                ty: S::Response::TYPE,
-                schema: S::Response::SCHEMA,
+                ty: S::Response::TYPE_NAME,
+                schema: S::Response::SCHEMA_FINGERPRINT,
             }),
         )?;
-        let hash = wire::type_hash(S::TYPE);
+        let hash = wire::type_hash(S::TYPE_NAME);
         if !self.peer_serves_hash(hash) {
             return Err(Error::NoPeerService);
         }
         if self
             .remote_type(hash)
-            .is_some_and(|t| t.schema != S::SCHEMA)
+            .is_some_and(|t| t.schema != S::SCHEMA_FINGERPRINT)
         {
             return Err(Error::SchemaMismatch);
         }
@@ -915,14 +918,19 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     ) -> Result<(), Error> {
         self.check_port::<S>(
             name,
-            PortDirection::Service,
+            PortDirection::RpcServer,
             Some(PortType {
-                ty: S::Response::TYPE,
-                schema: S::Response::SCHEMA,
+                ty: S::Response::TYPE_NAME,
+                schema: S::Response::SCHEMA_FINGERPRINT,
             }),
         )?;
         let len = self.encode_payload(resp)?;
-        self.emit_reply(wire::type_hash(S::TYPE), seq, S::Response::SCHEMA, len)
+        self.emit_reply(
+            wire::type_hash(S::TYPE_NAME),
+            seq,
+            S::Response::SCHEMA_FINGERPRINT,
+            len,
+        )
     }
 
     /// The pre-encoded form of [`Link::reply`]. `hash` is the *request* type's.
@@ -947,13 +955,13 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     ) -> Result<(), Error> {
         self.check_port::<S>(
             name,
-            PortDirection::Service,
+            PortDirection::RpcServer,
             Some(PortType {
-                ty: S::Response::TYPE,
-                schema: S::Response::SCHEMA,
+                ty: S::Response::TYPE_NAME,
+                schema: S::Response::SCHEMA_FINGERPRINT,
             }),
         )?;
-        self.emit_error(wire::type_hash(S::TYPE), seq, message)
+        self.emit_error(wire::type_hash(S::TYPE_NAME), seq, message)
     }
 
     /// The type-hash form of [`Link::reply_err`].
@@ -1129,11 +1137,11 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     /// Decode a Data / Request frame as the type `T`. `None` if the type hash differs, if it does
     /// not decode, or if the handle is stale.
     #[must_use]
-    pub fn decode<T: Topic + Message + Default>(&self, frame: &Frame) -> Option<T> {
+    pub fn decode<T: MessageType + Message + Default>(&self, frame: &Frame) -> Option<T> {
         // Checked before the payload is read: an empty payload is a perfectly valid encoding of a
         // default message, so without this a stale handle would decode to a plausible `T::default()`
         // instead of failing.
-        if !self.is_fresh(frame) || frame.hash != wire::type_hash(T::TYPE) {
+        if !self.is_fresh(frame) || frame.hash != wire::type_hash(T::TYPE_NAME) {
             return None;
         }
         // Services own the request declaration; a bridge mirrors our negotiated types.
@@ -1145,7 +1153,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
             } else {
                 None
             };
-        if schema != Some(T::SCHEMA) {
+        if schema != Some(T::SCHEMA_FINGERPRINT) {
             return None;
         }
         T::decode(self.payload(frame)).ok()
@@ -1157,7 +1165,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
     pub fn decode_reply<S: Service>(&self, frame: &Frame) -> Option<S::Response> {
         if !self.is_fresh(frame)
             || frame.kind != Kind::Reply
-            || frame.hash != wire::type_hash(S::TYPE)
+            || frame.hash != wire::type_hash(S::TYPE_NAME)
         {
             return None;
         }
@@ -1168,12 +1176,12 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
                 .filter(|ty| ty.flags & flags::CALLS != 0)
                 .map(|ty| ty.schema)
         };
-        if request_schema != Some(S::SCHEMA) {
+        if request_schema != Some(S::SCHEMA_FINGERPRINT) {
             return None;
         }
         let payload = self.payload(frame);
         let schema = u64::from_le_bytes(payload.get(..8)?.try_into().ok()?);
-        if schema != S::Response::SCHEMA {
+        if schema != S::Response::SCHEMA_FINGERPRINT {
             return None;
         }
         S::Response::decode(payload.get(8..)?).ok()
@@ -1215,8 +1223,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
 
     /// Whether the peer subscribes to the type `T` (false when disconnected, true for a bridge).
     #[must_use]
-    pub fn peer_subscribes<T: Topic>(&self) -> bool {
-        self.peer_subscribes_hash(wire::type_hash(T::TYPE))
+    pub fn peer_subscribes<T: MessageType>(&self) -> bool {
+        self.peer_subscribes_hash(wire::type_hash(T::TYPE_NAME))
     }
 
     /// The type-hash form of [`Link::peer_subscribes`].
@@ -1231,8 +1239,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>, const N: usize, const FRAME: usize> Link<B, N
 
     /// Whether the peer serves the request type `T` (false when disconnected, true for a bridge).
     #[must_use]
-    pub fn peer_serves<T: Topic>(&self) -> bool {
-        self.peer_serves_hash(wire::type_hash(T::TYPE))
+    pub fn peer_serves<T: MessageType>(&self) -> bool {
+        self.peer_serves_hash(wire::type_hash(T::TYPE_NAME))
     }
 
     /// The type-hash form of [`Link::peer_serves`].
@@ -1262,9 +1270,9 @@ mod tests {
         #[prost(int32, tag = "1")]
         x: i32,
     }
-    impl Topic for Pos {
-        const TYPE: &'static str = "Pos";
-        const SCHEMA: u64 = 0xaa;
+    impl MessageType for Pos {
+        const TYPE_NAME: &'static str = "Pos";
+        const SCHEMA_FINGERPRINT: u64 = 0xaa;
         const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
 
@@ -1275,9 +1283,9 @@ mod tests {
         #[prost(int32, tag = "1")]
         x: i32,
     }
-    impl Topic for PosV2 {
-        const TYPE: &'static str = "Pos";
-        const SCHEMA: u64 = 0xbb;
+    impl MessageType for PosV2 {
+        const TYPE_NAME: &'static str = "Pos";
+        const SCHEMA_FINGERPRINT: u64 = 0xbb;
         const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
 
@@ -1286,9 +1294,9 @@ mod tests {
         #[prost(uint32, tag = "1")]
         v: u32,
     }
-    impl Topic for Cmd {
-        const TYPE: &'static str = "Cmd";
-        const SCHEMA: u64 = 0xcc;
+    impl MessageType for Cmd {
+        const TYPE_NAME: &'static str = "Cmd";
+        const SCHEMA_FINGERPRINT: u64 = 0xcc;
         const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
 
@@ -1299,9 +1307,9 @@ mod tests {
         #[prost(int32, tag = "2")]
         b: i32,
     }
-    impl Topic for Add {
-        const TYPE: &'static str = "Add";
-        const SCHEMA: u64 = 0xdd;
+    impl MessageType for Add {
+        const TYPE_NAME: &'static str = "Add";
+        const SCHEMA_FINGERPRINT: u64 = 0xdd;
         const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
     #[derive(Clone, PartialEq, prost::Message)]
@@ -1309,9 +1317,9 @@ mod tests {
         #[prost(int32, tag = "1")]
         s: i32,
     }
-    impl Topic for Sum {
-        const TYPE: &'static str = "Sum";
-        const SCHEMA: u64 = 0xee;
+    impl MessageType for Sum {
+        const TYPE_NAME: &'static str = "Sum";
+        const SCHEMA_FINGERPRINT: u64 = 0xee;
         const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
     impl Service for Add {
@@ -1325,16 +1333,16 @@ mod tests {
         #[prost(int32, tag = "2")]
         b: i32,
     }
-    impl Topic for AddV2 {
-        const TYPE: &'static str = Add::TYPE;
-        const SCHEMA: u64 = Add::SCHEMA + 1;
+    impl MessageType for AddV2 {
+        const TYPE_NAME: &'static str = Add::TYPE_NAME;
+        const SCHEMA_FINGERPRINT: u64 = Add::SCHEMA_FINGERPRINT + 1;
         const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
     impl Service for AddV2 {
         type Response = Sum;
     }
 
-    const fn fixture<T: Topic>(
+    const fn fixture<T: MessageType>(
         name: &'static str,
         direction: PortDirection,
         response: Option<PortType>,
@@ -1342,8 +1350,8 @@ mod tests {
         StaticPort {
             name,
             direction,
-            ty: T::TYPE,
-            schema: T::SCHEMA,
+            ty: T::TYPE_NAME,
+            schema: T::SCHEMA_FINGERPRINT,
             response,
         }
     }
@@ -1360,26 +1368,26 @@ mod tests {
         fixture::<Other>("other", PortDirection::Output, None),
         fixture::<Add>(
             "addition",
-            PortDirection::Service,
+            PortDirection::RpcServer,
             Some(PortType {
-                ty: Sum::TYPE,
-                schema: Sum::SCHEMA,
+                ty: Sum::TYPE_NAME,
+                schema: Sum::SCHEMA_FINGERPRINT,
             }),
         ),
         fixture::<Add>(
             "addition",
-            PortDirection::Client,
+            PortDirection::RpcClient,
             Some(PortType {
-                ty: Sum::TYPE,
-                schema: Sum::SCHEMA,
+                ty: Sum::TYPE_NAME,
+                schema: Sum::SCHEMA_FINGERPRINT,
             }),
         ),
         fixture::<AddV2>(
             "addition_v2",
-            PortDirection::Client,
+            PortDirection::RpcClient,
             Some(PortType {
-                ty: Sum::TYPE,
-                schema: Sum::SCHEMA,
+                ty: Sum::TYPE_NAME,
+                schema: Sum::SCHEMA_FINGERPRINT,
             }),
         ),
     ];
@@ -1435,7 +1443,7 @@ mod tests {
         a.publishes::<Cmd>("command").unwrap();
         b.publishes_latched::<Pos>("position").unwrap();
         b.subscribes::<Cmd>("command").unwrap();
-        b.serves::<Add>("addition").unwrap();
+        b.rpc_server::<Add>("addition").unwrap();
         connect(&mut a, &mut b);
 
         assert_eq!(a.peer_id(), Some("mcu"));
@@ -1455,14 +1463,14 @@ mod tests {
         assert_eq!(a.subscribes::<Cmd>("command"), Err(Error::Started));
     }
 
-    /// `calls` is the only reason a request type's *name* ever reaches a bridge, which is what lets
+    /// `rpc_client` is the only reason a request type's *name* ever reaches a bridge, which is what lets
     /// the bridge route the call onward. It must ride in the Hello with the CALLS flag and must not
     /// make us look like a server.
     #[test]
-    fn calls_announces_the_request_type_without_serving_it() {
+    fn rpc_client_announces_the_request_type_without_serving_it() {
         let mut a = link("a");
         let mut b = link("b");
-        a.calls::<Add>("addition").unwrap();
+        a.rpc_client::<Add>("addition").unwrap();
         connect(&mut a, &mut b);
 
         let add = b
@@ -1470,7 +1478,7 @@ mod tests {
             .find(|t| t.hash == wire::type_hash("Add"))
             .expect("Add was announced");
         assert_eq!(add.flags, flags::CALLS);
-        assert!(!b.peer_serves::<Add>(), "calls() is not serves()");
+        assert!(!b.peer_serves::<Add>(), "rpc_client() is not rpc_server()");
     }
 
     #[test]
@@ -1478,7 +1486,7 @@ mod tests {
         // Given a named client port whose response is not a stream port.
         let mut caller = link("caller");
         let mut peer = link("peer");
-        caller.calls::<Add>("addition").unwrap();
+        caller.rpc_client::<Add>("addition").unwrap();
 
         // When its Hello reaches the peer.
         connect(&mut caller, &mut peer);
@@ -1486,9 +1494,9 @@ mod tests {
         // Then tools can learn the response stamp without granting publication or subscription.
         let response = peer
             .peer_types()
-            .find(|ty| ty.hash == wire::type_hash(Sum::TYPE))
+            .find(|ty| ty.hash == wire::type_hash(Sum::TYPE_NAME))
             .expect("response metadata");
-        assert_eq!(response.schema, Sum::SCHEMA);
+        assert_eq!(response.schema, Sum::SCHEMA_FINGERPRINT);
         assert_eq!(response.flags, 0);
         assert!(!peer.peer_subscribes::<Sum>());
         assert_eq!(
@@ -1503,14 +1511,14 @@ mod tests {
         let mut tiny = Link::<_, 1>::new("tiny", PORTS, [0u8; 1024], [0u8; 1024]).unwrap();
 
         // When the named RPC declaration exceeds that capacity.
-        assert_eq!(tiny.calls::<Add>("addition"), Err(Error::TableFull));
+        assert_eq!(tiny.rpc_client::<Add>("addition"), Err(Error::TableFull));
 
         // Then neither the request grant nor a consumed type slot survives the failure.
         assert_eq!(
             tiny.request("addition", &Add::default()),
             Err(Error::NotDeclared)
         );
-        assert!(tiny.local_type(wire::type_hash(Add::TYPE)).is_none());
+        assert!(tiny.local_type(wire::type_hash(Add::TYPE_NAME)).is_none());
         tiny.publishes::<Pos>("position")
             .expect("capacity was restored");
     }
@@ -1572,9 +1580,9 @@ mod tests {
     fn request_reply_roundtrip_and_error() {
         let mut a = link("a");
         let mut b = link("b");
-        a.calls::<Add>("addition").unwrap();
-        b.serves::<Add>("addition").unwrap();
-        b.calls::<Add>("addition").unwrap();
+        a.rpc_client::<Add>("addition").unwrap();
+        b.rpc_server::<Add>("addition").unwrap();
+        b.rpc_client::<Add>("addition").unwrap();
         connect(&mut a, &mut b);
 
         assert_eq!(
@@ -1622,11 +1630,11 @@ mod tests {
 
     #[test]
     fn replies_without_the_matching_response_fingerprint_are_rejected() {
-        for schema in [None, Some(Sum::SCHEMA ^ 1)] {
+        for schema in [None, Some(Sum::SCHEMA_FINGERPRINT ^ 1)] {
             let mut a = link("a");
             let mut b = link("b");
-            a.calls::<Add>("addition").unwrap();
-            b.serves::<Add>("addition").unwrap();
+            a.rpc_client::<Add>("addition").unwrap();
+            b.rpc_server::<Add>("addition").unwrap();
             connect(&mut a, &mut b);
             a.request("addition", &Add { a: 1, b: 2 }).unwrap();
             while pump(&mut a, &mut b) {}
@@ -1655,8 +1663,8 @@ mod tests {
     fn request_seq_advances_and_wraps() {
         let mut a = link("a");
         let mut b = link("b");
-        a.calls::<Add>("addition").unwrap();
-        b.serves::<Add>("addition").unwrap();
+        a.rpc_client::<Add>("addition").unwrap();
+        b.rpc_server::<Add>("addition").unwrap();
         connect(&mut a, &mut b);
 
         let mut sink = [0u8; 4096];
@@ -1677,8 +1685,8 @@ mod tests {
         let mut b = link("b");
         // b does not serve Add. Rather than fake a's table, send the frame directly: this recreates
         // the situation where the peer's table is stale (right after a restart).
-        a.calls::<Add>("addition").unwrap();
-        b.serves::<Add>("addition").unwrap();
+        a.rpc_client::<Add>("addition").unwrap();
+        b.rpc_server::<Add>("addition").unwrap();
         connect(&mut a, &mut b);
         let seq = a.request("addition", &Add { a: 1, b: 1 }).unwrap();
         // Swap b for an instance that does not serve Add.
@@ -1717,7 +1725,7 @@ mod tests {
         assert_eq!(a.send("position_v2", &PosV2 { x: 1 }), Ok(false));
         // A peer ignoring negotiation must still not deliver incompatible bytes.
         let len = a.encode_payload(&PosV2 { x: 1 }).unwrap();
-        a.emit_data(wire::type_hash(Pos::TYPE), len).unwrap();
+        a.emit_data(wire::type_hash(Pos::TYPE_NAME), len).unwrap();
         while pump(&mut a, &mut b) {}
         assert!(b.next().is_none());
         assert_eq!(b.stats().dropped_schema, 1);
@@ -1727,10 +1735,10 @@ mod tests {
     fn typed_send_and_call_cannot_use_another_fingerprint_for_the_same_name() {
         let mut sender = link("sender");
         sender.publishes::<Pos>("position").unwrap();
-        sender.calls::<Add>("addition").unwrap();
+        sender.rpc_client::<Add>("addition").unwrap();
         let mut receiver = link("receiver");
         receiver.subscribes::<Pos>("position").unwrap();
-        receiver.serves::<Add>("addition").unwrap();
+        receiver.rpc_server::<Add>("addition").unwrap();
         connect(&mut sender, &mut receiver);
         assert_eq!(
             sender.send("position", &PosV2 { x: 1 }),
@@ -1745,14 +1753,14 @@ mod tests {
     #[test]
     fn request_fingerprint_mismatch_is_replied_to_without_dispatching() {
         let mut caller = link("caller");
-        caller.calls::<AddV2>("addition_v2").unwrap();
+        caller.rpc_client::<AddV2>("addition_v2").unwrap();
         let mut server = link("server");
-        server.serves::<Add>("addition").unwrap();
+        server.rpc_server::<Add>("addition").unwrap();
         connect(&mut caller, &mut server);
         settle(&mut caller, &mut server);
         let len = caller.encode_payload(&AddV2 { a: 1, b: 2 }).unwrap();
         let seq = caller
-            .emit_request(wire::type_hash(Add::TYPE), len)
+            .emit_request(wire::type_hash(Add::TYPE_NAME), len)
             .unwrap();
         while pump(&mut caller, &mut server) {}
         assert!(server.next().is_none());
@@ -1789,19 +1797,21 @@ mod tests {
                 false,
                 "old",
                 [HelloEntry {
-                    hash: wire::type_hash(Pos::TYPE),
+                    hash: wire::type_hash(Pos::TYPE_NAME),
                     flags: flags::PUB,
-                    schema: Pos::SCHEMA,
-                    name: Pos::TYPE,
+                    schema: Pos::SCHEMA_FINGERPRINT,
+                    name: Pos::TYPE_NAME,
                 }]
                 .into_iter(),
             )
             .unwrap();
             // [hello flags][id length][old][count][hash u32][entry flags]
-            legacy.scratch[HEADER + 10] &= !flags::SCHEMA;
+            legacy.scratch[HEADER + 10] &= !flags::SCHEMA_FINGERPRINT;
             legacy.emit(Kind::Hello, 0, 0, len).unwrap();
             let len = legacy.encode_payload(&Pos { x: 3 }).unwrap();
-            legacy.emit_data(wire::type_hash(Pos::TYPE), len).unwrap();
+            legacy
+                .emit_data(wire::type_hash(Pos::TYPE_NAME), len)
+                .unwrap();
             while pump(&mut legacy, &mut receiver) {}
             if restart {
                 assert_eq!(receiver.next(), Some(Event::Disconnected));
@@ -2039,7 +2049,7 @@ mod tests {
         // Cmd, Add and its response metadata each occupy a type slot.
         let mut small = Link::<[u8; 64], 3, 32>::new("s", PORTS, [0; 64], [0; 64]).unwrap();
         small.publishes::<Cmd>("command").unwrap();
-        small.serves::<Add>("addition").unwrap();
+        small.rpc_server::<Add>("addition").unwrap();
         let mut sink = [0u8; 64];
         let _ = small.drain(&mut sink); // flush the Hello
         // With no peer, send is Ok(false). The emit path is exercised through request instead.
@@ -2072,8 +2082,8 @@ mod tests {
         let mut mcu = link("mcu");
         mcu.publishes_latched::<Pos>("position").unwrap();
         mcu.subscribes::<Cmd>("command").unwrap();
-        mcu.serves::<Add>("addition").unwrap();
-        mcu.calls::<Add>("addition").unwrap();
+        mcu.rpc_server::<Add>("addition").unwrap();
+        mcu.rpc_client::<Add>("addition").unwrap();
         let mut bridge = link("bridge").into_bridge();
         connect(&mut mcu, &mut bridge);
         assert!(mcu.peer_is_bridge() && !bridge.peer_is_bridge());
@@ -2121,7 +2131,12 @@ mod tests {
         };
         assert_eq!(Add::decode(bridge.payload(&r)), Ok(Add { a: 1, b: 1 }));
         bridge
-            .reply_raw(r.seq, r.hash, Sum::SCHEMA, &Sum { s: 2 }.encode_to_vec())
+            .reply_raw(
+                r.seq,
+                r.hash,
+                Sum::SCHEMA_FINGERPRINT,
+                &Sum { s: 2 }.encode_to_vec(),
+            )
             .unwrap();
         while pump(&mut mcu, &mut bridge) {}
         let Some(Event::Reply(rep)) = mcu.next() else {
@@ -2137,7 +2152,7 @@ mod tests {
     #[test]
     fn bridge_does_not_enforce_fingerprints() {
         let mut mcu = link("mcu");
-        mcu.publishes::<PosV2>("position_v2").unwrap(); // SCHEMA = 0xbb
+        mcu.publishes::<PosV2>("position_v2").unwrap(); // SCHEMA_FINGERPRINT = 0xbb
         let mut bridge = link("bridge").into_bridge();
         connect(&mut mcu, &mut bridge);
 
@@ -2166,7 +2181,7 @@ mod tests {
         let mut big = link("big");
         big.publishes::<Pos>("position").unwrap();
         big.publishes::<Cmd>("command").unwrap();
-        big.serves::<Add>("addition").unwrap();
+        big.rpc_server::<Add>("addition").unwrap();
         small.subscribes::<Pos>("position").unwrap();
 
         small.tick(0);
@@ -2193,17 +2208,17 @@ mod tests {
         assert!(small.stats().remote_overflow >= 2);
     }
 
-    /// The same `TYPE` (same hash, same name) as `Pos`.
+    /// The same `TYPE_NAME` (same hash, same name) as `Pos`.
     struct Alias;
-    impl Topic for Alias {
-        const TYPE: &'static str = "Pos";
-        const SCHEMA: u64 = Pos::SCHEMA;
+    impl MessageType for Alias {
+        const TYPE_NAME: &'static str = "Pos";
+        const SCHEMA_FINGERPRINT: u64 = Pos::SCHEMA_FINGERPRINT;
         const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
     struct Other;
-    impl Topic for Other {
-        const TYPE: &'static str = "Other";
-        const SCHEMA: u64 = 0xff;
+    impl MessageType for Other {
+        const TYPE_NAME: &'static str = "Other";
+        const SCHEMA_FINGERPRINT: u64 = 0xff;
         const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
 
@@ -2283,28 +2298,31 @@ mod tests {
     fn service_response_contract_is_checked_before_declaration() {
         const WRONG_RESPONSE: &[StaticPort] = &[StaticPort {
             name: "addition",
-            direction: PortDirection::Service,
-            ty: Add::TYPE,
-            schema: Add::SCHEMA,
+            direction: PortDirection::RpcServer,
+            ty: Add::TYPE_NAME,
+            schema: Add::SCHEMA_FINGERPRINT,
             response: Some(PortType {
-                ty: Pos::TYPE,
-                schema: Pos::SCHEMA,
+                ty: Pos::TYPE_NAME,
+                schema: Pos::SCHEMA_FINGERPRINT,
             }),
         }];
         const WRONG_SCHEMA: &[StaticPort] = &[StaticPort {
             name: "addition",
-            direction: PortDirection::Client,
-            ty: Add::TYPE,
-            schema: Add::SCHEMA,
+            direction: PortDirection::RpcClient,
+            ty: Add::TYPE_NAME,
+            schema: Add::SCHEMA_FINGERPRINT,
             response: Some(PortType {
-                ty: Sum::TYPE,
-                schema: Sum::SCHEMA + 1,
+                ty: Sum::TYPE_NAME,
+                schema: Sum::SCHEMA_FINGERPRINT + 1,
             }),
         }];
         let mut server = L::new("server", WRONG_RESPONSE, [0; 1024], [0; 1024]).unwrap();
-        assert_eq!(server.serves::<Add>("addition"), Err(Error::WrongType));
+        assert_eq!(server.rpc_server::<Add>("addition"), Err(Error::WrongType));
         let mut client = L::new("client", WRONG_SCHEMA, [0; 1024], [0; 1024]).unwrap();
-        assert_eq!(client.calls::<Add>("addition"), Err(Error::SchemaMismatch));
+        assert_eq!(
+            client.rpc_client::<Add>("addition"),
+            Err(Error::SchemaMismatch)
+        );
     }
 
     #[test]
@@ -2314,7 +2332,7 @@ mod tests {
             fixture::<Pos>("position", PortDirection::Output, None),
         ];
         const MISSING_RESPONSE: &[StaticPort] =
-            &[fixture::<Add>("addition", PortDirection::Client, None)];
+            &[fixture::<Add>("addition", PortDirection::RpcClient, None)];
         assert_eq!(
             L::new("duplicate", DUPLICATE, [0; 1024], [0; 1024]).err(),
             Some(Error::InvalidPorts)
@@ -2335,15 +2353,15 @@ mod tests {
     #[test]
     fn hash_collision_is_rejected_at_declaration() {
         struct Costarring;
-        impl Topic for Costarring {
-            const TYPE: &'static str = "costarring";
-            const SCHEMA: u64 = 1;
+        impl MessageType for Costarring {
+            const TYPE_NAME: &'static str = "costarring";
+            const SCHEMA_FINGERPRINT: u64 = 1;
             const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
         }
         struct Liquid;
-        impl Topic for Liquid {
-            const TYPE: &'static str = "liquid";
-            const SCHEMA: u64 = 2;
+        impl MessageType for Liquid {
+            const TYPE_NAME: &'static str = "liquid";
+            const SCHEMA_FINGERPRINT: u64 = 2;
             const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
         }
         const COLLISIONS: &[StaticPort] = &[
@@ -2351,8 +2369,8 @@ mod tests {
             fixture::<Liquid>("liquid", PortDirection::Input, None),
         ];
         assert_eq!(
-            wire::type_hash(Costarring::TYPE),
-            wire::type_hash(Liquid::TYPE),
+            wire::type_hash(Costarring::TYPE_NAME),
+            wire::type_hash(Liquid::TYPE_NAME),
             "the fixture is only meaningful if these actually collide"
         );
         let mut l = Link::<[u8; 256], 4>::new("l", COLLISIONS, [0; 256], [0; 256]).unwrap();
@@ -2387,8 +2405,8 @@ mod tests {
     fn nothing_is_routable_before_the_handshake() {
         let mut a = link("a");
         a.publishes::<Pos>("position").unwrap();
-        a.serves::<Add>("addition").unwrap();
-        a.calls::<Add>("addition").unwrap();
+        a.rpc_server::<Add>("addition").unwrap();
+        a.rpc_client::<Add>("addition").unwrap();
         assert!(!a.is_connected());
         assert_eq!(a.peer_id(), None);
         assert!(!a.peer_subscribes::<Pos>());

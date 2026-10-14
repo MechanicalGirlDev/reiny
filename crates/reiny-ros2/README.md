@@ -10,7 +10,7 @@ use reiny::prelude::*;
 use reiny_ros2::ros2_client::{MessageTypeName, ServiceTypeName};
 
 #[reiny::main]
-async fn main(cloudy: Cloudy) -> reiny::Result<()> {
+async fn main(cloudy: ModuleContext) -> reiny::Result<()> {
     let ros = reiny_ros2::Ros::new(&cloudy, "reiny_bridge")?;      // ROS_DOMAIN_ID from the environment
     ros.export::<RobotState, JointState, _>(                          // reiny → ROS
         "state", "/joint_states", MessageTypeName::new("sensor_msgs", "JointState"), Qos::SENSOR,
@@ -29,7 +29,7 @@ async fn main(cloudy: Cloudy) -> reiny::Result<()> {
 - ROS message types are `serde` structs implementing `ros2_client::Message`
   (three lines each, or the `ros2-interfaces-<distro>` crates).
 - `export_auto` / `import_auto` map same-shaped types by proto field name
-  through `Topic::DESCRIPTOR` — zero lines when names and types line up.
+  through `MessageType::DESCRIPTOR` — zero lines when names and types line up.
 - Declare each port in YAML: `state` is a stream input, `cmd` a stream output,
   and `calibrate` an RPC input with an exact service source. The automatic
   routes also require a port name; `import_service` uses a declared RPC output.

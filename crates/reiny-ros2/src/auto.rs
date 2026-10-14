@@ -1,5 +1,5 @@
 //! Automatic mapping between identically shaped types — through the proto descriptor
-//! (`Topic::DESCRIPTOR`), by field name, to and from a serde struct (a ROS msg).
+//! (`MessageType::DESCRIPTOR`), by field name, to and from a serde struct (a ROS msg).
 //!
 //! The path is prost bytes → `DynamicMessage` → serde (proto field names as they are, `snake_case`) →
 //! `R`. Back the other way it is `R` → serde → `DynamicMessage` → prost bytes → `T`. If a name or a
@@ -9,23 +9,23 @@ use prost::Message as ProstMessage;
 use prost_reflect::{
     DescriptorPool, DeserializeOptions, DynamicMessage, MessageDescriptor, SerializeOptions,
 };
-use reiny::{Result, Topic};
+use reiny::{MessageType, Result};
 use ros2_client::Message;
 
 /// Look up `T`'s [`MessageDescriptor`] in `T::DESCRIPTOR`. A type without a descriptor is an error.
-pub(crate) fn descriptor<T: Topic>() -> Result<MessageDescriptor> {
+pub(crate) fn descriptor<T: MessageType>() -> Result<MessageDescriptor> {
     let Some(descriptor) = T::DESCRIPTOR else {
         anyhow::bail!(
-            "{}: no DESCRIPTOR (hand-written Topic impl?); use the closure form",
-            T::TYPE
+            "{}: no DESCRIPTOR (hand-written MessageType impl?); use the closure form",
+            T::TYPE_NAME
         );
     };
     let pool = DescriptorPool::decode(descriptor.file_set)
-        .map_err(|e| anyhow::anyhow!("{}: bad descriptor set: {e}", T::TYPE))?;
+        .map_err(|e| anyhow::anyhow!("{}: bad descriptor set: {e}", T::TYPE_NAME))?;
     pool.get_message_by_name(descriptor.message).ok_or_else(|| {
         anyhow::anyhow!(
             "{}: message '{}' not in its descriptor set",
-            T::TYPE,
+            T::TYPE_NAME,
             descriptor.message
         )
     })
@@ -218,9 +218,9 @@ mod tests {
     #[test]
     fn a_type_without_a_descriptor_points_at_the_closure_form() {
         struct HandWritten;
-        impl Topic for HandWritten {
-            const TYPE: &'static str = "HandWritten";
-            const SCHEMA: u64 = 0x1234;
+        impl MessageType for HandWritten {
+            const TYPE_NAME: &'static str = "HandWritten";
+            const SCHEMA_FINGERPRINT: u64 = 0x1234;
             const DESCRIPTOR: Option<reiny::Descriptor> = None;
         }
 
@@ -234,9 +234,9 @@ mod tests {
     #[test]
     fn a_broken_descriptor_set_is_reported() {
         struct Broken;
-        impl Topic for Broken {
-            const TYPE: &'static str = "Broken";
-            const SCHEMA: u64 = 0x1234;
+        impl MessageType for Broken {
+            const TYPE_NAME: &'static str = "hs.Broken";
+            const SCHEMA_FINGERPRINT: u64 = 0x1234;
             const DESCRIPTOR: Option<Descriptor> = Some(Descriptor {
                 message: "hs.Broken",
                 file_set: b"not-a-descriptor-set",

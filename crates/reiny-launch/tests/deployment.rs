@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use reiny_core::bindings::{
-    CONTRACT_VERSION, EndpointContract, InputBinding, ModuleBindings, ModuleReport, OutputBinding,
-    PortKind, PortReport, QosProfile, ResponseReport,
+    EndpointContract, InputBinding, MODULE_BINDINGS_VERSION, MODULE_REPORT_VERSION, ModuleBindings,
+    ModuleReport, OutputBinding, PortKind, PortReport, QosProfile, ResponseReport,
 };
 use reiny_launch::{
     DeploymentClient, DeploymentPhase, DeploymentStatus, FailurePolicy, ModuleObserver,
@@ -298,7 +298,7 @@ impl Harness {
         for index in 0..count {
             let namespace = format!("{deployment}/node{index}");
             let bindings = ModuleBindings {
-                version: CONTRACT_VERSION,
+                version: MODULE_BINDINGS_VERSION,
                 namespace: namespace.clone(),
                 endpoint_namespace: namespace.clone(),
                 inputs: BTreeMap::new(),
@@ -307,7 +307,7 @@ impl Harness {
                 executables: vec!["fixture".into()],
             };
             let report = ModuleReport {
-                version: CONTRACT_VERSION,
+                version: MODULE_REPORT_VERSION,
                 namespace: namespace.clone(),
                 inputs: BTreeMap::new(),
                 outputs: BTreeMap::new(),
@@ -781,9 +781,9 @@ fn connected_fixture(
 ) -> Result<PreparedDeployment> {
     let mut prepared = harness.prepared(publishers + 1)?;
     let contract = EndpointContract {
-        type_name: "Ping".into(),
+        type_name: "test.Ping".into(),
         kind: if rpc { PortKind::Rpc } else { PortKind::Stream },
-        response: rpc.then(|| "Pong".into()),
+        response: rpc.then(|| "test.Pong".into()),
         ..EndpointContract::default()
     };
     let sources = prepared.nodes[..publishers]
@@ -801,7 +801,7 @@ fn connected_fixture(
             }),
         };
         let mut report = ModuleReport {
-            version: CONTRACT_VERSION,
+            version: MODULE_REPORT_VERSION,
             namespace: node.namespace.clone(),
             inputs: BTreeMap::new(),
             outputs: BTreeMap::new(),
@@ -1068,7 +1068,7 @@ fn incompatible_compiled_schemas_never_become_ready() -> Result<()> {
         "out".into(),
         OutputBinding {
             contract: EndpointContract {
-                type_name: "Ping".into(),
+                type_name: "test.Ping".into(),
                 ..EndpointContract::default()
             },
         },
@@ -1077,7 +1077,7 @@ fn incompatible_compiled_schemas_never_become_ready() -> Result<()> {
         "in".into(),
         InputBinding {
             contract: EndpointContract {
-                type_name: "Ping".into(),
+                type_name: "test.Ping".into(),
                 ..EndpointContract::default()
             },
             sources: vec![source],
@@ -1088,13 +1088,13 @@ fn incompatible_compiled_schemas_never_become_ready() -> Result<()> {
             type_name: "test.Ping".into(),
             schema: u64::try_from(index)? + 1,
             contract: EndpointContract {
-                type_name: "Ping".into(),
+                type_name: "test.Ping".into(),
                 ..EndpointContract::default()
             },
             response: None,
         };
         let report = ModuleReport {
-            version: CONTRACT_VERSION,
+            version: MODULE_REPORT_VERSION,
             namespace: node.namespace.clone(),
             inputs: if index == 1 {
                 BTreeMap::from([("in".into(), port.clone())])
@@ -1142,7 +1142,7 @@ fn mismatched_report_identity_is_terminal() -> Result<()> {
     let mut harness = Harness::new()?;
     let mut prepared = harness.prepared(1)?;
     let report = ModuleReport {
-        version: CONTRACT_VERSION,
+        version: MODULE_REPORT_VERSION,
         namespace: "another/deployment".into(),
         inputs: BTreeMap::new(),
         outputs: BTreeMap::new(),
@@ -1168,7 +1168,7 @@ fn cyclic_connections_start_without_a_readiness_dependency_order() -> Result<()>
             "in".into(),
             InputBinding {
                 contract: EndpointContract {
-                    type_name: "Ping".into(),
+                    type_name: "test.Ping".into(),
                     ..EndpointContract::default()
                 },
                 sources: vec![source],
@@ -1178,7 +1178,7 @@ fn cyclic_connections_start_without_a_readiness_dependency_order() -> Result<()>
             "out".into(),
             OutputBinding {
                 contract: EndpointContract {
-                    type_name: "Ping".into(),
+                    type_name: "test.Ping".into(),
                     ..EndpointContract::default()
                 },
             },
@@ -1187,13 +1187,13 @@ fn cyclic_connections_start_without_a_readiness_dependency_order() -> Result<()>
             type_name: "test.Ping".into(),
             schema: 42,
             contract: EndpointContract {
-                type_name: "Ping".into(),
+                type_name: "test.Ping".into(),
                 ..EndpointContract::default()
             },
             response: None,
         };
         let report = ModuleReport {
-            version: CONTRACT_VERSION,
+            version: MODULE_REPORT_VERSION,
             namespace: node.namespace.clone(),
             inputs: BTreeMap::from([("in".into(), port.clone())]),
             outputs: BTreeMap::from([("out".into(), port)]),

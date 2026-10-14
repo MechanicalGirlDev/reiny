@@ -1,4 +1,4 @@
-// Shared messages referenced by main.yaml schema.internals.
+// Shared messages referenced by schema.yaml schema.shared_types.
 syntax = "proto3";
 
 package pong;

@@ -7,8 +7,12 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-/// Runtime contract and report version. Old binaries must not silently accept v2.
-pub const CONTRACT_VERSION: u32 = 2;
+/// Version of reusable module definitions and invocation manifests.
+pub const MODULE_MANIFEST_VERSION: u32 = 3;
+/// Version of resolved runtime module bindings.
+pub const MODULE_BINDINGS_VERSION: u32 = 2;
+/// Version of compiled runtime module reports.
+pub const MODULE_REPORT_VERSION: u32 = 2;
 
 /// The operation implemented by an endpoint.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,7 +151,7 @@ pub struct ModuleBindings {
     pub endpoint_namespace: String,
     /// Named subscriptions and their exact publisher namespaces.
     pub inputs: BTreeMap<String, InputBinding>,
-    /// Named publications implemented by this module.
+    /// Named outputs implemented by this module.
     pub outputs: BTreeMap<String, OutputBinding>,
     /// Declared owned children; endpoints cannot be delegated twice.
     #[serde(default)]
@@ -306,7 +310,7 @@ impl ModuleBindings {
     /// Transport-specific domain and executable identity checks belong to callers.
     pub fn validate(&self) -> Result<(), BindingError> {
         require(
-            self.version == CONTRACT_VERSION,
+            self.version == MODULE_BINDINGS_VERSION,
             "unsupported module bindings version",
         )?;
         validate_namespace(&self.namespace)?;
@@ -367,12 +371,8 @@ impl ModuleBindings {
                 )?;
             }
             for source in sources {
-                let short = contract
-                    .type_name
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or(&contract.type_name);
-                let address = (source, short, contract.kind == PortKind::Rpc);
+                let type_name = &contract.type_name;
+                let address = (source, type_name, contract.kind == PortKind::Rpc);
                 if let Some(previous) = addresses.insert(address, &contract.type_name) {
                     require(
                         previous == &contract.type_name,
@@ -422,7 +422,7 @@ mod tests {
 
     fn bindings() -> ModuleBindings {
         ModuleBindings {
-            version: CONTRACT_VERSION,
+            version: MODULE_BINDINGS_VERSION,
             namespace: "robot/control".into(),
             endpoint_namespace: "robot/control".into(),
             inputs: BTreeMap::from([(
@@ -526,13 +526,26 @@ mod tests {
                         "robot..State".into();
                 }
                 _ => {
-                    let mut collision = bindings.inputs["state"].clone();
-                    collision.contract.type_name = "other.State".into();
-                    bindings.inputs.insert("collision".into(), collision);
+                    let input = &mut bindings.inputs.get_mut("state").unwrap().contract;
+                    input.kind = PortKind::Rpc;
+                    input.response = Some("robot..Result".into());
                 }
             }
             assert!(bindings.validate().is_err(), "mutation {mutation}");
         }
+    }
+
+    #[test]
+    fn distinct_protobuf_packages_do_not_collide_on_the_same_source() {
+        // Given a source carrying same-named messages from different packages.
+        let mut bindings = bindings();
+        let mut other = bindings.inputs["state"].clone();
+        other.contract.type_name = "other.State".into();
+        bindings.inputs.insert("other".into(), other);
+        // When exact full names determine wire addresses.
+        let result = bindings.validate();
+        // Then both contracts are independently valid.
+        result.unwrap();
     }
 
     #[test]

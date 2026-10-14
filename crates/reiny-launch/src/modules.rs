@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use reiny_core::bindings::{
-    CONTRACT_VERSION, EndpointContract, InputBinding, ModuleBindings, OutputBinding,
-    PortDelegation, PortKind, QosProfile, ReceiveBuffer, Replay, Retention,
+    EndpointContract, InputBinding, MODULE_BINDINGS_VERSION, MODULE_MANIFEST_VERSION,
+    ModuleBindings, OutputBinding, PortDelegation, PortKind, QosProfile, ReceiveBuffer, Replay,
+    Retention,
 };
 use serde::{Deserialize, Serialize};
 
@@ -719,7 +720,7 @@ impl Loader {
             .ok_or_else(|| error("use sibling.port or in.port"))?;
         if name.contains('.') {
             return Err(error(
-                "module internals and absolute paths are not public references",
+                "module shared_types and absolute paths are not public references",
             ));
         }
         let instance = self
@@ -919,7 +920,7 @@ fn validate_calls(
 }
 
 fn validate_definition(namespace: &str, manifest: &ModuleManifest) -> Result<(), ModuleError> {
-    if manifest.version != CONTRACT_VERSION {
+    if manifest.version != MODULE_MANIFEST_VERSION {
         return Err(invalid(
             namespace,
             format!("unsupported module version {}", manifest.version),
@@ -1006,7 +1007,7 @@ fn validate_executable_outputs(
                 "executable outputs cannot forward another module",
             ));
         }
-        let segment = port.type_name.rsplit('.').next().unwrap_or(&port.type_name);
+        let segment = &port.type_name;
         if !types.insert(segment) {
             return Err(invalid(
                 namespace,
@@ -1104,7 +1105,7 @@ impl Instance {
             build: self.manifest.build.clone(),
             provider,
             bindings: ModuleBindings {
-                version: CONTRACT_VERSION,
+                version: MODULE_BINDINGS_VERSION,
                 namespace: namespace.to_string(),
                 endpoint_namespace: namespace.to_string(),
                 inputs,

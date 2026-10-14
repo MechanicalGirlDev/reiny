@@ -1,7 +1,7 @@
 //! Typed publishers / subscribers, their builders, and presence.
 //!
-//! The key shape is `reiny/<domain>/<id>/<TYPE>` (publish) and `reiny/<domain>/*/<TYPE>` (subscribe);
-//! [`Cloudy::key_for`](crate::Cloudy) is the single place that assembles it. Getting on and off the bus
+//! The key shape is `reiny/<domain>/<id>/<TYPE_NAME>` (publish) and `reiny/<domain>/*/<TYPE_NAME>` (subscribe);
+//! [`ModuleContext::key_for`](crate::ModuleContext) is the single place that assembles it. Getting on and off the bus
 //! goes through an [`Engine`](crate::engine::Engine) — what lives here is encode / decode, the
 //! fingerprint check, latched's "presence first, then get", latest-wins and the receive buffers (Fifo /
 //! Ring), and the same implementation runs on every engine.
@@ -25,7 +25,7 @@ use crate::engine::{
 use crate::shutdown::Shutdown;
 #[cfg(any(test, feature = "conformance"))]
 use crate::validate_segment;
-use crate::{Cloudy, Descriptor, Durability, History, Qos, Result, Topic};
+use crate::{Descriptor, Durability, History, MessageType, ModuleContext, Qos, Result};
 
 /// The depth of the default receive buffer (Fifo). The same as zenoh's `API_DATA_RECEPTION_CHANNEL_SIZE`.
 const FIFO_CAPACITY: usize = 256;
@@ -53,13 +53,13 @@ pub struct RawEnvelope {
     pub payload: Vec<u8>,
     /// The sending launch's id (the key's `<id>` segment).
     pub source: String,
-    /// The sender's [`Topic::SCHEMA`]. `None` when it sent none, or the engine carries no attachments.
+    /// The sender's [`MessageType::SCHEMA_FINGERPRINT`]. `None` when it sent none, or the engine carries no attachments.
     pub schema: Option<u64>,
     /// The send time (unix ns). Present only when the engine has one (zenoh, with timestamping on).
     pub timestamp: Option<u64>,
 }
 
-/// `T::SCHEMA` in attachment form (8 bytes, little-endian).
+/// `T::SCHEMA_FINGERPRINT` in attachment form (8 bytes, little-endian).
 pub(crate) fn fingerprint(schema: Option<u64>) -> Option<Vec<u8>> {
     schema.map(|f| f.to_le_bytes().to_vec())
 }
@@ -72,16 +72,16 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 // publisher
 // ---------------------------------------------------------------------------
 
-/// The builder [`Cloudy::publisher`] returns. With nothing set it is [`Cloudy::publish`].
+/// The builder [`ModuleContext::publisher`] returns. With nothing set it is [`ModuleContext::publish`].
 #[must_use = "a builder does nothing until .build()"]
 pub(crate) struct PublisherBuilder<'a, T> {
-    cloudy: &'a Cloudy,
+    cloudy: &'a ModuleContext,
     qos: Qos,
     _marker: PhantomData<T>,
 }
 
 impl<'a, T> PublisherBuilder<'a, T> {
-    pub(crate) fn new(cloudy: &'a Cloudy) -> Self {
+    pub(crate) fn new(cloudy: &'a ModuleContext) -> Self {
         Self {
             cloudy,
             qos: Qos::DEFAULT,
@@ -106,7 +106,7 @@ impl<'a, T> PublisherBuilder<'a, T> {
     }
 
     /// Declare the publisher. A liveliness token on the same key always comes with it
-    /// (the foundation of [`Cloudy::publishers`]; there is no opt-out).
+    /// (the foundation of [`ModuleContext::publishers`]; there is no opt-out).
     ///
     /// `history: KeepLast(n > 1)` is an error — a publisher holds at most the one latched sample, and an
     /// n-deep ring is the subscriber's job through `.latest(n)` (it is not silently rounded to 1). A
@@ -114,7 +114,7 @@ impl<'a, T> PublisherBuilder<'a, T> {
     #[cfg(any(test, feature = "conformance"))]
     pub(crate) fn build(self) -> Result<Publisher<T>>
     where
-        T: Message + Topic,
+        T: Message + MessageType,
     {
         self.cloudy.ensure_standalone()?;
         self.build_named()
@@ -122,7 +122,7 @@ impl<'a, T> PublisherBuilder<'a, T> {
 
     pub(crate) fn build_named(self) -> Result<Publisher<T>>
     where
-        T: Message + Topic,
+        T: Message + MessageType,
     {
         if let History::KeepLast(n) = self.qos.history
             && n != 1
@@ -130,7 +130,7 @@ impl<'a, T> PublisherBuilder<'a, T> {
             anyhow::bail!(
                 "publisher of {}: history KeepLast({n}) is not supported — a publisher keeps at \
                  most 1 (latched); use the subscriber's `.latest({n})` for a ring",
-                T::TYPE
+                T::TYPE_NAME
             );
         }
         let latched = self.qos.durability == Durability::TransientLocal;
@@ -139,19 +139,19 @@ impl<'a, T> PublisherBuilder<'a, T> {
         if !caps.liveliness {
             anyhow::bail!(
                 "publisher of {}: this engine has no liveliness, which presence needs",
-                T::TYPE
+                T::TYPE_NAME
             );
         }
         if latched && !caps.query {
             anyhow::bail!(
                 "publisher of {}: this engine has no query support, which latched needs",
-                T::TYPE
+                T::TYPE_NAME
             );
         }
         let key = self
             .cloudy
-            .key_for(Some(self.cloudy.endpoint_namespace()), T::TYPE);
-        let core = PublisherCore::declare(self.cloudy, &key, &self.qos, T::SCHEMA)?;
+            .key_for(Some(self.cloudy.endpoint_namespace()), T::TYPE_NAME);
+        let core = PublisherCore::declare(self.cloudy, &key, &self.qos, T::SCHEMA_FINGERPRINT)?;
         // `@schema` is for diagnostics, so on an engine without query it is silently skipped rather than
         // being an error (every `reiny-build` generated type carries a DESCRIPTOR).
         let schema = match T::DESCRIPTOR {
@@ -169,13 +169,17 @@ impl<'a, T> PublisherBuilder<'a, T> {
     }
 }
 
-/// The queryable through which a publisher of a type carrying a [`Topic::DESCRIPTOR`] announces its
+/// The queryable through which a publisher of a type carrying a [`MessageType::DESCRIPTOR`] announces its
 /// descriptor set, beside its own key at `<key>/@schema/<message>`.
 ///
 /// `@schema` is a verbatim chunk — it matches neither `*` nor `**`, so it is invisible to anyone
 /// subscribing to or recording the type's topic. The only ones who pick it up ask for it explicitly, as
 /// `reiny bag record` does with `reiny/<domain>/*/*/@schema/*`.
-pub(crate) fn declare_schema(cloudy: &Cloudy, key: &Key, descriptor: Descriptor) -> Result<Guard> {
+pub(crate) fn declare_schema(
+    cloudy: &ModuleContext,
+    key: &Key,
+    descriptor: Descriptor,
+) -> Result<Guard> {
     let reply_key = key.with_chunk(format!("{SCHEMA_CHUNK}/{}", descriptor.message));
     let callback_key = reply_key.clone();
     cloudy.engine.respond(
@@ -188,7 +192,7 @@ pub(crate) fn declare_schema(cloudy: &Cloudy, key: &Key, descriptor: Descriptor)
     )
 }
 
-/// One descriptor a live launch announces at `@schema` — what [`Cloudy::schemas`] collects. The owned,
+/// One descriptor a live launch announces at `@schema` — what [`ModuleContext::schemas`] collects. The owned,
 /// off-the-bus form of a [`Descriptor`], plus who announced it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RawDescriptor {
@@ -203,7 +207,7 @@ pub struct RawDescriptor {
 /// The other half of a latched publisher — one queryable on its own publish key, answering with the
 /// last value it sent and nothing more.
 pub(crate) fn declare_latch(
-    cloudy: &Cloudy,
+    cloudy: &ModuleContext,
     key: &Key,
     last: Arc<Mutex<Option<Vec<u8>>>>,
     schema: Option<u64>,
@@ -228,10 +232,10 @@ pub(crate) fn declare_latch(
     )
 }
 
-/// A typed publisher obtained from [`Cloudy::output`].
+/// A typed publisher obtained from [`ModuleContext::output`].
 ///
 /// Dropping it drops the liveliness token too, so subscribers watching through
-/// [`Cloudy::watch_publishers`] get a [`PresenceEvent::Left`].
+/// [`ModuleContext::watch_publishers`] get a [`PresenceEvent::Left`].
 pub struct Publisher<T> {
     core: PublisherCore,
     /// The queryable announcing the descriptor at `@schema`, only when `T::DESCRIPTOR` is set (merely held).
@@ -252,7 +256,12 @@ pub(crate) struct PublisherCore {
 }
 
 impl PublisherCore {
-    pub(crate) fn declare(cloudy: &Cloudy, key: &Key, qos: &Qos, schema: u64) -> Result<Self> {
+    pub(crate) fn declare(
+        cloudy: &ModuleContext,
+        key: &Key,
+        qos: &Qos,
+        schema: u64,
+    ) -> Result<Self> {
         let raw = cloudy.engine.publisher(key, qos)?;
         let last = Arc::new(Mutex::new(None));
         let queryable = if qos.durability == Durability::TransientLocal {
@@ -279,8 +288,8 @@ impl PublisherCore {
     }
 }
 
-impl<T: Message + Topic> Publisher<T> {
-    /// Encode the message and publish it. With a `T::SCHEMA`, the fingerprint rides in the attachment.
+impl<T: Message + MessageType> Publisher<T> {
+    /// Encode the message and publish it. With a `T::SCHEMA_FINGERPRINT`, the fingerprint rides in the attachment.
     ///
     /// Under `Reliable` (the default) polling the future blocks while the send path is congested.
     /// The future is lazy, even though no engine today has an await point in here.
@@ -293,10 +302,10 @@ impl<T: Message + Topic> Publisher<T> {
 // subscriber
 // ---------------------------------------------------------------------------
 
-/// The builder [`Cloudy::subscriber`] returns. With nothing set it is [`Cloudy::subscribe`].
+/// The builder [`ModuleContext::subscriber`] returns. With nothing set it is [`ModuleContext::subscribe`].
 #[must_use = "a builder does nothing until .build()"]
 pub(crate) struct SubscriberBuilder<'a, T> {
-    cloudy: &'a Cloudy,
+    cloudy: &'a ModuleContext,
     from: Vec<Option<String>>,
     latched: bool,
     latest: Option<usize>,
@@ -304,7 +313,7 @@ pub(crate) struct SubscriberBuilder<'a, T> {
 }
 
 impl<'a, T> SubscriberBuilder<'a, T> {
-    pub(crate) fn new(cloudy: &'a Cloudy) -> Self {
+    pub(crate) fn new(cloudy: &'a ModuleContext) -> Self {
         Self {
             cloudy,
             from: vec![None],
@@ -355,7 +364,7 @@ impl<'a, T> SubscriberBuilder<'a, T> {
     #[cfg(any(test, feature = "conformance"))]
     pub(crate) fn build(self) -> Result<Subscriber<T>>
     where
-        T: Message + Default + Topic,
+        T: Message + Default + MessageType,
     {
         self.cloudy.ensure_standalone()?;
         self.build_named()
@@ -363,9 +372,15 @@ impl<'a, T> SubscriberBuilder<'a, T> {
 
     pub(crate) fn build_named(self) -> Result<Subscriber<T>>
     where
-        T: Message + Default + Topic,
+        T: Message + Default + MessageType,
     {
-        let core = Core::declare(self.cloudy, T::TYPE, &self.from, self.latched, self.latest)?;
+        let core = Core::declare(
+            self.cloudy,
+            T::TYPE_NAME,
+            &self.from,
+            self.latched,
+            self.latest,
+        )?;
         let engine = &self.cloudy.engine;
         let caps = engine.caps();
 
@@ -373,7 +388,7 @@ impl<'a, T> SubscriberBuilder<'a, T> {
         // itself names. The question it answers is "who listens to this type", not "who listens to
         // whom". Unlike a publisher's token this one is skipped rather than refused on an engine
         // without liveliness — it changes nothing about how the subscription behaves.
-        let mine = self.cloudy.key_for(Some(self.cloudy.id()), T::TYPE);
+        let mine = self.cloudy.key_for(Some(self.cloudy.id()), T::TYPE_NAME);
         let sub_token = if caps.liveliness {
             Some(engine.declare_alive(&mine.with_chunk(SUB_CHUNK))?)
         } else {
@@ -397,11 +412,11 @@ impl<'a, T> SubscriberBuilder<'a, T> {
     }
 }
 
-/// The builder [`Cloudy::raw_subscriber`] returns — [`SubscriberBuilder`] for a type named at run time.
+/// The builder [`ModuleContext::raw_subscriber`] returns — [`SubscriberBuilder`] for a type named at run time.
 #[must_use = "a builder does nothing until .build()"]
 #[cfg(any(test, feature = "conformance"))]
 pub(crate) struct RawSubscriberBuilder<'a> {
-    cloudy: &'a Cloudy,
+    cloudy: &'a ModuleContext,
     ty: String,
     latched: bool,
     latest: Option<usize>,
@@ -409,7 +424,7 @@ pub(crate) struct RawSubscriberBuilder<'a> {
 
 #[cfg(any(test, feature = "conformance"))]
 impl<'a> RawSubscriberBuilder<'a> {
-    pub(crate) fn new(cloudy: &'a Cloudy, ty: String) -> Self {
+    pub(crate) fn new(cloudy: &'a ModuleContext, ty: String) -> Self {
         Self {
             cloudy,
             ty,
@@ -440,9 +455,9 @@ impl<'a> RawSubscriberBuilder<'a> {
 
 /// What a subscriber's receive buffer has done since it was declared.
 ///
-/// Both buffers are quiet by design: the default Fifo of [`FIFO_CAPACITY`] **blocks the engine's
+/// Both buffers are quiet by design: the bounded default FIFO **blocks the engine's
 /// receive thread** when it fills (which stalls every subscription in the launch), and
-/// [`SubscriberBuilder::latest`]'s ring never blocks but throws the oldest sample away instead.
+/// [`crate::bindings::ReceiveBuffer::Latest`]'s ring never blocks but throws the oldest sample away instead.
 /// Neither leaves a trace, so these counters — with the one-shot `warn!` beside them — are the only
 /// way to learn that "the robot freezes now and then" is a full buffer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -563,9 +578,9 @@ impl Ring {
     }
 }
 
-/// A typed subscriber obtained from [`Cloudy::input`].
+/// A typed subscriber obtained from [`ModuleContext::input`].
 ///
-/// `recv` returns `None` on shutdown (Ctrl+C / SIGTERM / [`Cloudy::shutdown_now`]), so a
+/// `recv` returns `None` on shutdown (Ctrl+C / SIGTERM / [`ModuleContext::shutdown_now`]), so a
 /// `while let Some(m) = sub.recv().await` loop falls out of its own accord.
 ///
 /// # cancel-safety
@@ -583,7 +598,7 @@ impl Ring {
 /// ```
 pub struct Subscriber<T> {
     core: Core,
-    /// Our own `…/<T>/@sub` presence token, so `Cloudy::subscribers::<T>()` can see us (merely held).
+    /// Our own `…/<T>/@sub` presence token, so `ModuleContext::subscribers::<T>()` can see us (merely held).
     _sub_token: Option<Guard>,
     /// The `@schema` queryable describing `T`, when it has a `DESCRIPTOR` (merely held).
     _schema: Option<Guard>,
@@ -602,7 +617,7 @@ impl<T> Subscriber<T> {
     }
 }
 
-impl<T: Message + Default + Topic> Subscriber<T> {
+impl<T: Message + Default + MessageType> Subscriber<T> {
     /// Receive the next message. `None` once the channel is closed or shutdown was requested.
     ///
     /// A sample that fails to decode (a corrupt payload, or one of another schema) is warned about,
@@ -617,7 +632,8 @@ impl<T: Message + Default + Topic> Subscriber<T> {
             // Still cancel-safe: `Core::recv` is, and nothing after it awaits.
             let sample = self.core.recv().await?;
             if self.managed.is_some()
-                && attachment_fingerprint(sample.attachment.as_deref()) != Some(T::SCHEMA)
+                && attachment_fingerprint(sample.attachment.as_deref())
+                    != Some(T::SCHEMA_FINGERPRINT)
             {
                 continue;
             }
@@ -629,7 +645,7 @@ impl<T: Message + Default + Topic> Subscriber<T> {
     }
 }
 
-/// An encoded-message subscriber obtained from [`Cloudy::raw_input`].
+/// An encoded-message subscriber obtained from [`ModuleContext::raw_input`].
 ///
 /// The declared input fixes the sources, type and receive policy. Missing or mismatching
 /// fingerprints are dropped before the caller sees bytes. The handle participates in module
@@ -694,7 +710,7 @@ pub(crate) struct Core {
 impl Core {
     /// Subscribe to `ty` (from `from`, or every source) behind a Fifo or a `latest` ring.
     pub(crate) fn declare(
-        cloudy: &Cloudy,
+        cloudy: &ModuleContext,
         ty: &str,
         from: &[Option<String>],
         latched: bool,
@@ -849,7 +865,7 @@ impl Core {
 }
 
 /// Check the fingerprint and decode. `None` for a sample that should be dropped.
-fn unwrap_sample<T: Message + Default + Topic>(
+fn unwrap_sample<T: Message + Default + MessageType>(
     sample: &Sample,
     source: String,
     warned: &mut HashSet<String>,
@@ -882,19 +898,23 @@ async fn recv_presence(presence: Option<&mut RawPresence>) -> Option<engine::Pre
     }
 }
 
-/// Match the sender's fingerprint from the attachment against our own `T::SCHEMA`.
+/// Match the sender's fingerprint from the attachment against our own `T::SCHEMA_FINGERPRINT`.
 ///
 /// Missing, malformed, and mismatched fingerprints are rejected. Each source is
 /// warned about once.
-fn schema_matches<T: Topic>(sample: &Sample, source: &str, warned: &mut HashSet<String>) -> bool {
-    let mine = T::SCHEMA;
+fn schema_matches<T: MessageType>(
+    sample: &Sample,
+    source: &str,
+    warned: &mut HashSet<String>,
+) -> bool {
+    let mine = T::SCHEMA_FINGERPRINT;
     let theirs = attachment_fingerprint(sample.attachment.as_deref());
     if theirs == Some(mine) {
         return true;
     }
     if warned.insert(source.to_string()) {
         tracing::warn!(
-            ty = T::TYPE,
+            ty = T::TYPE_NAME,
             source,
             expected = format!("{mine:016x}"),
             received = ?theirs,
@@ -910,11 +930,11 @@ pub(crate) fn attachment_fingerprint(attachment: Option<&[u8]>) -> Option<u64> {
     Some(u64::from_le_bytes(raw))
 }
 
-fn decode<T: Message + Default + Topic>(sample: &Sample) -> Option<T> {
+fn decode<T: Message + Default + MessageType>(sample: &Sample) -> Option<T> {
     match T::decode(sample.payload.as_slice()) {
         Ok(msg) => Some(msg),
         Err(e) => {
-            tracing::warn!(ty = T::TYPE, error = %e, "skipping undecodable sample");
+            tracing::warn!(ty = T::TYPE_NAME, error = %e, "skipping undecodable sample");
             None
         }
     }
@@ -933,14 +953,14 @@ pub enum PresenceEvent {
     Left(String),
 }
 
-/// The event stream [`Cloudy::watch_publishers`] returns.
+/// The event stream [`ModuleContext::watch_publishers`] returns.
 pub struct Presence<T> {
     raw: RawPresence,
     _marker: PhantomData<T>,
 }
 
 impl<T> Presence<T> {
-    pub(crate) fn new(cloudy: &Cloudy, key: &Key) -> Result<Self> {
+    pub(crate) fn new(cloudy: &ModuleContext, key: &Key) -> Result<Self> {
         Ok(Self {
             raw: RawPresence::new(cloudy, key)?,
             _marker: PhantomData,
@@ -956,7 +976,7 @@ impl<T> Presence<T> {
     }
 }
 
-/// Join / leave events carrying the whole key — what [`Cloudy::watch_keys`] returns, for a tool that
+/// Join / leave events carrying the whole key — what [`ModuleContext::watch_keys`] returns, for a tool that
 /// learns the types from the bus instead of naming them.
 pub struct RawPresence {
     rx: mpsc::UnboundedReceiver<engine::Presence>,
@@ -966,11 +986,11 @@ pub struct RawPresence {
 }
 
 impl RawPresence {
-    pub(crate) fn new(cloudy: &Cloudy, key: &Key) -> Result<Self> {
+    pub(crate) fn new(cloudy: &ModuleContext, key: &Key) -> Result<Self> {
         Self::many(cloudy, std::slice::from_ref(key))
     }
 
-    pub(crate) fn many(cloudy: &Cloudy, keys: &[Key]) -> Result<Self> {
+    pub(crate) fn many(cloudy: &ModuleContext, keys: &[Key]) -> Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut guards = Vec::new();
         for key in keys {
@@ -1011,15 +1031,15 @@ mod tests {
         #[prost(int32, tag = "1")]
         x: i32,
     }
-    impl Topic for State {
-        const TYPE: &'static str = "PubState";
+    impl MessageType for State {
+        const TYPE_NAME: &'static str = "PubState";
         const DESCRIPTOR: Option<crate::Descriptor> = None;
-        const SCHEMA: u64 = 0xaaaa_bbbb_cccc_dddd;
+        const SCHEMA_FINGERPRINT: u64 = 0xaaaa_bbbb_cccc_dddd;
     }
 
     fn sample(payload: Vec<u8>, attachment: Option<Vec<u8>>) -> Sample {
         Sample {
-            key: Key::topic("lab", Some("src"), State::TYPE),
+            key: Key::topic("lab", Some("src"), State::TYPE_NAME),
             payload,
             attachment,
             timestamp: None,
@@ -1059,9 +1079,12 @@ mod tests {
     #[test]
     fn fingerprint_is_eight_bytes_little_endian() {
         assert_eq!(fingerprint(None), None);
-        let bytes = fingerprint(Some(State::SCHEMA)).expect("State has a fingerprint");
+        let bytes = fingerprint(Some(State::SCHEMA_FINGERPRINT)).expect("State has a fingerprint");
         assert_eq!(bytes.len(), 8);
-        assert_eq!(attachment_fingerprint(Some(&bytes)), Some(State::SCHEMA));
+        assert_eq!(
+            attachment_fingerprint(Some(&bytes)),
+            Some(State::SCHEMA_FINGERPRINT)
+        );
 
         assert_eq!(attachment_fingerprint(None), None);
         assert_eq!(attachment_fingerprint(Some(&[])), None);
@@ -1073,7 +1096,10 @@ mod tests {
     #[test]
     fn schema_matches_and_missing_malformed_or_mismatched_metadata_drop() {
         let payload = State { x: 7 }.encode_to_vec();
-        let good = sample(payload.clone(), fingerprint(Some(State::SCHEMA)));
+        let good = sample(
+            payload.clone(),
+            fingerprint(Some(State::SCHEMA_FINGERPRINT)),
+        );
         let mut warned = HashSet::new();
         assert_eq!(
             unwrap_sample::<State>(&good, "src".into(), &mut warned).map(|e| e.value),
@@ -1106,7 +1132,10 @@ mod tests {
     fn an_undecodable_payload_is_skipped() {
         let mut warned = HashSet::new();
         // A valid fingerprint with garbage behind it: the fingerprint check cannot catch this.
-        let broken = sample(vec![0xff, 0xff, 0xff], fingerprint(Some(State::SCHEMA)));
+        let broken = sample(
+            vec![0xff, 0xff, 0xff],
+            fingerprint(Some(State::SCHEMA_FINGERPRINT)),
+        );
         assert!(unwrap_sample::<State>(&broken, "src".into(), &mut warned).is_none());
         assert!(
             warned.is_empty(),

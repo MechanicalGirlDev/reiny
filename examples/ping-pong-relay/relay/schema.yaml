@@ -1,12 +1,9 @@
-version: 2
+version: 3
 schema:
   project:
     name: "relay"
     version: "0.1.0"
-    description: "relay module"
-    authors: ["nop <noplab90@gmail.com>"]
-    license: "MIT"
-  publications:
+  exported_types:
     Relayed:
       proto: "proto/relayed.proto"
       message: "relay.Relayed"

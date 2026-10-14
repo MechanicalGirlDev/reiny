@@ -2,10 +2,10 @@
 
 use reiny::prelude::*;
 
-use crate::internals::{Ping, Pong};
+use crate::shared_types::{Ping, Pong};
 
 #[reiny::main]
-async fn main(cloudy: Cloudy) -> reiny::Result<()> {
+async fn main(cloudy: ModuleContext) -> reiny::Result<()> {
     let pings = cloudy.output::<Ping>("ping")?;
     let mut pongs = cloudy.input::<Pong>("pong")?;
     // Register the bound source readiness watch before announcing local readiness.

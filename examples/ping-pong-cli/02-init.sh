@@ -7,5 +7,5 @@ mkdir -p pong
 ( cd pong && reiny init --publish Pong )
 
 echo
-echo "    pong/ が launch プロジェクトになった(publications = Pong)。"
+echo "    pong/ が launch プロジェクトになった(exported_types = Pong)。"
 echo "    次は 03-add.sh(ping ↔ pong の購読を配線)。"

@@ -8,7 +8,7 @@ The core is a `#![no_std]` **sans-I/O** state machine, `Link`. It never touches
 I/O: you feed it the bytes you received (`feed`) and copy out the bytes it wants
 sent (`drain` / `drain_frame`). Wire it to whatever your board or OS gives you
 in four lines, then publish / subscribe / call through **named static ports** — the same
-`Topic` / `Service` traits as the rest of reiny, with the type name carried on
+`MessageType` / `Service` traits as the rest of reiny, with the type name carried on
 the wire as a 32-bit hash.
 
 ```rust,ignore
@@ -40,10 +40,10 @@ fingerprint are rejected. Reply payloads begin with the response fingerprint
 (8 bytes, little-endian), followed by the prost response; requests retain their
 request-type hash. Missing or mismatched response metadata is rejected before
 decoding. `compile_ports` reads an explicit YAML contract: `in` and `out` map
-port names to message types, and `uses` and `provides` map names to request and
+port names to message types, and `rpc_clients` and `rpc_servers` map names to request and
 response types. The schema catalog alone grants no ports. Every declaration
 and typed send, request, or reply checks the selected name, direction, type,
-and fingerprint. Client ports must be declared with `calls` before I/O starts.
+and fingerprint. Client ports must be declared with `rpc_client` before I/O starts.
 Hello also advertises RPC response fingerprints as metadata-only type entries;
 these consume type-table capacity but grant no publish, subscribe, or service permission.
 

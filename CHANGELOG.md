@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Breaking migration
+
+- `Cloudy` becomes `ModuleContext`; `Topic` becomes `MessageType`, with
+  `TYPE_NAME` (complete protobuf name, including its package) and
+  `SCHEMA_FINGERPRINT`. Package-less names remain valid; `Descriptor`,
+  `DESCRIPTOR`, and the request-response `Service` trait remain. Rebuild peers:
+  wire keys and Link hashes now include packages. Fingerprints are unchanged.
+- SDK `uses`/`provides` become `rpc_client`/`rpc_server`, and `Caller`/`Server`
+  become `RpcClient`/`RpcServer`. Link declarations and static directions use
+  the same RPC names; static YAML sections are `rpc_clients`/`rpc_servers`.
+- Module manifests, type catalogs, and static port files use version 3. Catalog
+  definitions move to `schema.exported_types`, `schema.shared_types`, and
+  `schema.schema_crates.<name>.{crate,protos,depends_on}`. Replace workspace
+  project role lists with their deduplicated `types` union and remove ignored
+  description/version metadata. Package `schema.dependencies` stays unchanged.
+  Generated modules are `exported_types`, `shared_types`, and
+  `dependencies::<project>`. Legacy and unknown catalog fields are rejected.
+- Resolved bindings and reports remain independently version 2 for this increment.
+- `reiny compress` becomes `reiny bundle`. Removed names have no aliases.
+
 All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
 `reiny-link`, `reiny-iceoryx2`, `reiny-ros2`, `reiny-build`, `reiny-macros`,
 `reiny-launch`, `reiny-cli`, `reiny-ffi`).
@@ -15,13 +35,13 @@ Versions are kept in lockstep via `[workspace.package].version`.
 - Resolved named connections and alias paths are shared by runtime binding
   construction and plan rendering instead of repeatedly traversing aliases.
 - Concrete endpoint policy validation is shared by core, SDK, CLI and launcher.
-- Compression uses prepared app configuration trees and structural binding
+- Bundling uses prepared app configuration trees and structural binding
   equality while retaining bundle reload and content verification.
 
 ### Breaking Rust API
 
 - `ModuleCall.inputs` and `outputs` use `PortConnection` instead of `PortSpec`.
-  YAML version 2 and existing explicit default policy fields remain supported.
+  YAML version 3 retains existing explicit default invocation policy fields.
 - `DeploymentPlan` includes `connections`; Rust struct literals must supply it.
 
 ## 0.10.1 - 2026-10-13

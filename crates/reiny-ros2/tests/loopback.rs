@@ -14,10 +14,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use reiny::bindings::{
-    CONTRACT_VERSION, EndpointContract, InputBinding, ModuleBindings, OutputBinding, PortKind,
+    EndpointContract, InputBinding, MODULE_BINDINGS_VERSION, ModuleBindings, OutputBinding,
+    PortKind,
 };
 use reiny::engine::Local;
-use reiny::{Cloudy, Qos, RuntimeOptions, Service, Topic};
+use reiny::{MessageType, ModuleContext, Qos, RuntimeOptions, Service};
 use reiny_ros2::Ros;
 use reiny_ros2::ros2_client::dds::rustdds::DomainParticipantBuilder;
 use reiny_ros2::ros2_client::ros2::{QosPolicyBuilder, policy};
@@ -35,9 +36,9 @@ struct State {
     #[prost(double, tag = "1")]
     x: f64,
 }
-impl Topic for State {
-    const TYPE: &'static str = "RosState";
-    const SCHEMA: u64 = 0x1234;
+impl MessageType for State {
+    const TYPE_NAME: &'static str = "RosState";
+    const SCHEMA_FINGERPRINT: u64 = 0x1234;
     const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 
@@ -46,9 +47,9 @@ struct Cmd {
     #[prost(uint32, tag = "1")]
     v: u32,
 }
-impl Topic for Cmd {
-    const TYPE: &'static str = "RosCmd";
-    const SCHEMA: u64 = 0x1234;
+impl MessageType for Cmd {
+    const TYPE_NAME: &'static str = "RosCmd";
+    const SCHEMA_FINGERPRINT: u64 = 0x1234;
     const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 
@@ -64,14 +65,14 @@ struct Sum {
     #[prost(int32, tag = "1")]
     sum: i32,
 }
-impl Topic for Add {
-    const TYPE: &'static str = "RosAdd";
-    const SCHEMA: u64 = 0x1234;
+impl MessageType for Add {
+    const TYPE_NAME: &'static str = "RosAdd";
+    const SCHEMA_FINGERPRINT: u64 = 0x1234;
     const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
-impl Topic for Sum {
-    const TYPE: &'static str = "RosSum";
-    const SCHEMA: u64 = 0x1234;
+impl MessageType for Sum {
+    const TYPE_NAME: &'static str = "RosSum";
+    const SCHEMA_FINGERPRINT: u64 = 0x1234;
     const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 impl Service for Add {
@@ -88,14 +89,14 @@ struct Echoed {
     #[prost(string, tag = "1")]
     text: String,
 }
-impl Topic for Echo {
-    const TYPE: &'static str = "RosEcho";
-    const SCHEMA: u64 = 0x1234;
+impl MessageType for Echo {
+    const TYPE_NAME: &'static str = "RosEcho";
+    const SCHEMA_FINGERPRINT: u64 = 0x1234;
     const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
-impl Topic for Echoed {
-    const TYPE: &'static str = "RosEchoed";
-    const SCHEMA: u64 = 0x1234;
+impl MessageType for Echoed {
+    const TYPE_NAME: &'static str = "RosEchoed";
+    const SCHEMA_FINGERPRINT: u64 = 0x1234;
     const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 impl Service for Echo {
@@ -159,13 +160,13 @@ fn context(domain_id: u16) -> Context {
     Context::from_domain_participant(builder.build().expect("participant")).expect("context")
 }
 
-async fn open(bus: Local, id: &str, bindings: ModuleBindings) -> Cloudy {
+async fn open(bus: Local, id: &str, bindings: ModuleBindings) -> ModuleContext {
     let mut opts = RuntimeOptions::new(id);
     opts.domain = "ros".to_string();
     opts.engine = Some(Arc::new(bus));
     opts.install_tracing = false;
     opts.module_bindings = Some(bindings);
-    Cloudy::open(opts).await.expect("cloudy")
+    ModuleContext::open(opts).await.expect("cloudy")
 }
 
 fn bindings(
@@ -184,7 +185,7 @@ fn bindings(
         ..Default::default()
     };
     ModuleBindings {
-        version: CONTRACT_VERSION,
+        version: MODULE_BINDINGS_VERSION,
         namespace: id.to_string(),
         endpoint_namespace: id.to_string(),
         inputs: inputs
@@ -235,12 +236,12 @@ async fn bridge_round_trips_with_a_ros_node() {
         bindings(
             "bridge",
             &[
-                ("state", State::TYPE, None, "g"),
-                ("add", Add::TYPE, Some(Sum::TYPE), "g"),
+                ("state", State::TYPE_NAME, None, "g"),
+                ("add", Add::TYPE_NAME, Some(Sum::TYPE_NAME), "g"),
             ],
             &[
-                ("cmd", Cmd::TYPE, None),
-                ("echo", Echo::TYPE, Some(Echoed::TYPE)),
+                ("cmd", Cmd::TYPE_NAME, None),
+                ("echo", Echo::TYPE_NAME, Some(Echoed::TYPE_NAME)),
             ],
         ),
     )
@@ -251,12 +252,12 @@ async fn bridge_round_trips_with_a_ros_node() {
         bindings(
             "g",
             &[
-                ("cmd", Cmd::TYPE, None, "bridge"),
-                ("echo", Echo::TYPE, Some(Echoed::TYPE), "bridge"),
+                ("cmd", Cmd::TYPE_NAME, None, "bridge"),
+                ("echo", Echo::TYPE_NAME, Some(Echoed::TYPE_NAME), "bridge"),
             ],
             &[
-                ("state", State::TYPE, None),
-                ("add", Add::TYPE, Some(Sum::TYPE)),
+                ("state", State::TYPE_NAME, None),
+                ("add", Add::TYPE_NAME, Some(Sum::TYPE_NAME)),
             ],
         ),
     )
@@ -390,7 +391,7 @@ async fn bridge_round_trips_with_a_ros_node() {
     // --- the reiny-side launch ---
     let states = launch.output::<State>("state").unwrap();
     let mut cmds = launch.input::<Cmd>("cmd").unwrap();
-    let mut add = launch.provides::<Add>("add").unwrap();
+    let mut add = launch.rpc_server::<Add>("add").unwrap();
     tokio::spawn(async move {
         while let Some(req) = add.recv().await {
             let sum = req.value.a + req.value.b;
@@ -434,7 +435,7 @@ async fn bridge_round_trips_with_a_ros_node() {
 
     // a reiny caller → a ROS service. Until the bridge's DDS client discovers the ROS server the
     // request is lost, so retry on a short deadline.
-    let caller = launch.uses::<Echo>("echo").expect("declared caller");
+    let caller = launch.rpc_client::<Echo>("echo").expect("declared caller");
     let mut echoed = None;
     for _ in 0..5 {
         if let Ok(r) = caller

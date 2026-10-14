@@ -2,10 +2,10 @@
 
 use super::{ManagedPort, Registration};
 use crate::bindings::{PortKind, PortReport, ResponseReport};
-use crate::{Cloudy, Result, validate_segment};
+use crate::{ModuleContext, Result, validate_segment};
 use std::sync::Arc;
 
-impl Cloudy {
+impl ModuleContext {
     pub(crate) fn bridge_rpc_port(
         &self,
         name: &str,
@@ -15,11 +15,7 @@ impl Cloudy {
     ) -> Result<ManagedPort> {
         let contract = self.named_contract(name, input, PortKind::Rpc)?;
         let mut ports = self.lock_ports(name, input)?;
-        let transport_type = contract
-            .type_name
-            .rsplit('.')
-            .next()
-            .unwrap_or(&contract.type_name);
+        let transport_type = contract.type_name.as_str();
         validate_segment("transport type", transport_type)?;
         if !input {
             anyhow::ensure!(

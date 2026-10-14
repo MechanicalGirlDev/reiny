@@ -1,4 +1,4 @@
-//! The zenoh engine — what `Cloudy` used to do directly up to 0.4, moved into [`Engine`]'s shape.
+//! The zenoh engine — what `ModuleContext` used to do directly up to 0.4, moved into [`Engine`]'s shape.
 //! The wire (key shape, attachments, verbatim chunks) is unchanged from 0.4.
 
 use std::any::Any;

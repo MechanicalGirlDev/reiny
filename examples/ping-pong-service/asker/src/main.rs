@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use reiny::prelude::*;
 
-use crate::internals::Add;
+use crate::shared_types::Add;
 
 #[reiny::main]
-async fn main(cloudy: Cloudy) -> reiny::Result<()> {
-    let adder = cloudy.uses::<Add>("adder")?;
+async fn main(cloudy: ModuleContext) -> reiny::Result<()> {
+    let adder = cloudy.rpc_client::<Add>("adder")?;
     cloudy.ready()?;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut n = 0;

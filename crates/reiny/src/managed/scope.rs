@@ -1,8 +1,8 @@
 //! Internal transport-test helpers are unavailable to application code.
 
-use crate::{Cloudy, Result};
+use crate::{ModuleContext, Result};
 
-impl Cloudy {
+impl ModuleContext {
     pub(crate) fn ensure_standalone(&self) -> Result<()> {
         anyhow::ensure!(
             self.module.bindings.is_none(),

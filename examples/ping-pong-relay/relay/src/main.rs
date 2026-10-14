@@ -3,10 +3,10 @@
 use reiny::prelude::*;
 
 use crate::dependencies::ping::Ping;
-use crate::publications::Relayed;
+use crate::exported_types::Relayed;
 
 #[reiny::main]
-async fn main(cloudy: Cloudy) -> reiny::Result<()> {
+async fn main(cloudy: ModuleContext) -> reiny::Result<()> {
     let out = cloudy.output::<Relayed>("relayed")?;
     let mut incoming = cloudy.input::<Ping>("ping")?;
     cloudy.ready()?;

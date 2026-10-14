@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use reiny_link::transport::{Stream, Transport, Udp};
 use reiny_link::{
-    CallError, Host, HostEvent, HostLink, PortDirection, PortType, Service, StaticPort, Topic, wire,
+    CallError, Host, HostEvent, HostLink, MessageType, PortDirection, PortType, Service,
+    StaticPort, wire,
 };
 use tokio::time::timeout;
 
@@ -17,9 +18,9 @@ struct State {
     #[prost(uint32, tag = "1")]
     seq: u32,
 }
-impl Topic for State {
-    const TYPE: &'static str = "LoopState";
-    const SCHEMA: u64 = 0x11;
+impl MessageType for State {
+    const TYPE_NAME: &'static str = "LoopState";
+    const SCHEMA_FINGERPRINT: u64 = 0x11;
     const DESCRIPTOR: Option<reiny_link::Descriptor> = None;
 }
 
@@ -30,9 +31,9 @@ struct Add {
     #[prost(int32, tag = "2")]
     b: i32,
 }
-impl Topic for Add {
-    const TYPE: &'static str = "LoopAdd";
-    const SCHEMA: u64 = 0x22;
+impl MessageType for Add {
+    const TYPE_NAME: &'static str = "LoopAdd";
+    const SCHEMA_FINGERPRINT: u64 = 0x22;
     const DESCRIPTOR: Option<reiny_link::Descriptor> = None;
 }
 #[derive(Clone, PartialEq, prost::Message)]
@@ -40,9 +41,9 @@ struct Sum {
     #[prost(int32, tag = "1")]
     s: i32,
 }
-impl Topic for Sum {
-    const TYPE: &'static str = "LoopSum";
-    const SCHEMA: u64 = 0x33;
+impl MessageType for Sum {
+    const TYPE_NAME: &'static str = "LoopSum";
+    const SCHEMA_FINGERPRINT: u64 = 0x33;
     const DESCRIPTOR: Option<reiny_link::Descriptor> = None;
 }
 impl Service for Add {
@@ -53,35 +54,35 @@ const PORTS: &[StaticPort] = &[
     StaticPort {
         name: "state",
         direction: PortDirection::Output,
-        ty: State::TYPE,
-        schema: State::SCHEMA,
+        ty: State::TYPE_NAME,
+        schema: State::SCHEMA_FINGERPRINT,
         response: None,
     },
     StaticPort {
         name: "state",
         direction: PortDirection::Input,
-        ty: State::TYPE,
-        schema: State::SCHEMA,
+        ty: State::TYPE_NAME,
+        schema: State::SCHEMA_FINGERPRINT,
         response: None,
     },
     StaticPort {
         name: "addition",
-        direction: PortDirection::Service,
-        ty: Add::TYPE,
-        schema: Add::SCHEMA,
+        direction: PortDirection::RpcServer,
+        ty: Add::TYPE_NAME,
+        schema: Add::SCHEMA_FINGERPRINT,
         response: Some(PortType {
-            ty: Sum::TYPE,
-            schema: Sum::SCHEMA,
+            ty: Sum::TYPE_NAME,
+            schema: Sum::SCHEMA_FINGERPRINT,
         }),
     },
     StaticPort {
         name: "addition",
-        direction: PortDirection::Client,
-        ty: Add::TYPE,
-        schema: Add::SCHEMA,
+        direction: PortDirection::RpcClient,
+        ty: Add::TYPE_NAME,
+        schema: Add::SCHEMA_FINGERPRINT,
         response: Some(PortType {
-            ty: Sum::TYPE,
-            schema: Sum::SCHEMA,
+            ty: Sum::TYPE_NAME,
+            schema: Sum::SCHEMA_FINGERPRINT,
         }),
     },
 ];
@@ -92,8 +93,8 @@ const WAIT: Duration = Duration::from_secs(5);
 fn mcu_link() -> HostLink {
     let mut l = HostLink::host("mcu", PORTS).unwrap();
     l.publishes::<State>("state").unwrap();
-    l.serves::<Add>("addition").unwrap();
-    l.calls::<Add>("addition").unwrap();
+    l.rpc_server::<Add>("addition").unwrap();
+    l.rpc_client::<Add>("addition").unwrap();
     l
 }
 
@@ -101,7 +102,7 @@ fn mcu_link() -> HostLink {
 fn pc_link() -> HostLink {
     let mut l = HostLink::host("pc", PORTS).unwrap();
     l.subscribes::<State>("state").unwrap();
-    l.calls::<Add>("addition").unwrap();
+    l.rpc_client::<Add>("addition").unwrap();
     l
 }
 

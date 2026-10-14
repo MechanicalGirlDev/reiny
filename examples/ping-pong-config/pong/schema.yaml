@@ -1,12 +1,9 @@
-version: 2
+version: 3
 schema:
   project:
     name: "pong"
     version: "0.1.0"
-    description: "pong module"
-    authors: ["nop <noplab90@gmail.com>"]
-    license: "MIT"
-  publications:
+  exported_types:
     Pong:
       proto: "proto/pong.proto"
       message: "pong.Pong"

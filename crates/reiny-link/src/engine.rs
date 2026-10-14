@@ -124,7 +124,7 @@ impl State {
 }
 
 impl LinkEngine {
-    /// Start running `host`. `domain` is the same one the `Cloudy` above uses (a link has no domain
+    /// Start running `host`. `domain` is the same one the `ModuleContext` above uses (a link has no domain
     /// of its own). Call it inside a tokio runtime.
     #[must_use]
     pub fn spawn(host: Host, domain: &str) -> Self {
@@ -228,12 +228,12 @@ async fn run(host: Arc<Host>, domain: String, state: Arc<Mutex<State>>) {
             } => {
                 let st = lock(&state);
                 let Some(peer) = &st.peer else { continue };
-                // A type the peer never announced with `calls` has no name here, so refuse it.
+                // A type the peer never announced with `rpc_client` has no name here, so refuse it.
                 let Some(t) = peer.types.iter().find(|t| t.hash == hash) else {
                     let _ = host.reply_err_raw(
                         seq,
                         hash,
-                        "unknown request type (declare it with calls())",
+                        "unknown request type (declare it with rpc_client())",
                     );
                     continue;
                 };

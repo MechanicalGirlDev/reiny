@@ -4,7 +4,7 @@
 //! get", latest-wins, hooking into `Shutdown`, a service's `NoReply` / `Timeout` decision) is reiny's
 //! own code; all it leans on the bus for is publish / subscribe / liveliness / queryable + get
 //! (`docs/design/0.5.0.md` §1.1). That much is carved out as [`Engine`], and
-//! [`Cloudy`](crate::Cloudy) holds an `Arc<dyn Engine>`. The default is zenoh ([`Zenoh`], feature
+//! [`ModuleContext`](crate::ModuleContext) holds an `Arc<dyn Engine>`. The default is zenoh ([`Zenoh`], feature
 //! `zenoh`); for tests there is an in-process bus ([`Local`]).
 //!
 //! # The contract
@@ -82,7 +82,7 @@ pub struct Key {
     pub domain: String,
     /// The sending launch's canonical slash-separated namespace. `None` = all depths (`**`).
     pub source: Option<String>,
-    /// The type segment ([`Topic::TYPE`](crate::Topic::TYPE)). `None` = all of them (`*`). A launch's
+    /// The type segment ([`MessageType::TYPE_NAME`](crate::MessageType::TYPE_NAME)). `None` = all of them (`*`). A launch's
     /// token puts the verbatim `@launch` in the type slot (which `*` does not match).
     pub ty: Option<String>,
     /// The verbatim chunk after the type (`@service` / `@schema/<message>`). It matches neither `*` nor
@@ -476,7 +476,7 @@ mod tests {
         assert!(!any.matches(&sub_key), "publishers::<T>() must not see it");
         assert!(!all.matches(&sub_key), "bag record's */* must not see it");
         assert_eq!(sub_key.to_string(), "reiny/lab/a/T/@sub");
-        // `*` inside a chunk is one non-verbatim segment: how `Cloudy::schemas` reaches every message.
+        // `*` inside a chunk is one non-verbatim segment: how `ModuleContext::schemas` reaches every message.
         let schemas = any.with_chunk(format!("{SCHEMA_CHUNK}/*"));
         let described =
             Key::topic("lab", Some("a"), "T").with_chunk(format!("{SCHEMA_CHUNK}/hs.T"));

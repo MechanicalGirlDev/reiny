@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use reiny::prelude::*;
 
-use crate::publications::Ping;
+use crate::exported_types::Ping;
 
 #[reiny::main]
-async fn main(cloudy: Cloudy) -> reiny::Result<()> {
+async fn main(cloudy: ModuleContext) -> reiny::Result<()> {
     let pings = cloudy.output::<Ping>("ping")?;
     cloudy.ready()?;
 

@@ -1,13 +1,13 @@
 # ping-pong-workspace
 
 The same Ping/Pong cycle as the ring example, with one shared proto catalog.
-The root `schema.yaml` contains `schema.internals` and `schema.projects`; each leaf
+The root `schema.yaml` contains `schema.shared_types` and `schema.projects`; each leaf
 has a runtime `main.yaml` with ports and a process run declaration.
 Codegen discovers the root catalog independently of those runtime manifests. Proto paths remain relative
 to the catalog, not to the leaf directory.
 
 Both applications generate the messages independently and import
-`crate::internals::{Ping, Pong}`. The ring example instead puts public catalogs and
+`crate::shared_types::{Ping, Pong}`. The ring example instead puts public catalogs and
 protos in each leaf.
 
 ```rust

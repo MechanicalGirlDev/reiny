@@ -2,7 +2,7 @@
 
 The shared schema is split into `pingpong-geometry` (Point) and `pingpong-msg`
 (Ping/Pong, which refer to Point). The root `schema.yaml` declares parts under
-`schema.schema.geometry` and `schema.schema.msg`. Type ownership follows proto paths.
+`schema.schema_crates.geometry` and `schema.schema_crates.msg`. Type ownership follows proto paths.
 
 Geometry exports include paths and owned descriptor names through Cargo `links`
 metadata. Cargo passes them to directly dependent build scripts as `DEP_*`;
@@ -11,7 +11,7 @@ referenced from geometry rather than generated again in msg. The application
 assigns a geometry Point directly to `Ping.at`, proving shared type ownership
 at compile time.
 
-Each schema crate needs `links = "<package-name>"`. Schema `depends` lists must
+Each schema crate needs `links = "<package-name>"`. Schema `depends_on` lists must
 be transitively closed and have matching direct Cargo dependencies, because
 Cargo forwards build metadata only across direct dependency edges.
 

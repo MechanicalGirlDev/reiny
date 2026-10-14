@@ -4,7 +4,7 @@ use super::*;
 fn config_keys_are_idents_and_values_scalars() {
     let manifest = |config: &str| {
         format!(
-            "version: 2\nschema:\n  project: {{ name: app }}\n  publications:\n    A: {{ proto: proto/a.proto, message: a.A }}\n  config:\n    {config}\n"
+            "version: 3\nschema:\n  project: {{ name: app }}\n  exported_types:\n    A: {{ proto: proto/a.proto, message: a.A }}\n  config:\n    {config}\n"
         )
     };
     let f = Fixture::new("config-key");
@@ -29,7 +29,7 @@ fn describe_reports_config_and_services() {
     f.write(
         "schema.yaml",
         r"
-{version: 2,schema: {project: {name: calc,version: 0.1.0},publications: {Add: {proto: proto/calc.proto,message: calc.Add},Sum: {proto: proto/calc.proto,message: calc.Sum}},services: {Adder: {request: Add,response: Sum}},config: {rate_hz: 10,name: calc}}}
+{version: 3,schema: {project: {name: calc,version: 0.1.0},exported_types: {Add: {proto: proto/calc.proto,message: calc.Add},Sum: {proto: proto/calc.proto,message: calc.Sum}},services: {Adder: {request: Add,response: Sum}},config: {rate_hz: 10,name: calc}}}
 ",
     );
 

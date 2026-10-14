@@ -1,6 +1,8 @@
 # Modules and `main.yaml`
 
 This is the normative guide for describing and running a reiny deployment.
+A module definition is reusable; an instance is one invocation of it. Each
+executable instance is a graph node whose process belongs to a runtime generation.
 Every directory that takes part has exactly one `main.yaml`. The same file
 format covers three roles:
 
@@ -20,7 +22,7 @@ history only.
 ## Root
 
 ```yaml
-version: 2
+version: 3
 deployment: "ping-pong-relay"      # deployment identity
 # domain: "lab"                    # optional, defaults to the deployment name
 providers:
@@ -41,8 +43,9 @@ modules:
       ping: { from: "ping.ping" }
 ```
 
-`version` is always `2`. Only the root sets `deployment`, `domain` and
-`providers`.
+`version` is always `3`. Only the root sets `deployment`, `domain` and
+`providers`. The logical domain is a Reiny key-space segment, independent of
+`ROS_DOMAIN_ID`; it is not an ACL or an authorization boundary.
 
 ### Providers
 
@@ -108,7 +111,7 @@ modules:
 ## Leaf modules
 
 ```yaml
-version: 2
+version: 3
 in:
   ping: { type: "ping.Ping" }
 out:
@@ -186,7 +189,7 @@ Keep reusable definitions in `apps/<name>/main.yaml` and deployment values in
 
 ```yaml
 # projects/lab/main.yaml
-version: 2
+version: 3
 deployment: lab
 providers:
   process: { type: process }
@@ -225,42 +228,41 @@ catalogs without executable definitions.
 
 ```yaml
 # schema.yaml
-version: 2
+version: 3
 schema:
-  internals:
+  shared_types:
     Ping: {proto: proto/ping.proto, message: ping.Ping}
   projects:
     ping:
-      publications: [Ping]
+      types: [Ping]
 ```
 
 Catalog-relative proto and dependency paths keep their meaning when moving
 an existing `schema` block to a sibling `schema.yaml`. Catalogs supply payload
 types and fingerprints, never endpoint permissions or runtime connections.
 
-Build-time catalogs also require `version: 2`. Shared schema crates are named
-parts under `schema.schema.<name>`, with `crate`, a nonempty `protos` list, and
-optional `depends` part names. This applies to one-crate catalogs too; the
+Build-time catalogs also require `version: 3`. Shared schema crates are named
+parts under `schema.schema_crates.<name>`, with `crate`, a nonempty `protos` list, and
+optional `depends_on` part names. This applies to one-crate catalogs too; the
 legacy `schema.schema.crate` shortcut is rejected.
 
 ## Namespaces and topics
 
-Each executable gets a logical namespace `deployment/module/nested...`. Topic
-keys still carry the short `Topic::TYPE`, so Link hashes and existing wire
-keys don't change. The fully qualified message name and schema fingerprint are
-checked locally when a port opens, and again across the reports of connected
-modules.
+Each executable instance gets a logical namespace `deployment/module/nested...`.
+Message keys carry the complete protobuf `MessageType::TYPE_NAME`, including its
+package; package-less names remain valid. Link hashes use that same full name.
+Ports and connected module reports compare exact type names and fingerprints.
 
 ## Writing a managed executable
 
-`Cloudy::open` requires the resolved bindings supplied by `apply` / `run`, even
+`ModuleContext::open` requires the resolved bindings supplied by `apply` / `run`, even
 for an executable with no ports. Missing bindings fail before opening the engine.
 Schema generation does not authorize publishing, subscribing or RPC. The SDK
 exposes only named data endpoints and no underlying engine/session.
 
 ```rust,ignore
 #[reiny::main]
-async fn main(cloudy: Cloudy) -> reiny::Result<()> {
+async fn main(cloudy: ModuleContext) -> reiny::Result<()> {
     let out = cloudy.output::<Relayed>("relayed")?;
     let mut incoming = cloudy.input::<Ping>("ping")?;
     cloudy.ready()?;           // sync; ports can't be created afterwards
@@ -292,22 +294,22 @@ Only control-plane launch/readiness/stop routes retain the original namespaces.
 - A `@stop` request is acknowledged on receipt. The ack means "stop
   requested", not "process exited".
 - Module communication needs an engine with query, liveliness and attachment support.
-  `LinkEngine` doesn't have attachments, so it's refused in managed mode.
-  Static Link applications use their own YAML-generated named port tables.
+  `LinkEngine` preserves fingerprints for bound SDK contexts. Static Link
+  applications use their own YAML-generated named port tables.
 - A namespaced ID is capped at 32 bytes on a link and an iceoryx2 key at 224
   bytes. Longer values fail; they're never truncated.
 
-`Cloudy::open` requires resolved `ModuleBindings`; `apply` and `run` supply them
+`ModuleContext::open` requires resolved `ModuleBindings`; `apply` and `run` supply them
 to executable modules. Opening an unbound SDK context is rejected. Applications
-use only named `input`, `output`, `uses`, and `provides` for communication.
+use only named `input`, `output`, `rpc_client`, and `rpc_server` for communication.
 There are no type-only publish/subscribe/RPC APIs or engine/session escape hatches.
 Do not substitute a schema catalog for an executable definition and explicit
 composition wiring.
 
 ### Named RPC and owned processes
 
-`cloudy.uses::<Request>("calculate")?` opens a named RPC input using its single
-configured server. `cloudy.provides::<Request>("calculate")?` implements an RPC
+`cloudy.rpc_client::<Request>("calculate")?` opens a named RPC input using its single
+configured server. `cloudy.rpc_server::<Request>("calculate")?` implements an RPC
 output. Both request and response types need compiled schema fingerprints.
 
 For an `owned_children` entry, resolve the helper with
@@ -339,7 +341,7 @@ publication and RPC server with a wired verification task.
 | `reiny status [path] [--json]` | Read state from the live owner. Retained state may show `owner_alive: false`. |
 | `reiny stop [path] [--json]` | Ask modules to stop cooperatively, then reap. Remaining owned process trees are killed. |
 | `reiny update [path] [--json]` | Move Git refs and rewrite `lock.yaml`. |
-| `reiny compress [path] [--out dist]` | Build and bundle a self-contained deployment. |
+| `reiny bundle [path] [--out dist]` | Build and bundle a self-contained deployment. |
 | `reiny new` / `init` / `add` | Scaffold a leaf module, or add a local schema dependency. |
 | `reiny check [path]` | Validate composition or describe the schema without compiling. |
 | `reiny build [--release]` | Prepare declared build artifacts without starting processes. |

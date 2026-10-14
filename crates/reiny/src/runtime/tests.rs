@@ -63,7 +63,7 @@ async fn managed_flag_without_value_fails_before_engine_startup() {
     assert_eq!(opts.id, "deployment/module");
 
     // When startup resolves managed options, then it cannot become standalone.
-    assert!(Cloudy::open(opts).await.is_err());
+    assert!(ModuleContext::open(opts).await.is_err());
 }
 
 #[test]

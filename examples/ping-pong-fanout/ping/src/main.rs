@@ -5,10 +5,10 @@ use std::time::Duration;
 use reiny::prelude::*;
 
 use crate::dependencies::pong::Pong;
-use crate::publications::Ping;
+use crate::exported_types::Ping;
 
 #[reiny::main]
-async fn main(cloudy: Cloudy) -> reiny::Result<()> {
+async fn main(cloudy: ModuleContext) -> reiny::Result<()> {
     let pings = cloudy.output::<Ping>("ping")?;
     let mut pongs_1 = cloudy.input::<Pong>("pong_1")?;
     let mut pongs_2 = cloudy.input::<Pong>("pong_2")?;

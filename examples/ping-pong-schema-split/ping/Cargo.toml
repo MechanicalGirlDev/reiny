@@ -7,7 +7,7 @@ authors.workspace = true
 
 [dependencies]
 reiny.workspace = true
-# スキーマクレート 2 つ。crate::internals は両方の和になるので、両方が要る。
+# スキーマクレート 2 つ。crate::shared_types は両方の和になるので、両方が要る。
 pingpong-geometry.workspace = true
 pingpong-msg.workspace = true
 tokio.workspace = true

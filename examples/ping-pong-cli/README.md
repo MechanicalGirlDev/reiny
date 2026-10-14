@@ -7,7 +7,7 @@ Build `reiny-cli` at the repository root and put `target/debug` on PATH first.
 ./run-all.sh
 ./05-run.sh
 # Alternatively package the built deployment:
-./06-compress.sh
+./06-bundle.sh
 ```
 
 The numbered steps clean generated projects, run `reiny new` and `reiny init`,
@@ -17,7 +17,7 @@ named-port loops, matching runtime leaf manifests, and separate schema catalogs.
 
 `04-build.sh` shares `CARGO_TARGET_DIR` between independent projects so the root
 process provider finds both binaries in `target/debug`. Cargo generates the locks.
-Run starts the composition with `reiny run main.yaml`; compress packages that
+Run starts the composition with `reiny run main.yaml`; bundle packages that
 same manifest and reachable artifacts.
 
 Generated `ping/`, `pong/`, and `target/` remain disposable. Checked-in files are

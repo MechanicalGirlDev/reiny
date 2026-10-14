@@ -187,7 +187,10 @@ const BUILD_RS: &str = "//! schema.yaml code generation.\nfn main() {\n    reiny
 
 fn main_yaml(proj: &str, bin: &str, publish: Option<&str>, locked: bool) -> Result<String> {
     let mut doc = Mapping::from_iter([
-        (Value::from("version"), Value::from(2)),
+        (
+            Value::from("version"),
+            Value::from(reiny::bindings::MODULE_MANIFEST_VERSION),
+        ),
         (Value::from("deployment"), Value::from(proj)),
         (
             Value::from("providers"),
@@ -228,11 +231,14 @@ fn main_yaml(proj: &str, bin: &str, publish: Option<&str>, locked: bool) -> Resu
 }
 
 fn schema_yaml(proj: &str, publish: Option<&str>) -> Result<String> {
-    let mut doc = Mapping::from_iter([(Value::from("version"), Value::from(2))]);
-    let mut publications = Mapping::new();
+    let mut doc = Mapping::from_iter([(
+        Value::from("version"),
+        Value::from(reiny_build::TYPE_CATALOG_VERSION),
+    )]);
+    let mut exported_types = Mapping::new();
     if let Some(ty) = publish {
         let lower = ty.to_lowercase();
-        publications.insert(
+        exported_types.insert(
             Value::from(ty),
             Value::Mapping(Mapping::from_iter([
                 (
@@ -253,7 +259,10 @@ fn schema_yaml(proj: &str, publish: Option<&str>) -> Result<String> {
                     (Value::from("version"), Value::from("0.1.0")),
                 ])),
             ),
-            (Value::from("publications"), Value::Mapping(publications)),
+            (
+                Value::from("exported_types"),
+                Value::Mapping(exported_types),
+            ),
             (Value::from("dependencies"), Value::Mapping(Mapping::new())),
         ])),
     );
@@ -270,8 +279,8 @@ fn proto(ty: &str) -> String {
 fn main_rs(publish: Option<&str>) -> String {
     match publish {
         Some(ty) => format!(
-            "use std::time::Duration;\nuse reiny::prelude::*;\nuse crate::publications::{ty};\n\n\
-             #[reiny::main]\nasync fn main(cloudy: Cloudy) -> reiny::Result<()> {{\n\
+            "use std::time::Duration;\nuse reiny::prelude::*;\nuse crate::exported_types::{ty};\n\n\
+             #[reiny::main]\nasync fn main(cloudy: ModuleContext) -> reiny::Result<()> {{\n\
              \x20   let out = cloudy.output::<{ty}>(\"{}\")?;\n\
              \x20   cloudy.ready()?;\n\
              \x20   let mut tick = tokio::time::interval(Duration::from_secs(1));\n\
@@ -288,7 +297,7 @@ fn main_rs(publish: Option<&str>) -> String {
              \x20   Ok(())\n}}\n",
             ty.to_lowercase()
         ),
-        None => "use reiny::prelude::*;\n\n#[reiny::main]\nasync fn main(cloudy: Cloudy) -> reiny::Result<()> {\n    cloudy.ready()?;\n    cloudy.shutdown().await;\n    Ok(())\n}\n".to_owned(),
+        None => "use reiny::prelude::*;\n\n#[reiny::main]\nasync fn main(cloudy: ModuleContext) -> reiny::Result<()> {\n    cloudy.ready()?;\n    cloudy.shutdown().await;\n    Ok(())\n}\n".to_owned(),
     }
 }
 
@@ -365,7 +374,7 @@ mod tests {
     fn dependencies_preserve_runtime_when_schema_dependency_is_added() {
         // Given
         let mut doc: Value = serde_yaml::from_str(
-            "version: 2\ndeployment: demo\nrun: {provider: process, bin: demo}\nschema:\n  project: {name: demo}\n  publications: {Ping: {proto: ping.proto}}\n",
+            "version: 3\ndeployment: demo\nrun: {provider: process, bin: demo}\nschema:\n  project: {name: demo}\n  exported_types: {Ping: {proto: ping.proto}}\n",
         ).unwrap();
         let before = doc.clone();
         // When
@@ -373,8 +382,8 @@ mod tests {
         // Then
         assert_eq!(doc["run"], before["run"]);
         assert_eq!(
-            doc["schema"]["publications"],
-            before["schema"]["publications"]
+            doc["schema"]["exported_types"],
+            before["schema"]["exported_types"]
         );
         assert_eq!(doc["schema"]["dependencies"]["ping"]["path"], "../ping");
         assert_eq!(doc["schema"]["dependencies"]["ping"]["version"], "0.1");
@@ -397,7 +406,7 @@ mod tests {
     #[test]
     fn dependencies_are_created_when_schema_is_absent() {
         // Given
-        let mut doc: Value = serde_yaml::from_str("version: 2\ndeployment: demo").unwrap();
+        let mut doc: Value = serde_yaml::from_str("version: 3\ndeployment: demo").unwrap();
         // When
         insert_dependency(&mut doc, "ping", "0.1", "../ping").unwrap();
         // Then
@@ -411,14 +420,14 @@ mod tests {
         let text = main_yaml("demo", "demo", Some("Ping"), false).unwrap();
         // Then
         let module: reiny_launch::ModuleManifest = serde_yaml::from_str(&text).unwrap();
-        assert_eq!(module.version, 2);
+        assert_eq!(module.version, 3);
         assert_eq!(module.outputs["ping"].type_name, "ping.Ping");
         assert!(!module.build.unwrap().locked);
         assert_eq!(module.run.unwrap().bin, "demo");
         let catalog: Value =
             serde_yaml::from_str(&schema_yaml("demo", Some("Ping")).unwrap()).unwrap();
         let schema = &catalog["schema"];
-        assert_eq!(schema["publications"]["Ping"]["message"], "ping.Ping");
+        assert_eq!(schema["exported_types"]["Ping"]["message"], "ping.Ping");
     }
 
     #[test]
@@ -427,7 +436,7 @@ mod tests {
         let text = main_yaml("demo", "demo", None, true).unwrap();
         // Then
         let module: reiny_launch::ModuleManifest = serde_yaml::from_str(&text).unwrap();
-        assert_eq!(module.version, 2);
+        assert_eq!(module.version, 3);
         assert!(module.inputs.is_empty());
         assert!(module.outputs.is_empty());
         assert!(module.build.unwrap().locked);

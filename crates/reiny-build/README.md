@@ -14,42 +14,42 @@ fn main() {
 `compile()` searches upward for the nearest `schema.yaml` and reads its required
 `schema` block. It never reads `main.yaml` or falls back past an invalid catalog.
 Runtime providers and module wiring are never evaluated by codegen.
-Catalogs and runtime manifests require `version: 2`; version 1 is rejected.
+Catalogs and runtime manifests require `version: 3`; version 1 is rejected.
 It compiles the declared
 protos with prost, and writes `$OUT_DIR/reiny_generated.rs`. The output contains
-re-exports of the publication/dependency types, a `reiny::Topic` impl for each
+re-exports of the exported/shared/dependency types, a `reiny::MessageType` impl for each
 type (with a mandatory fingerprint and its descriptor), and - if `schema.config` is present - a typed
 `config::Config`.
 
-The schema block supports both per-project catalogs (`project`, `publications`,
-`dependencies`) and workspace catalogs (`internals`, `projects`, optional `schema`
+The schema block supports both per-project catalogs (`project`, `exported_types`,
+`dependencies`) and workspace catalogs (`shared_types`, `projects`, optional `schema_crates`
 crates and `services`). Proto and dependency paths are relative to the directory
 containing that catalog. Dependency projects provide their public catalog in
 their own `schema.yaml`.
 
-Shared schema crates use named parts under `schema.schema`, even when there is
+Shared schema crates use named parts under `schema.schema_crates`, even when there is
 only one crate. Each part declares `crate`, a nonempty list of owned `protos`,
-and optional `depends` part names. The legacy `schema.schema.crate` shortcut
+and optional `depends_on` part names. The legacy `schema.schema.crate` shortcut
 is rejected.
 
 ```yaml
-version: 2
+version: 3
 schema:
-  internals:
+  shared_types:
     Ping: { proto: proto/ping.proto, message: ping.Ping }
-  schema:
+  schema_crates:
     messages:
       crate: pingpong-schema
       protos: [proto/ping.proto]
   projects:
-    ping: { publications: [Ping] }
+    ping: { types: [Ping] }
 ```
 
 ```yaml
-version: 2
+version: 3
 schema:
   project: { name: ping }
-  publications:
+  exported_types:
     Ping: { proto: proto/ping.proto, message: ping.Ping }
   dependencies:
     pong: { path: ../pong }
@@ -70,21 +70,21 @@ include!(concat!(env!("OUT_DIR"), "/reiny_ports.rs"));
 ```
 
 ```yaml
-version: 2
+version: 3
 in:
   measurements: { type: sensors.Sample }
 out:
   commands: { type: control.Command }
-uses:
+rpc_clients:
   calculate: { type: calc.Request, response: calc.Response }
-provides:
+rpc_servers:
   reset: { type: control.Reset, response: control.ResetResult }
 ```
 
 FQNs resolve through `schema.yaml` to generated Rust types. The resulting
-`PORTS` slice contains `reiny::StaticPort` entries with `Topic::TYPE` wire names
-and `Topic::SCHEMA` fingerprints. `in` / `out` generate `Input` / `Output`;
-`uses` / `provides` generate `Client` / `Service`, including response metadata.
+`PORTS` slice contains `reiny::StaticPort` entries with `MessageType::TYPE_NAME` wire names
+and `MessageType::SCHEMA_FINGERPRINT` fingerprints. `in` / `out` generate `Input` / `Output`;
+`rpc_clients` / `rpc_servers` generate `RpcClient` / `RpcServer`, including response metadata.
 Runtime-style `in` / `out` entries with `kind: rpc` also generate client / service ports.
 The catalog alone grants no ports. Pass `PORTS` to `Link::new` or
 `HostLink::host`; port operations use the YAML names.

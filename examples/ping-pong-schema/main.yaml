@@ -1,4 +1,4 @@
-version: 2
+version: 3
 deployment: "ping-pong-schema"
 providers:
   process:

@@ -16,7 +16,7 @@ default = ["std", "serial", "engine"]
 std = ["dep:tokio", "prost/std", "cobs/std"]
 # `transport::serial::open`(tokio-serial)。`std` を含む。
 serial = ["std", "dep:tokio-serial"]
-# `LinkEngine`: `Host` を reiny の `Engine` として(`Cloudy` をリンクの上に置く / `reiny bridge`)。
+# `LinkEngine`: `Host` を reiny の `Engine` として(`ModuleContext` をリンクの上に置く / `reiny bridge`)。
 engine = ["std", "dep:reiny", "dep:tracing", "dep:anyhow"]
 
 [dependencies]

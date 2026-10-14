@@ -2,7 +2,7 @@
 //!
 //! `#[reiny::main]` does nothing but call [`RuntimeOptions::from_args`] → [`run_with`], so building
 //! the options yourself gets you the same entry point as a library. When the tokio runtime is yours
-//! already (tests, a bridge), [`Cloudy::open`] is the async entry point.
+//! already (tests, a bridge), [`ModuleContext::open`] is the async entry point.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -14,7 +14,7 @@ use tracing::Level;
 use crate::bindings::ModuleBindings;
 use crate::engine::Engine;
 use crate::managed::MODULE_REPORT_ENV;
-use crate::{Cloudy, DEFAULT_DOMAIN, Result};
+use crate::{DEFAULT_DOMAIN, ModuleContext, Result};
 
 mod startup;
 
@@ -78,7 +78,7 @@ pub struct RuntimeOptions {
     pub log_level: Level,
     /// tokio's worker thread count (unset = tokio's default, the CPU count).
     pub worker_threads: Option<usize>,
-    /// `--config <path>`. The raw material for [`Cloudy::config_table`](crate::Cloudy::config_table).
+    /// `--config <path>`. The raw material for [`ModuleContext::config_table`](crate::ModuleContext::config_table).
     pub config_path: Option<PathBuf>,
     /// A resolved named-port contract supplied directly by an embedding supervisor.
     pub module_bindings: Option<ModuleBindings>,
@@ -86,7 +86,7 @@ pub struct RuntimeOptions {
     pub module_bindings_path: Option<PathBuf>,
     /// Optional absolute runtime report path, defaulting to `REINY_MODULE_REPORT`.
     pub module_report_path: Option<PathBuf>,
-    /// The arguments reiny did not interpret. Passed straight to [`Cloudy::extra_args`](crate::Cloudy::extra_args).
+    /// The arguments reiny did not interpret. Passed straight to [`ModuleContext::extra_args`](crate::ModuleContext::extra_args).
     pub extra_args: Vec<String>,
     argument_errors: Vec<String>,
     bindings_requested: bool,
@@ -206,7 +206,7 @@ impl RuntimeOptions {
 
     /// The zenoh configuration: the `zenoh` source with `zenoh_overrides` layered on top.
     ///
-    /// The very path [`Cloudy::open`] goes through just before opening a session. The door for a tool
+    /// The very path [`ModuleContext::open`] goes through just before opening a session. The door for a tool
     /// that is not a launch but wants to be on the same fabric as one (`reiny bag` …) to avoid copying
     /// how `--zenoh-config` / `--connect` are interpreted.
     #[cfg(feature = "zenoh")]
@@ -245,7 +245,7 @@ impl RuntimeOptions {
 /// `async fn main(cloudy)`.
 pub fn run_with<F, Fut>(opts: RuntimeOptions, user: F) -> Result<()>
 where
-    F: FnOnce(Cloudy) -> Fut,
+    F: FnOnce(ModuleContext) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
     if opts.install_tracing {
@@ -261,7 +261,7 @@ where
     let rt = builder.enable_all().build()?;
 
     rt.block_on(async move {
-        let cloudy = Cloudy::open(opts).await?;
+        let cloudy = ModuleContext::open(opts).await?;
         let shutdown = cloudy.shutdown_handle();
         tokio::spawn(async move {
             wait_for_signal().await;

@@ -1,5 +1,5 @@
 //! Transport adapter tests over a duplex stream. Applications use named static ports;
-//! the host side exercises the low-level Engine boundary without an unbound Cloudy.
+//! the host side exercises the low-level Engine boundary without an unbound `ModuleContext`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests may fail by panicking
 
@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use prost::Message;
 use reiny::engine::{Engine, Guard, Key, Presence, QueryParams, SERVICE_CHUNK, SUB_CHUNK, Sample};
-use reiny::{Service, Topic};
+use reiny::{MessageType, Service};
 use reiny_link::transport::Stream;
 use reiny_link::{
     Host, HostEvent, HostLink, LinkEngine, PortDirection, PortType, StaticPort, wire,
@@ -21,9 +21,9 @@ struct Pos {
     #[prost(int32, tag = "1")]
     x: i32,
 }
-impl Topic for Pos {
-    const TYPE: &'static str = "EngPos";
-    const SCHEMA: u64 = 0x55;
+impl MessageType for Pos {
+    const TYPE_NAME: &'static str = "EngPos";
+    const SCHEMA_FINGERPRINT: u64 = 0x55;
     const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 
@@ -32,9 +32,9 @@ struct Cmd {
     #[prost(uint32, tag = "1")]
     v: u32,
 }
-impl Topic for Cmd {
-    const TYPE: &'static str = "EngCmd";
-    const SCHEMA: u64 = 0x66;
+impl MessageType for Cmd {
+    const TYPE_NAME: &'static str = "EngCmd";
+    const SCHEMA_FINGERPRINT: u64 = 0x66;
     const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 
@@ -45,9 +45,9 @@ struct Add {
     #[prost(int32, tag = "2")]
     b: i32,
 }
-impl Topic for Add {
-    const TYPE: &'static str = "EngAdd";
-    const SCHEMA: u64 = 0x77;
+impl MessageType for Add {
+    const TYPE_NAME: &'static str = "EngAdd";
+    const SCHEMA_FINGERPRINT: u64 = 0x77;
     const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 #[derive(Clone, PartialEq, prost::Message)]
@@ -55,9 +55,9 @@ struct Sum {
     #[prost(int32, tag = "1")]
     s: i32,
 }
-impl Topic for Sum {
-    const TYPE: &'static str = "EngSum";
-    const SCHEMA: u64 = 0x88;
+impl MessageType for Sum {
+    const TYPE_NAME: &'static str = "EngSum";
+    const SCHEMA_FINGERPRINT: u64 = 0x88;
     const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 impl Service for Add {
@@ -70,9 +70,9 @@ struct Echo {
     #[prost(string, tag = "1")]
     text: String,
 }
-impl Topic for Echo {
-    const TYPE: &'static str = "EngEcho";
-    const SCHEMA: u64 = 0x99;
+impl MessageType for Echo {
+    const TYPE_NAME: &'static str = "EngEcho";
+    const SCHEMA_FINGERPRINT: u64 = 0x99;
     const DESCRIPTOR: Option<reiny::Descriptor> = None;
 }
 impl Service for Echo {
@@ -83,43 +83,43 @@ const PORTS: &[StaticPort] = &[
     StaticPort {
         name: "position",
         direction: PortDirection::Output,
-        ty: Pos::TYPE,
-        schema: Pos::SCHEMA,
+        ty: Pos::TYPE_NAME,
+        schema: Pos::SCHEMA_FINGERPRINT,
         response: None,
     },
     StaticPort {
         name: "command",
         direction: PortDirection::Input,
-        ty: Cmd::TYPE,
-        schema: Cmd::SCHEMA,
+        ty: Cmd::TYPE_NAME,
+        schema: Cmd::SCHEMA_FINGERPRINT,
         response: None,
     },
     StaticPort {
         name: "addition",
-        direction: PortDirection::Service,
-        ty: Add::TYPE,
-        schema: Add::SCHEMA,
+        direction: PortDirection::RpcServer,
+        ty: Add::TYPE_NAME,
+        schema: Add::SCHEMA_FINGERPRINT,
         response: Some(PortType {
-            ty: Sum::TYPE,
-            schema: Sum::SCHEMA,
+            ty: Sum::TYPE_NAME,
+            schema: Sum::SCHEMA_FINGERPRINT,
         }),
     },
     StaticPort {
         name: "echo",
-        direction: PortDirection::Client,
-        ty: Echo::TYPE,
-        schema: Echo::SCHEMA,
+        direction: PortDirection::RpcClient,
+        ty: Echo::TYPE_NAME,
+        schema: Echo::SCHEMA_FINGERPRINT,
         response: Some(PortType {
-            ty: Echo::TYPE,
-            schema: Echo::SCHEMA,
+            ty: Echo::TYPE_NAME,
+            schema: Echo::SCHEMA_FINGERPRINT,
         }),
     },
 ];
 
 const WAIT: Duration = Duration::from_secs(5);
 
-fn fingerprint<T: Topic>() -> Vec<u8> {
-    T::SCHEMA.to_le_bytes().to_vec()
+fn fingerprint<T: MessageType>() -> Vec<u8> {
+    T::SCHEMA_FINGERPRINT.to_le_bytes().to_vec()
 }
 
 fn watch(engine: &LinkEngine, key: &Key) -> (Guard, UnboundedReceiver<Presence>) {
@@ -166,7 +166,7 @@ async fn link_to_engine(link: HostLink, id: &str) -> (Arc<Host>, LinkEngine) {
     (mcu, engine)
 }
 
-fn request<T: Topic + Message>(value: &T) -> QueryParams {
+fn request<T: MessageType + Message>(value: &T) -> QueryParams {
     QueryParams {
         payload: Some(value.encode_to_vec()),
         attachment: Some(fingerprint::<T>()),
@@ -178,10 +178,10 @@ fn request<T: Topic + Message>(value: &T) -> QueryParams {
 async fn outgoing_data_and_requests_require_matching_fingerprints() {
     let mut link = HostLink::host("mcu", PORTS).unwrap();
     link.subscribes::<Cmd>("command").unwrap();
-    link.serves::<Add>("addition").unwrap();
+    link.rpc_server::<Add>("addition").unwrap();
     let (mcu, engine) = link_to_engine(link, "fingerprints").await;
     assert!(engine.caps().attachment);
-    let sub = Key::topic("lab", Some("mcu"), Cmd::TYPE).with_chunk(SUB_CHUNK);
+    let sub = Key::topic("lab", Some("mcu"), Cmd::TYPE_NAME).with_chunk(SUB_CHUNK);
     let (_watch, mut events) = watch(&engine, &sub);
     assert_eq!(
         timeout(WAIT, events.recv()).await.unwrap(),
@@ -189,14 +189,14 @@ async fn outgoing_data_and_requests_require_matching_fingerprints() {
     );
     let publisher = engine
         .publisher(
-            &Key::topic("lab", Some("host"), Cmd::TYPE),
+            &Key::topic("lab", Some("host"), Cmd::TYPE_NAME),
             &reiny::Qos::default(),
         )
         .unwrap();
     for attachment in [
         None,
         Some(vec![0; 7]),
-        Some((Cmd::SCHEMA + 1).to_le_bytes().to_vec()),
+        Some((Cmd::SCHEMA_FINGERPRINT + 1).to_le_bytes().to_vec()),
     ] {
         assert!(
             publisher
@@ -206,7 +206,7 @@ async fn outgoing_data_and_requests_require_matching_fingerprints() {
         assert!(
             engine
                 .query(
-                    &Key::topic("lab", Some("mcu"), Add::TYPE),
+                    &Key::topic("lab", Some("mcu"), Add::TYPE_NAME),
                     QueryParams {
                         payload: Some(Add { a: 1, b: 2 }.encode_to_vec()),
                         attachment,
@@ -233,9 +233,9 @@ async fn hierarchical_peer_namespace_keeps_type_identity_and_exact_routing() {
     let mut link = HostLink::host(PEER, PORTS).unwrap();
     link.publishes::<Pos>("position").unwrap();
     link.subscribes::<Cmd>("command").unwrap();
-    link.serves::<Add>("addition").unwrap();
+    link.rpc_server::<Add>("addition").unwrap();
     let (mcu, engine) = link_to_engine(link, "deployment/host/bridge").await;
-    let position = Key::topic("lab", Some(PEER), Pos::TYPE);
+    let position = Key::topic("lab", Some(PEER), Pos::TYPE_NAME);
     let (_watch, mut events) = watch(&engine, &position);
     assert_eq!(
         timeout(WAIT, events.recv()).await.unwrap(),
@@ -243,13 +243,13 @@ async fn hierarchical_peer_namespace_keeps_type_identity_and_exact_routing() {
     );
     for key in [
         position.clone(),
-        Key::topic("lab", Some(PEER), Cmd::TYPE).with_chunk(SUB_CHUNK),
-        Key::topic("lab", Some(PEER), Add::TYPE).with_chunk(SERVICE_CHUNK),
+        Key::topic("lab", Some(PEER), Cmd::TYPE_NAME).with_chunk(SUB_CHUNK),
+        Key::topic("lab", Some(PEER), Add::TYPE_NAME).with_chunk(SERVICE_CHUNK),
     ] {
         assert_eq!(engine.alive(&key, WAIT).await.unwrap(), [key]);
     }
     let (_exact, mut exact) = subscribe(&engine, &position);
-    let (_recursive, mut recursive) = subscribe(&engine, &Key::topic("lab", None, Pos::TYPE));
+    let (_recursive, mut recursive) = subscribe(&engine, &Key::topic("lab", None, Pos::TYPE_NAME));
     assert!(mcu.send("position", &Pos { x: 9 }).unwrap());
     for sample in [
         timeout(WAIT, exact.recv()).await.unwrap().unwrap(),
@@ -268,7 +268,7 @@ async fn hierarchical_peer_namespace_keeps_type_identity_and_exact_routing() {
                     HostEvent::Request {
                         hash, seq, payload, ..
                     } => {
-                        assert_eq!(hash, wire::type_hash(Add::TYPE));
+                        assert_eq!(hash, wire::type_hash(Add::TYPE_NAME));
                         let add = Add::decode(payload.as_slice()).unwrap();
                         mcu.reply::<Add>("addition", seq, &Sum { s: add.a + add.b })
                             .unwrap();
@@ -281,7 +281,7 @@ async fn hierarchical_peer_namespace_keeps_type_identity_and_exact_routing() {
     };
     let cmd = engine
         .publisher(
-            &Key::topic("lab", Some("host"), Cmd::TYPE),
+            &Key::topic("lab", Some("host"), Cmd::TYPE_NAME),
             &reiny::Qos::default(),
         )
         .unwrap();
@@ -289,10 +289,10 @@ async fn hierarchical_peer_namespace_keeps_type_identity_and_exact_routing() {
         .unwrap();
     let event = timeout(WAIT, data_rx.recv()).await.unwrap().unwrap();
     assert_eq!(event.decode::<Cmd>(), Some(Cmd { v: 11 }));
-    let exact_key = Key::topic("lab", Some(PEER), Add::TYPE);
+    let exact_key = Key::topic("lab", Some(PEER), Add::TYPE_NAME);
     for key in [
-        Key::topic("lab", Some("deployment/arm"), Add::TYPE),
-        Key::topic("other", Some(PEER), Add::TYPE),
+        Key::topic("lab", Some("deployment/arm"), Add::TYPE_NAME),
+        Key::topic("other", Some(PEER), Add::TYPE_NAME),
         exact_key.with_chunk("@schema/probe.Add"),
     ] {
         let mut replies = engine.query(&key, request(&Add { a: 2, b: 3 })).unwrap();
@@ -321,12 +321,12 @@ async fn engine_over_declared_ports() {
     let mut link = HostLink::host("mcu", PORTS).unwrap();
     link.publishes_latched::<Pos>("position").unwrap();
     link.subscribes::<Cmd>("command").unwrap();
-    link.serves::<Add>("addition").unwrap();
-    link.calls::<Echo>("echo").unwrap();
+    link.rpc_server::<Add>("addition").unwrap();
+    link.rpc_client::<Echo>("echo").unwrap();
     let (mcu, engine) = link_to_engine(link, "host").await;
     assert!(mcu.link().lock().unwrap().peer_is_bridge());
     assert_eq!(mcu.peer().unwrap().1, Vec::<reiny_link::PeerType>::new());
-    let position = Key::topic("lab", Some("mcu"), Pos::TYPE);
+    let position = Key::topic("lab", Some("mcu"), Pos::TYPE_NAME);
     let (_watch, mut events) = watch(&engine, &position);
     assert_eq!(
         timeout(WAIT, events.recv()).await.unwrap(),
@@ -339,7 +339,7 @@ async fn engine_over_declared_ports() {
     assert_eq!(
         engine
             .alive(
-                &Key::topic("lab", Some("mcu"), Add::TYPE).with_chunk(SERVICE_CHUNK),
+                &Key::topic("lab", Some("mcu"), Add::TYPE_NAME).with_chunk(SERVICE_CHUNK),
                 WAIT
             )
             .await
@@ -349,7 +349,7 @@ async fn engine_over_declared_ports() {
     );
     assert_eq!(
         engine
-            .alive(&Key::topic("lab", Some("mcu"), Cmd::TYPE), WAIT)
+            .alive(&Key::topic("lab", Some("mcu"), Cmd::TYPE_NAME), WAIT)
             .await
             .unwrap(),
         Vec::<Key>::new()
@@ -357,7 +357,7 @@ async fn engine_over_declared_ports() {
     assert_eq!(
         engine
             .alive(
-                &Key::topic("lab", Some("mcu"), Cmd::TYPE).with_chunk(SUB_CHUNK),
+                &Key::topic("lab", Some("mcu"), Cmd::TYPE_NAME).with_chunk(SUB_CHUNK),
                 WAIT
             )
             .await
@@ -396,7 +396,7 @@ async fn engine_over_declared_ports() {
     assert_eq!(Pos::decode(sample.payload.as_slice()).unwrap().x, 1);
     let cmd = engine
         .publisher(
-            &Key::topic("lab", Some("host"), Cmd::TYPE),
+            &Key::topic("lab", Some("host"), Cmd::TYPE_NAME),
             &reiny::Qos::default(),
         )
         .unwrap();
@@ -404,7 +404,7 @@ async fn engine_over_declared_ports() {
         .unwrap();
     let event = timeout(WAIT, mcu.recv()).await.unwrap().unwrap();
     assert_eq!(event.decode::<Cmd>(), Some(Cmd { v: 7 }));
-    let service = Key::topic("lab", Some("mcu"), Add::TYPE);
+    let service = Key::topic("lab", Some("mcu"), Add::TYPE_NAME);
     let mut replies = engine
         .query(&service, request(&Add { a: 2, b: 3 }))
         .unwrap();
@@ -424,12 +424,12 @@ async fn engine_over_declared_ports() {
     assert_eq!(Sum::decode(sample.payload.as_slice()).unwrap().s, 5);
     let mut nobody = engine
         .query(
-            &Key::topic("lab", Some("ghost"), Add::TYPE),
+            &Key::topic("lab", Some("ghost"), Add::TYPE_NAME),
             request(&Add { a: 1, b: 1 }),
         )
         .unwrap();
     assert!(timeout(WAIT, nobody.next()).await.unwrap().is_none());
-    let echo_key = Key::topic("lab", Some("host"), Echo::TYPE);
+    let echo_key = Key::topic("lab", Some("host"), Echo::TYPE_NAME);
     let response_key = echo_key.clone();
     let responder = engine
         .respond(
@@ -472,9 +472,9 @@ async fn engine_over_declared_ports() {
 async fn peer_loss_retracts_presence() {
     let mut link = HostLink::host("mcu", PORTS).unwrap();
     link.publishes::<Pos>("position").unwrap();
-    link.serves::<Add>("addition").unwrap();
+    link.rpc_server::<Add>("addition").unwrap();
     let (mcu, engine) = link_to_engine(link, "loss").await;
-    let position = Key::topic("lab", Some("mcu"), Pos::TYPE);
+    let position = Key::topic("lab", Some("mcu"), Pos::TYPE_NAME);
     let (_watch, mut events) = watch(&engine, &position);
     assert_eq!(
         timeout(WAIT, events.recv()).await.unwrap(),
@@ -496,7 +496,7 @@ async fn peer_loss_retracts_presence() {
     assert_eq!(
         engine
             .alive(
-                &Key::topic("lab", Some("mcu"), Add::TYPE).with_chunk(SERVICE_CHUNK),
+                &Key::topic("lab", Some("mcu"), Add::TYPE_NAME).with_chunk(SERVICE_CHUNK),
                 WAIT
             )
             .await
@@ -511,7 +511,7 @@ async fn request_type_the_peer_never_announced_is_refused() {
     let (mcu, engine) = link_to_engine(link, "unannounced").await;
     let _server = engine
         .respond(
-            &Key::topic("lab", Some("host"), Echo::TYPE),
+            &Key::topic("lab", Some("host"), Echo::TYPE_NAME),
             Box::new(|_| panic!("undeclared client reached transport")),
         )
         .unwrap();
@@ -530,10 +530,13 @@ async fn request_type_the_peer_never_announced_is_refused() {
 #[tokio::test(flavor = "multi_thread")]
 async fn dropped_request_answers_with_an_error() {
     let mut link = HostLink::host("mcu", PORTS).unwrap();
-    link.calls::<Echo>("echo").unwrap();
+    link.rpc_client::<Echo>("echo").unwrap();
     let (mcu, engine) = link_to_engine(link, "dropped").await;
     let _server = engine
-        .respond(&Key::topic("lab", Some("host"), Echo::TYPE), Box::new(drop))
+        .respond(
+            &Key::topic("lab", Some("host"), Echo::TYPE_NAME),
+            Box::new(drop),
+        )
         .unwrap();
     let started = std::time::Instant::now();
     let error = mcu

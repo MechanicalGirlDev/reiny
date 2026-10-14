@@ -16,7 +16,7 @@ oneOf:
       modules: { minProperties: 1 }
     not: { required: [run] }
 properties:
-  version: { const: 2 }
+  version: { const: 3 }
   deployment: { type: string, description: "Root only. Deployment identity." }
   domain: { type: string, description: "Root only. Defaults to the deployment name." }
   providers:

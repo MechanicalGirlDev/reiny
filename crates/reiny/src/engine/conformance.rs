@@ -15,7 +15,8 @@ use tokio::time::timeout;
 
 use super::{Engine, Key, Presence};
 use crate::{
-    CallError, Cloudy, Descriptor, PresenceEvent, Qos, Service, Topic, shutdown::Shutdown,
+    CallError, Descriptor, MessageType, ModuleContext, PresenceEvent, Qos, Service,
+    shutdown::Shutdown,
 };
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -24,9 +25,9 @@ struct Probe {
     seq: u32,
 }
 
-impl Topic for Probe {
-    const TYPE: &'static str = "ConfProbe";
-    const SCHEMA: u64 = 0x1234;
+impl MessageType for Probe {
+    const TYPE_NAME: &'static str = "ConfProbe";
+    const SCHEMA_FINGERPRINT: u64 = 0x1234;
     const DESCRIPTOR: Option<crate::Descriptor> = None;
 }
 
@@ -42,16 +43,16 @@ struct StampedV2 {
     seq: u32,
 }
 
-impl Topic for StampedV1 {
-    const TYPE: &'static str = "ConfStamped";
+impl MessageType for StampedV1 {
+    const TYPE_NAME: &'static str = "ConfStamped";
     const DESCRIPTOR: Option<crate::Descriptor> = None;
-    const SCHEMA: u64 = 0x1111;
+    const SCHEMA_FINGERPRINT: u64 = 0x1111;
 }
 
-impl Topic for StampedV2 {
-    const TYPE: &'static str = "ConfStamped";
+impl MessageType for StampedV2 {
+    const TYPE_NAME: &'static str = "ConfStamped";
     const DESCRIPTOR: Option<crate::Descriptor> = None;
-    const SCHEMA: u64 = 0x2222;
+    const SCHEMA_FINGERPRINT: u64 = 0x2222;
 }
 
 /// A type that describes itself at `@schema`. reiny never interprets the set, so any bytes will do.
@@ -63,9 +64,9 @@ struct Described {
 
 const DESCRIBED_SET: &[u8] = b"conf-descriptor-set";
 
-impl Topic for Described {
-    const TYPE: &'static str = "ConfDescribed";
-    const SCHEMA: u64 = 0x1234;
+impl MessageType for Described {
+    const TYPE_NAME: &'static str = "conf.Described";
+    const SCHEMA_FINGERPRINT: u64 = 0x1234;
     const DESCRIPTOR: Option<Descriptor> = Some(Descriptor {
         message: "conf.Described",
         file_set: DESCRIBED_SET,
@@ -86,15 +87,15 @@ struct Sum {
     sum: i32,
 }
 
-impl Topic for Add {
-    const TYPE: &'static str = "ConfAdd";
-    const SCHEMA: u64 = 0x1234;
+impl MessageType for Add {
+    const TYPE_NAME: &'static str = "ConfAdd";
+    const SCHEMA_FINGERPRINT: u64 = 0x1234;
     const DESCRIPTOR: Option<crate::Descriptor> = None;
 }
 
-impl Topic for Sum {
-    const TYPE: &'static str = "ConfSum";
-    const SCHEMA: u64 = 0x1234;
+impl MessageType for Sum {
+    const TYPE_NAME: &'static str = "ConfSum";
+    const SCHEMA_FINGERPRINT: u64 = 0x1234;
     const DESCRIPTOR: Option<crate::Descriptor> = None;
 }
 
@@ -107,8 +108,8 @@ const SETTLE: Duration = Duration::from_millis(600);
 const PATIENCE: Duration = Duration::from_secs(5);
 
 /// Build the launch `id` on top of `engine` (in the domain `conf`).
-pub async fn cloudy(engine: Arc<dyn Engine>, id: &str) -> Cloudy {
-    Cloudy::new(
+pub async fn cloudy(engine: Arc<dyn Engine>, id: &str) -> ModuleContext {
+    ModuleContext::new(
         engine,
         id.to_string(),
         DOMAIN.to_string(),
@@ -122,10 +123,10 @@ pub async fn cloudy(engine: Arc<dyn Engine>, id: &str) -> Cloudy {
 
 /// The conformance body. `a` / `b` are two launches (ids `a` / `b`) on the same bus. It panics on failure.
 #[allow(clippy::too_many_lines)] // one pass end to end (run once per engine), hence long
-pub async fn exercise(a: Cloudy, b: Cloudy) {
+pub async fn exercise(a: ModuleContext, b: ModuleContext) {
     tokio::time::sleep(SETTLE).await;
 
-    // --- launch presence: Cloudy::new raised @launch ---
+    // --- launch presence: ModuleContext::new raised @launch ---
     let launches = a
         .engine()
         .alive(&Key::launch(DOMAIN, None), PATIENCE)
@@ -263,7 +264,7 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
     // --- by name: a viewer with no types compiled in ---
     // Raw bytes arrive with the sender's fingerprint beside them, unchecked.
     let mut raw = b
-        .raw_subscriber(StampedV1::TYPE)
+        .raw_subscriber(StampedV1::TYPE_NAME)
         .build()
         .expect("raw subscriber");
     tokio::time::sleep(SETTLE).await;
@@ -274,7 +275,7 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
         .expect("stream open");
     assert_eq!(
         (envelope.source.as_str(), envelope.schema),
-        ("a", Some(StampedV1::SCHEMA))
+        ("a", Some(StampedV1::SCHEMA_FINGERPRINT))
     );
     assert_eq!(
         StampedV1::decode(envelope.payload.as_slice())
@@ -283,7 +284,7 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
         8
     );
     let mut raw_late = b
-        .raw_subscriber(Probe::TYPE)
+        .raw_subscriber(Probe::TYPE_NAME)
         .latched()
         .build()
         .expect("raw latched subscriber");
@@ -321,7 +322,7 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
         Some(Presence::Left(Key::topic(
             DOMAIN,
             Some("a"),
-            StampedV1::TYPE
+            StampedV1::TYPE_NAME
         )))
     );
 
@@ -329,7 +330,7 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
     let described = a.publish::<Described>().expect("described publisher");
     let listener = b.subscribe::<Described>().expect("described subscriber");
     tokio::time::sleep(SETTLE).await;
-    let schemas = b.schemas(Described::TYPE).await.expect("schemas");
+    let schemas = b.schemas(Described::TYPE_NAME).await.expect("schemas");
     let got: Vec<(&str, &str, &[u8])> = schemas
         .iter()
         .map(|d| (d.source.as_str(), d.message.as_str(), d.file_set.as_slice()))
@@ -342,7 +343,7 @@ pub async fn exercise(a: Cloudy, b: Cloudy) {
         ]
     );
     // No DESCRIPTOR, no answer — and the latched responder on the type's own key stays out of it.
-    assert_eq!(b.schemas(Probe::TYPE).await.expect("schemas").len(), 0);
+    assert_eq!(b.schemas(Probe::TYPE_NAME).await.expect("schemas").len(), 0);
     drop((described, listener));
 
     // --- services: round trip / reply_err / a destination that is not there / dropped / held → Timeout ---

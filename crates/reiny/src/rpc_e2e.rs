@@ -2,14 +2,14 @@
 //! addressing, `reply_err` → `Remote`, dropped unanswered → `NoReply`, held → `Timeout`, a fingerprint
 //! mismatch, `servers()` / `watch_servers()`, and **a latched publish coexisting with a serve**.
 //!
-//! It lives in `src/` for the same reason as `e2e.rs` (it needs the private `Cloudy::new`). The port is
+//! It lives in `src/` for the same reason as `e2e.rs` (it needs the private `ModuleContext::new`). The port is
 //! the next one after e2e's 37447 and `bag_e2e`'s 37448.
 
 use std::time::Duration;
 
 use tokio::time::timeout;
 
-use crate::{CallError, Cloudy, PresenceEvent, Service, Topic, shutdown::Shutdown};
+use crate::{CallError, MessageType, ModuleContext, PresenceEvent, Service, shutdown::Shutdown};
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct Add {
@@ -25,16 +25,16 @@ struct Sum {
     sum: i64,
 }
 
-impl Topic for Add {
-    const TYPE: &'static str = "ReinyRpcAdd";
+impl MessageType for Add {
+    const TYPE_NAME: &'static str = "ReinyRpcAdd";
     const DESCRIPTOR: Option<crate::Descriptor> = None;
-    const SCHEMA: u64 = 0xAAAA_AAAA_AAAA_AAAA;
+    const SCHEMA_FINGERPRINT: u64 = 0xAAAA_AAAA_AAAA_AAAA;
 }
 
-impl Topic for Sum {
-    const TYPE: &'static str = "ReinyRpcSum";
+impl MessageType for Sum {
+    const TYPE_NAME: &'static str = "ReinyRpcSum";
     const DESCRIPTOR: Option<crate::Descriptor> = None;
-    const SCHEMA: u64 = 0x5555_5555_5555_5555;
+    const SCHEMA_FINGERPRINT: u64 = 0x5555_5555_5555_5555;
 }
 
 /// A hand-written `impl Service` — also a regression test for a third-party type joining in one line.
@@ -51,10 +51,10 @@ struct AddV2 {
     b: i64,
 }
 
-impl Topic for AddV2 {
-    const TYPE: &'static str = "ReinyRpcAdd";
+impl MessageType for AddV2 {
+    const TYPE_NAME: &'static str = "ReinyRpcAdd";
     const DESCRIPTOR: Option<crate::Descriptor> = None;
-    const SCHEMA: u64 = 0xBBBB_BBBB_BBBB_BBBB;
+    const SCHEMA_FINGERPRINT: u64 = 0xBBBB_BBBB_BBBB_BBBB;
 }
 
 impl Service for AddV2 {
@@ -68,9 +68,9 @@ struct Cfg {
     rev: u32,
 }
 
-impl Topic for Cfg {
-    const TYPE: &'static str = "ReinyRpcCfg";
-    const SCHEMA: u64 = 0x1234;
+impl MessageType for Cfg {
+    const TYPE_NAME: &'static str = "ReinyRpcCfg";
+    const SCHEMA_FINGERPRINT: u64 = 0x1234;
     const DESCRIPTOR: Option<crate::Descriptor> = None;
 }
 
@@ -100,8 +100,8 @@ async fn session(listen: bool) -> zenoh::Session {
         .unwrap_or_else(|e| panic!("opening zenoh session: {e}"))
 }
 
-async fn cloudy(session: zenoh::Session, id: &str) -> Cloudy {
-    Cloudy::new(
+async fn cloudy(session: zenoh::Session, id: &str) -> ModuleContext {
+    ModuleContext::new(
         std::sync::Arc::new(crate::engine::Zenoh::from_session(session)),
         id.to_string(),
         "lab".to_string(),

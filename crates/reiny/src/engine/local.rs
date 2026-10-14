@@ -1,6 +1,6 @@
 //! The in-process bus — the reference implementation of [`Engine`] and the scaffolding for a launch's
 //!
-//! Clone what `Local::new()` returns into several `Cloudy`s and they share one bus. No network, no
+//! Clone what `Local::new()` returns into several `ModuleContext` handles and they share one bus. No network, no
 //! port, no zenoh configuration. Delivery runs on a single dedicated thread, and **every state change
 //! is processed in order on that same thread** — there are no locks, and the order of declarations
 //! and deliveries is preserved as written. It also satisfies [`Engine`]'s contract that callbacks come
@@ -463,7 +463,7 @@ mod tests {
     }
 
     /// A query finalizes when the last responder is done — including when there is no responder at
-    /// all. That is what lets `Caller::call` tell `NoReply` from a timeout without waiting for one.
+    /// all. That is what lets `RpcClient::call` tell `NoReply` from a timeout without waiting for one.
     #[tokio::test]
     async fn a_query_with_no_responder_closes_at_once() {
         let bus = Local::new();

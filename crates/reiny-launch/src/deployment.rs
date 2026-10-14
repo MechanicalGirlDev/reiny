@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use process_wrap::tokio::{ChildWrapper, CommandWrap};
 use reiny_core::bindings::{
-    CONTRACT_VERSION, EndpointContract, ModuleReport, PortKind, PortReport, Replay, Retention,
+    EndpointContract, MODULE_BINDINGS_VERSION, MODULE_REPORT_VERSION, ModuleReport, PortKind,
+    PortReport, Replay, Retention,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1311,12 +1312,12 @@ impl Owner<'_> {
 }
 
 fn type_matches(expected: &str, actual: &str) -> bool {
-    expected == actual || (!expected.contains('.') && actual.rsplit('.').next() == Some(expected))
+    expected == actual
 }
 
 fn validate_report(node: &PreparedModule, report: &ModuleReport) -> Result<()> {
     ensure!(
-        report.version == CONTRACT_VERSION && report.namespace == node.namespace,
+        report.version == MODULE_REPORT_VERSION && report.namespace == node.namespace,
         "readiness report identity mismatch"
     );
     ensure!(
@@ -1512,7 +1513,7 @@ fn validate_prepared(prepared: &PreparedDeployment) -> Result<()> {
             "module namespace is outside deployment"
         );
         ensure!(
-            node.bindings.version == CONTRACT_VERSION
+            node.bindings.version == MODULE_BINDINGS_VERSION
                 && node.bindings.namespace == node.namespace
                 && node.bindings.endpoint_namespace == node.namespace,
             "invalid module bindings identity"

@@ -1,8 +1,8 @@
-use reiny::{Cloudy, RuntimeOptions};
+use reiny::{ModuleContext, RuntimeOptions};
 
 #[tokio::main]
 async fn main() -> reiny::Result<()> {
-    let cloudy = Cloudy::open(RuntimeOptions::from_args("host")).await?;
+    let cloudy = ModuleContext::open(RuntimeOptions::from_args("host")).await?;
     let runtime = tempfile::tempdir()?;
     let mut command = tokio::process::Command::new(cloudy.artifact("driver")?);
     let mut child = cloudy.spawn_owned_child("driver", &mut command, runtime.path())?;

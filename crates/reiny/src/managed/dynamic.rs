@@ -9,7 +9,7 @@ use reiny_core::bindings::{
 use super::{ManagedPort, Registration};
 use crate::engine::SUB_CHUNK;
 use crate::pubsub::{Core, PublisherCore};
-use crate::{Cloudy, Durability, Qos, RawSubscriber, Result, validate_segment};
+use crate::{Durability, ModuleContext, Qos, RawSubscriber, Result, validate_segment};
 
 /// An owned, declared publisher of encoded protobuf messages.
 pub struct DeclaredPublisher {
@@ -35,7 +35,7 @@ fn registration(
         "declared port type '{}' differs from actual type '{type_name}'",
         contract.type_name
     );
-    let transport_type = type_name.rsplit('.').next().unwrap_or(type_name);
+    let transport_type = type_name;
     validate_segment("transport type", transport_type)?;
     Ok(Registration {
         contract: PortReport {
@@ -49,7 +49,7 @@ fn registration(
     })
 }
 
-impl Cloudy {
+impl ModuleContext {
     /// Subscribe to a named input's exact prepared sources and receive encoded protobuf.
     pub fn raw_input(&self, name: &str, type_name: &str, schema: u64) -> Result<RawSubscriber> {
         let contract = self.named_contract(name, true, PortKind::Stream)?;

@@ -212,7 +212,7 @@ fn topic_node_service_against_live_launch() {
         .declare_token("reiny/lab/ctrl/@launch")
         .wait()
         .expect("launch token");
-    let probe_key = "reiny/lab/ctrl/Probe";
+    let probe_key = "reiny/lab/ctrl/e2e.Probe";
     let probe_pub = Arc::new(fab.declare_publisher(probe_key).wait().expect("probe pub"));
     let _probe_token = fab
         .liveliness()
@@ -222,7 +222,7 @@ fn topic_node_service_against_live_launch() {
     let _probe_schema = schema_queryable(&fab, probe_key, "e2e.Probe");
 
     // --- the service Add: a queryable + @service + @schema (two: the request and the response) ---
-    let add_key = "reiny/lab/ctrl/Add";
+    let add_key = "reiny/lab/ctrl/e2e.Add";
     let _add_token = fab
         .liveliness()
         .declare_token(format!("{add_key}/@service"))
@@ -296,7 +296,7 @@ fn topic_node_service_against_live_launch() {
     };
 
     // --- playing the launch gui: it only subscribes to Cmd (@sub + @schema; there is no publisher) ---
-    let cmd_key = "reiny/lab/gui/Sum";
+    let cmd_key = "reiny/lab/gui/e2e.Sum";
     let _cmd_sub_token = fab
         .liveliness()
         .declare_token(format!("{cmd_key}/@sub"))
@@ -305,7 +305,7 @@ fn topic_node_service_against_live_launch() {
     let _cmd_schema = schema_queryable(&fab, cmd_key, "e2e.Sum");
     let (cmd_seen, cmd_received) = std::sync::mpsc::channel();
     let _cmd_sub = {
-        fab.declare_subscriber("reiny/lab/sim/Sum")
+        fab.declare_subscriber("reiny/lab/sim/e2e.Sum")
             .callback(move |s| {
                 if Sum::decode(s.payload().to_bytes().as_ref()).is_ok_and(|v| v.sum == 7) {
                     let _ = cmd_seen.send(());
@@ -320,13 +320,13 @@ fn topic_node_service_against_live_launch() {
     assert!(out.lines().any(|l| l.trim() == "ctrl"), "node list: {out}");
     let out = stdout(&reiny(&["node", "info", "ctrl"]));
     assert!(
-        out.contains("pub : Probe") && out.contains("srv : Add"),
+        out.contains("pub : e2e.Probe") && out.contains("srv : e2e.Add"),
         "node info: {out}"
     );
     // A launch that only listens is still a launch, and `sub :` is the line that says so.
     let out = stdout(&reiny(&["node", "info", "gui"]));
     assert!(
-        out.contains("sub : Sum") && out.contains("pub : -"),
+        out.contains("sub : e2e.Sum") && out.contains("pub : -"),
         "node info gui: {out}"
     );
 
@@ -340,10 +340,10 @@ fn topic_node_service_against_live_launch() {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
     };
-    // TYPE  PUB  SUB  SRV
-    assert_eq!(row("Probe"), ["Probe", "ctrl", "-", "-"], "{out}");
-    assert_eq!(row("Add"), ["Add", "-", "-", "ctrl"], "{out}");
-    assert_eq!(row("Sum"), ["Sum", "-", "gui", "-"], "{out}");
+    // TYPE_NAME  PUB  SUB  SRV
+    assert_eq!(row("e2e.Probe"), ["e2e.Probe", "ctrl", "-", "-"], "{out}");
+    assert_eq!(row("e2e.Add"), ["e2e.Add", "-", "-", "ctrl"], "{out}");
+    assert_eq!(row("e2e.Sum"), ["e2e.Sum", "-", "gui", "-"], "{out}");
 
     // --- topic hz: a Hz appears on ctrl's row ---
     let out = stdout(&reiny(&["topic", "hz", "Probe", "--duration", "1.5"]));
@@ -478,7 +478,7 @@ fn topic_node_service_against_live_launch() {
         "sim",
     ]));
     assert!(
-        out.contains("reiny/lab/sim/Sum: sent 1") && out.contains("e2e.Sum"),
+        out.contains("reiny/lab/sim/e2e.Sum: sent 1") && out.contains("e2e.Sum"),
         "topic pub: {out}"
     );
     cmd_received

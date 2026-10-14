@@ -114,7 +114,7 @@ fn record_info_play_round_trip_and_live_guard() {
 
     // --- set up what the launch offers ---
     // 1) The live type ctrl/Probe: a publisher plus a liveliness token (for presence and the safety catch).
-    let probe_key = "reiny/lab/ctrl/Probe";
+    let probe_key = "reiny/lab/ctrl/bag.Probe";
     let probe_pub = fab.declare_publisher(probe_key).wait().expect("probe pub");
     let _probe_token = fab
         .liveliness()
@@ -122,7 +122,7 @@ fn record_info_play_round_trip_and_live_guard() {
         .wait()
         .expect("probe token");
     // 2) The latched cfg/Config: a queryable answering with the most recent value (record's snapshot picks it up).
-    let cfg_key = "reiny/lab/cfg/Config";
+    let cfg_key = "reiny/lab/cfg/bag.Config";
     let _cfg_token = fab.liveliness().declare_token(cfg_key).wait().unwrap();
     let cfg_fp = reiny_build::message_fingerprint(&descriptor(), "bag.Config")
         .unwrap()
@@ -238,7 +238,7 @@ fn record_info_play_round_trip_and_live_guard() {
             .unwrap()
             .expect("each replay message");
         let key = sample.key_expr().as_str().to_string();
-        if key == "reiny/replay/bag/Probe" {
+        if key == "reiny/replay/bag/bag.Probe" {
             probe_values.push(
                 Probe::decode(sample.payload().to_bytes().as_ref())
                     .unwrap()

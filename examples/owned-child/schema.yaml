@@ -1,6 +1,6 @@
-version: 2
+version: 3
 schema:
-  internals:
+  shared_types:
     State: {proto: proto/driver.proto, message: owned.State}
     Add: {proto: proto/driver.proto, message: owned.Add}
     Sum: {proto: proto/driver.proto, message: owned.Sum}
@@ -8,4 +8,4 @@ schema:
     Adder: {request: Add, response: Sum}
   projects:
     owned_child_example:
-      publications: [State, Add, Sum]
+      types: [State, Add, Sum]

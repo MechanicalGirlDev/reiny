@@ -1,7 +1,7 @@
 //! Parsed deployment contracts and executable relocation regressions.
 
-#[path = "../src/compress.rs"]
-mod compress;
+#[path = "../src/bundle.rs"]
+mod bundle;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,7 +25,7 @@ fn fixture(root: &Path) -> Result<()> {
     write(
         &root.join("main.yaml"),
         r"
-version: 2
+version: 3
 deployment: robot
 domain: lab
 providers:
@@ -50,7 +50,7 @@ resources:
     write(
         &root.join("definitions/publisher/main.yaml"),
         r"
-version: 2
+version: 3
 run: {provider: process, bin: worker}
 out: {tick: {type: demo.Tick}}
 ",
@@ -58,7 +58,7 @@ out: {tick: {type: demo.Tick}}
     write(
         &root.join("definitions/composite/main.yaml"),
         r"
-version: 2
+version: 3
 in: {tick: {type: demo.Tick}}
 modules:
   receiver:
@@ -71,7 +71,7 @@ out: {echo: {type: demo.Echo, from: receiver.echo}}
     write(
         &root.join("definitions/subscriber/main.yaml"),
         r"
-version: 2
+version: 3
 run: {provider: process, bin: worker, config: ../../configs/receiver.json, config_assets: [../assets/calibration.bin, main.yaml]}
 in: {tick: {type: demo.Tick}}
 out: {echo: {type: demo.Echo}}
@@ -110,7 +110,7 @@ fn bundle_preserves_invocations_and_bindings_when_sources_are_relocated() -> Res
     let output = workspace.path().join("bundle");
 
     // When definitions are bundled by invocation namespace instead of source name.
-    compress::compress(&root, &output, Some("robot-launcher"), false)?;
+    bundle::bundle(&root, &output, Some("robot-launcher"), false)?;
 
     // Then the actual loader sees the same namespace and endpoint contract.
     let actual = DeploymentPlan::load(&output, false)?;
@@ -180,7 +180,7 @@ fn bundle_runs_and_retains_config_relative_assets_when_original_tree_is_removed(
     let output = workspace.path().join("bundle");
 
     // When the bundle is materialized and the entire original checkout disappears.
-    compress::compress(&root, &output, None, false)?;
+    bundle::bundle(&root, &output, None, false)?;
     std::fs::remove_dir_all(&root)?;
 
     // Then preparation and executable startup use only relocated files.
@@ -224,7 +224,7 @@ fn bundle_runs_and_retains_config_relative_assets_when_original_tree_is_removed(
     let status = Command::new(&receiver.executable)
         .args([
             "--exact",
-            "compress::tests::system_libraries_stay_out_of_the_bundle",
+            "bundle::tests::system_libraries_stay_out_of_the_bundle",
         ])
         .current_dir(&receiver.module_dir)
         .status()?;
@@ -251,7 +251,7 @@ fn bundle_freezes_explicit_external_config_without_a_dangling_path() -> Result<(
 
     // When the snapshot is bundled and both original sources disappear.
     let output = workspace.path().join("bundle");
-    compress::compress(&root, &output, None, false)?;
+    bundle::bundle(&root, &output, None, false)?;
     std::fs::remove_dir_all(root)?;
     std::fs::remove_file(external)?;
 
@@ -276,7 +276,7 @@ fn bundle_does_not_overwrite_existing_output() -> Result<()> {
     write(&output.join("keep"), "unchanged")?;
 
     // When bundling targets that directory.
-    let result = compress::compress(&root, &output, None, false);
+    let result = bundle::bundle(&root, &output, None, false);
 
     // Then unrelated content remains intact.
     assert!(result.is_err());
@@ -293,7 +293,7 @@ fn bundle_excludes_its_output_when_destination_is_inside_the_source_tree() -> Re
     let output = root.join("distribution/bundle");
 
     // When the source tree is copied into the destination.
-    compress::compress(&root, &output, None, false)?;
+    bundle::bundle(&root, &output, None, false)?;
 
     // Then no recursive bundle copy is present and the root contract still loads.
     assert!(!output.join("sources/0/distribution/bundle").exists());
@@ -311,8 +311,8 @@ fn bundle_manifest_contracts_are_deterministic_when_materialized_twice() -> Resu
     let second = workspace.path().join("second");
 
     // When identical inputs are materialized into different output directories.
-    compress::compress(&root, &first, None, false)?;
-    compress::compress(&root, &second, None, false)?;
+    bundle::bundle(&root, &first, None, false)?;
+    bundle::bundle(&root, &second, None, false)?;
 
     // Then all machine-consumed manifest bytes match.
     for instance in [
@@ -337,7 +337,7 @@ fn bundle_keeps_distinct_builds_when_leaves_use_the_same_binary_name() -> Result
     write(
         &root.join("main.yaml"),
         r"
-version: 2
+version: 3
 deployment: twins
 providers: {process: {type: process}}
 modules:
@@ -350,7 +350,7 @@ modules:
         write(
             &dir.join("main.yaml"),
             r"
-version: 2
+version: 3
 run: {provider: process, bin: worker}
 build: {type: cargo, profile: dev, locked: false}
 ",
@@ -369,7 +369,7 @@ build: {type: cargo, profile: dev, locked: false}
     let output = workspace.path().join("bundle");
 
     // When compiler artifacts are bundled and their original projects disappear.
-    compress::compress(&root, &output, None, false)?;
+    bundle::bundle(&root, &output, None, false)?;
     std::fs::remove_dir_all(root)?;
 
     // Then both runtime manifests select their own binary without Cargo sources.
@@ -406,7 +406,7 @@ fn bundle_relocates_acquired_checkout_assets_when_cache_tree_is_removed() -> Res
     write(
         &checkout.join("module/main.yaml"),
         r"
-version: 2
+version: 3
 run: {provider: process, bin: worker, config: ../configs/app.json, config_assets: [../assets/data]}
 out: {tick: {type: demo.Tick}}
 ",
@@ -420,7 +420,7 @@ out: {tick: {type: demo.Tick}}
     let output = workspace.path().join("bundle");
 
     // When the acquired source is bundled and the acquisition cache disappears.
-    compress::compress(&root, &output, None, false)?;
+    bundle::bundle(&root, &output, None, false)?;
     std::fs::remove_dir_all(root)?;
 
     // Then the relocated config retains its checkout-relative asset tree.
@@ -505,12 +505,12 @@ fn bundle_loads_native_runtime_libraries_when_original_binary_directory_is_remov
     );
     write(
         &root.join("main.yaml"),
-        "version: 2\ndeployment: native\nproviders: {process: {type: process, bin_dir: installed}}\nrun: {provider: process, bin: worker}\n",
+        "version: 3\ndeployment: native\nproviders: {process: {type: process, bin_dir: installed}}\nrun: {provider: process, bin: worker}\n",
     )?;
     let output = workspace.path().join("bundle");
 
     // When the executable and DLLs are bundled and their original directory disappears.
-    compress::compress(&root, &output, None, false)?;
+    bundle::bundle(&root, &output, None, false)?;
     std::fs::remove_dir_all(root)?;
 
     // Then Windows loads the DLL beside the immutable staged executable, without PATH.

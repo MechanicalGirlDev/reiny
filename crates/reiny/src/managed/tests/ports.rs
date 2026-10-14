@@ -45,7 +45,7 @@ async fn same_type_fanout_inputs_keep_separate_source_bindings() {
     for (name, source) in ["first", "second", "third"].into_iter().zip(sources) {
         contract.inputs.insert(name.to_string(), input(source));
     }
-    let receiver = Cloudy::open(options(bus.clone(), contract))
+    let receiver = ModuleContext::open(options(bus.clone(), contract))
         .await
         .expect("receiver");
     let mut inputs = ["first", "second", "third"]
@@ -82,7 +82,7 @@ async fn managed_input_rejects_missing_malformed_and_mismatching_schema() {
     let mut incoming = receiver.input::<Probe>("incoming").expect("input");
     let publisher = bus
         .publisher(
-            &Key::topic(DOMAIN, Some(SENDER), Probe::TYPE),
+            &Key::topic(DOMAIN, Some(SENDER), Probe::TYPE_NAME),
             &Qos::DEFAULT,
         )
         .expect("raw publisher");
@@ -111,12 +111,12 @@ async fn managed_input_rejects_missing_malformed_and_mismatching_schema() {
 
 #[tokio::test]
 async fn named_ports_fail_without_bindings_instead_of_using_wildcards() {
-    // Given a standalone Cloudy with no managed contract.
+    // Given a standalone ModuleContext with no managed contract.
     let mut standalone = RuntimeOptions::new(RECEIVER);
     standalone.engine = Some(Arc::new(Local::new()));
     standalone.module_report_path = None;
     // When the context opens, then the absent contract is rejected before any port exists.
-    assert!(Cloudy::open(standalone).await.is_err());
+    assert!(ModuleContext::open(standalone).await.is_err());
 }
 
 #[tokio::test]
@@ -130,7 +130,7 @@ async fn undefined_and_wrong_type_ports_fail_before_registration() {
             sources: vec![SENDER.to_string()],
         },
     );
-    let cloudy = Cloudy::open(options(Arc::new(Local::new()), contract))
+    let cloudy = ModuleContext::open(options(Arc::new(Local::new()), contract))
         .await
         .expect("cloudy");
 
@@ -147,17 +147,17 @@ async fn managed_ports_reject_incompatible_compiled_topic_metadata() {
     contract.inputs.insert(
         "incoming".to_string(),
         InputBinding {
-            contract: super::contract("Probe"),
+            contract: super::contract("test.Probe"),
             sources: vec![SENDER.to_string()],
         },
     );
     contract.outputs.insert(
         "outgoing".to_string(),
         OutputBinding {
-            contract: super::contract("Probe"),
+            contract: super::contract("test.Probe"),
         },
     );
-    let cloudy = Cloudy::open(options(Arc::new(Local::new()), contract))
+    let cloudy = ModuleContext::open(options(Arc::new(Local::new()), contract))
         .await
         .expect("cloudy");
 
@@ -167,9 +167,9 @@ async fn managed_ports_reject_incompatible_compiled_topic_metadata() {
 
 #[tokio::test]
 async fn duplicate_transport_outputs_fail_even_when_declared_names_differ() {
-    // Given distinct short and qualified declarations that resolve to the same transport TYPE.
+    // Given two output names with the same exact transport type.
     let mut contract = bindings(SENDER);
-    for (name, ty) in [("short", "Probe"), ("qualified", "test.Probe")] {
+    for (name, ty) in [("first", "test.Probe"), ("second", "test.Probe")] {
         contract.outputs.insert(
             name.to_string(),
             OutputBinding {
@@ -179,7 +179,7 @@ async fn duplicate_transport_outputs_fail_even_when_declared_names_differ() {
     }
     // The shared contract validator rejects ambiguous addresses before opening the context.
     assert!(
-        Cloudy::open(options(Arc::new(Local::new()), contract))
+        ModuleContext::open(options(Arc::new(Local::new()), contract))
             .await
             .is_err()
     );

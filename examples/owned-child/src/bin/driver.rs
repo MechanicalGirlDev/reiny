@@ -1,11 +1,11 @@
-use owned_child_example::internals::{Add, State, Sum};
-use reiny::{Cloudy, RuntimeOptions};
+use owned_child_example::shared_types::{Add, State, Sum};
+use reiny::{ModuleContext, RuntimeOptions};
 
 #[tokio::main]
 async fn main() -> reiny::Result<()> {
-    let cloudy = Cloudy::open(RuntimeOptions::from_args("driver")).await?;
+    let cloudy = ModuleContext::open(RuntimeOptions::from_args("driver")).await?;
     let states = cloudy.output::<State>("state")?;
-    let mut requests = cloudy.provides::<Add>("adder")?;
+    let mut requests = cloudy.rpc_server::<Add>("adder")?;
     states.send(State { value: 42 }).await?;
     cloudy.ready()?;
     while let Some(request) = requests.recv().await {

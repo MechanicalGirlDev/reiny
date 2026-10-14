@@ -2,16 +2,16 @@
 
 [reiny](https://github.com/MechanicalGirlDev/reiny) on
 [iceoryx2](https://github.com/eclipse-iceoryx/iceoryx2): launches on one host
-talk over shared memory instead of zenoh. Same `Cloudy`, same types, same
+talk over shared memory instead of zenoh. Same `ModuleContext`, same types, same
 `main.yaml` schema; only the engine changes:
 
 ```rust
 use std::sync::Arc;
-use reiny::{Cloudy, RuntimeOptions};
+use reiny::{ModuleContext, RuntimeOptions};
 
 let mut opts = RuntimeOptions::from_args("motor");
 opts.engine = Some(Arc::new(reiny_iceoryx2::Iceoryx2::new()?));
-reiny::run_with(opts, |cloudy: Cloudy| async move { /* … */ Ok(()) })
+reiny::run_with(opts, |cloudy: ModuleContext| async move { /* … */ Ok(()) })
 ```
 
 What it maps to (design: `docs/design/0.5.0.md` §5):

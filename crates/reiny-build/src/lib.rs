@@ -3,17 +3,17 @@
 //! It reads the build-time `schema` block of `schema.yaml`, compiles the protos it needs with prost,
 //! and writes `$OUT_DIR/reiny_generated.rs`. Runtime provider fields are never evaluated here.
 //!
-//! - the `publications` / `dependencies::<project>` / `internals` modules (re-exports of the generated types)
-//! - one `impl ::reiny::Topic` per message type (the type → topic mapping, embedded)
+//! - the `exported_types` / `dependencies::<project>` / `shared_types` modules (re-exports of the generated types)
+//! - one `impl ::reiny::MessageType` per message type (the type → topic mapping, embedded)
 //!
 //! `#[reiny::main]` includes that file into the crate root, which is why user code names types as
-//! `use crate::publications::Ping;`.
+//! `use crate::exported_types::Ping;`.
 //!
 //! Two layouts are handled:
-//! - **per-project** (a schema.yaml with `[project]`): resolves its own `[publications]` plus the public
-//!   types of every `[dependencies]` project. The type → topic owner is "the project that publishes it".
-//! - **workspace shared** (a schema.yaml with `[internals]` / `[projects.*]`): compiles the whole shared
-//!   catalog `[internals]` and exposes it as `internals::*`.
+//! - **per-project** (a schema.yaml with `[project]`): resolves its own `[exported_types]` plus the public
+//!   types of every `[dependencies]` project. The defining project owns those exported types.
+//! - **workspace shared** (a schema.yaml with `[shared_types]` / `[projects.*]`): compiles the whole shared
+//!   catalog `[shared_types]` and exposes it as `shared_types::*`.
 
 // This is a helper crate called from build scripts, so the right response to a misconfiguration is to
 // stop the build at once with a context-carrying panic. The unwrap/expect/panic lints are lifted here.
@@ -29,29 +29,35 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+/// Version of the build-time type catalog language.
+pub const TYPE_CATALOG_VERSION: u32 = 3;
+/// Version of explicit static port manifests.
+pub const STATIC_PORTS_VERSION: u32 = 3;
+
 // ---------------------------------------------------------------------------
 // The schema.yaml schema
 // ---------------------------------------------------------------------------
 
 /// The whole schema.yaml (it accepts the per-project shape and the workspace shape alike).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Manifest {
     /// The per-project identity. Its presence is what selects per-project mode.
     project: Option<Project>,
     /// The per-project public types.
     #[serde(default)]
-    publications: BTreeMap<String, TypeDef>,
+    exported_types: BTreeMap<String, TypeDef>,
     /// The per-project dependency projects.
     #[serde(default)]
     dependencies: BTreeMap<String, Dependency>,
     /// The workspace's shared catalog.
     #[serde(default)]
-    internals: BTreeMap<String, TypeDef>,
-    /// Each workspace project's publish / subscribe declarations.
+    shared_types: BTreeMap<String, TypeDef>,
+    /// Each workspace package's catalog type usage.
     #[serde(default)]
     projects: BTreeMap<String, ProjectDecl>,
     /// The workspace's shared schema crates (with them, a type is generated once and shared).
-    schema: Option<BTreeMap<String, SchemaPartDef>>,
+    schema_crates: Option<BTreeMap<String, SchemaPartDef>>,
     /// The per-project typed config schema + defaults (read through `cloudy.config()`).
     config: Option<toml::Table>,
     /// `[services]`: request type → response type (generates `impl reiny::Service`).
@@ -60,15 +66,17 @@ struct Manifest {
 }
 
 /// `Name = { request = "Req", response = "Resp" }`. The values are catalog aliases
-/// (`[publications]` / `[internals]` keys; a per-project dependency type is `<dep>::<Alias>`).
+/// (`[exported_types]` / `[shared_types]` keys; a per-project dependency type is `<dep>::<Alias>`).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ServiceDef {
     request: String,
     response: String,
 }
 
-/// One part of `[schema.<name>]`.
+/// One part of `[schema_crates.<name>]`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SchemaPartDef {
     #[serde(rename = "crate")]
     crate_name: String,
@@ -76,18 +84,18 @@ struct SchemaPartDef {
     protos: Vec<String>,
     /// The part names it depends on. Must be **transitively closed**, and each edge needs a Cargo dep too.
     #[serde(default)]
-    depends: Vec<String>,
+    depends_on: Vec<String>,
 }
 
 /// One normalized named schema crate.
 #[derive(Debug, Clone)]
 struct SchemaPart {
-    /// The part name from `[schema.<name>]`.
+    /// The part name from `[schema_crates.<name>]`.
     name: String,
     crate_name: String,
     /// The absolute paths of the owned protos.
     protos: Vec<PathBuf>,
-    depends: Vec<String>,
+    depends_on: Vec<String>,
 }
 
 impl SchemaPart {
@@ -100,24 +108,28 @@ impl SchemaPart {
 /// An introspection view of one schema crate (for `reiny check`).
 #[derive(Debug, Clone)]
 pub struct SchemaCrateInfo {
-    /// The part name from `[schema.<name>]` (always present).
-    pub part: Option<String>,
+    /// The part name from `[schema_crates.<name>]` (always present).
+    pub name: String,
     /// The Cargo package name.
     pub crate_name: String,
     /// The part names it depends on.
-    pub depends: Vec<String>,
+    pub depends_on: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
+#[serde(deny_unknown_fields)]
 struct Project {
     /// The project name. The runtime instance id is decided by the launcher / `--id` and topics follow
     /// from types, so this is kept only for [project] mode detection and self-description.
     name: String,
+    /// Semantic package version used by the CLI when adding a schema dependency.
+    version: Option<String>,
 }
 
 /// `Type = { proto = "...", message = "pkg.Type" }`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TypeDef {
     proto: String,
     message: String,
@@ -125,19 +137,21 @@ struct TypeDef {
 
 /// `dep = { version = "0.1", path = "../dep" }`. `version` is not used for validation yet.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Dependency {
     path: PathBuf,
+    #[serde(default, rename = "version")]
+    _version: Option<String>,
 }
 
-/// The publications / dependencies of `[projects.<name>]` (naming catalog keys).
-/// Besides the existence check, they are exposed as an introspection view through
-/// [`Resolution::projects`] (`reiny run` builds its topic flow diagram from it).
+/// The catalog aliases referenced by `[projects.<name>]`.
+/// Their deduplicated union is exposed through [`Resolution::projects`],
+/// independently of runtime endpoint directions and wiring.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProjectDecl {
     #[serde(default)]
-    publications: Vec<String>,
-    #[serde(default)]
-    dependencies: Vec<String>,
+    types: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -147,8 +161,8 @@ struct ProjectDecl {
 /// Which generated module a type is emitted into.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Exposure {
-    Publications,
-    Internals,
+    ExportedTypes,
+    SharedTypes,
     Dependencies(String),
 }
 
@@ -167,7 +181,7 @@ struct Entry {
     alias: String,
     /// The proto package's segments (e.g. `["ping"]`).
     package: Vec<String>,
-    /// The Rust type name (e.g. `Ping`). This becomes the topic's type segment (`reiny/<id>/Ping`).
+    /// The protobuf message identifier (e.g. `Ping`), combined with its package by `fq_name`.
     ident: String,
     /// Which module it is emitted into.
     exposure: Exposure,
@@ -201,23 +215,23 @@ impl Entry {
 /// Which layout the schema.yaml was resolved as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
-    /// per-project (`[project]`). Generates its own publications plus the dependencies' public types.
+    /// per-project (`[project]`). Generates its own `exported_types` plus the dependencies' public types.
     PerProject,
-    /// Workspace shared (`[internals]`/`[projects]`, no `[schema]`). Every launch prost-compiles
-    /// `[internals]` for itself (as it always did).
+    /// Workspace shared (`[shared_types]`/`[projects]`, no `[schema_crates]`). Every launch prost-compiles
+    /// `[shared_types]` for itself (as it always did).
     Workspace,
-    /// Workspace + `[schema]`, and we are the **schema crate itself**: prost-compile our share and
-    /// write the `impl Topic`s. Launches share it as a Cargo dependency.
+    /// Workspace + `[schema_crates]`, and we are the **schema crate itself**: prost-compile our share and
+    /// write the `impl MessageType`s. Launches share it as a Cargo dependency.
     Schema {
         /// The named part we compile. `None` denotes a catalog introspection view,
         /// not a compiling package.
         part: Option<String>,
     },
-    /// Workspace + `[schema]`, and we are a launch **consuming** the schema. No proto is recompiled;
-    /// the schema crates' types are merely re-exported as `internals`.
+    /// Workspace + `[schema_crates]`, and we are a launch **consuming** the schema. No proto is recompiled;
+    /// the schema crates' types are merely re-exported as `shared_types`.
     SchemaConsumer {
         /// The extern idents of the schema crates depended on (`myapp-schema` → `myapp_schema`).
-        /// In the multi-crate shape every part is listed (`internals` is their union).
+        /// In the multi-crate shape every part is listed (`shared_types` is their union).
         crate_idents: Vec<String>,
     },
 }
@@ -236,16 +250,16 @@ impl Mode {
     }
 }
 
-/// An introspection view of one resolved message type ([`Entry`] made public for `reiny check`).
+/// A public introspection view of one resolved message type for `reiny check`.
 #[derive(Debug, Clone)]
 pub struct TypeInfo {
     /// The public name in the generated module (the schema.yaml key).
     pub alias: String,
     /// The proto's fully qualified message name (e.g. `ping.Ping`).
     pub message: String,
-    /// The type → topic type segment (`reiny/<id>/<segment>`).
-    pub topic_segment: String,
-    /// Which generated module it appears in (`publications` / `internals` / `dependencies::<dep>`).
+    /// The complete protobuf name used as the transport type.
+    pub type_name: String,
+    /// Which generated module it appears in (`exported_types` / `shared_types` / `dependencies::<dep>`).
     pub module: String,
     /// The absolute path of the proto to compile.
     pub proto: PathBuf,
@@ -260,7 +274,7 @@ pub struct Resolution {
     entries: Vec<Entry>,
     config: Option<toml::Table>,
     manifest_path: PathBuf,
-    /// The normalized `[schema]` parts (empty when there are none).
+    /// The normalized `[schema_crates]` parts (empty when there are none).
     schema_parts: Vec<SchemaPart>,
     /// `[services]` (empty when there are none).
     services: Vec<ServiceEntry>,
@@ -268,16 +282,14 @@ pub struct Resolution {
     projects: Vec<ProjectInfo>,
 }
 
-/// An introspection view of one `[projects.<name>]`. publications / dependencies hold the
-/// `[internals]` keys (aliases) verbatim (look them up through [`Resolution::types`]'s `alias`).
+/// An introspection view of one package's `[projects.<name>].types`, holding the
+/// `[shared_types]` keys (aliases) verbatim (look them up through [`Resolution::types`]'s `alias`).
 #[derive(Debug, Clone)]
 pub struct ProjectInfo {
     /// The `[projects.<name>]` key (= the package / default bin name).
     pub name: String,
-    /// The aliases of the types it publishes.
-    pub publications: Vec<String>,
-    /// The aliases of the types it subscribes to.
-    pub dependencies: Vec<String>,
+    /// The deduplicated aliases of the types referenced by this package.
+    pub types: Vec<String>,
 }
 
 /// An introspection view of one `[services]` entry (for `reiny check`).
@@ -314,15 +326,15 @@ impl Resolution {
         self.config.is_some()
     }
 
-    /// The named schema crates `[schema]` declares (empty when none).
+    /// The named schema crates `[schema_crates]` declares (empty when none).
     #[must_use]
     pub fn schema_crates(&self) -> Vec<SchemaCrateInfo> {
         self.schema_parts
             .iter()
             .map(|p| SchemaCrateInfo {
-                part: Some(p.name.clone()),
+                name: p.name.clone(),
                 crate_name: p.crate_name.clone(),
-                depends: p.depends.clone(),
+                depends_on: p.depends_on.clone(),
             })
             .collect()
     }
@@ -364,10 +376,10 @@ impl Resolution {
                     m.push(e.ident.clone());
                     m.join(".")
                 },
-                topic_segment: e.ident.clone(),
+                type_name: e.fq_name(),
                 module: match &e.exposure {
-                    Exposure::Publications => "publications".to_string(),
-                    Exposure::Internals => "internals".to_string(),
+                    Exposure::ExportedTypes => "exported_types".to_string(),
+                    Exposure::SharedTypes => "shared_types".to_string(),
                     Exposure::Dependencies(d) => format!("dependencies::{d}"),
                 },
                 proto: e.proto.clone(),
@@ -448,7 +460,7 @@ pub fn compile_with(customize: impl FnOnce(&mut prost_build::Config)) -> Result<
 }
 
 /// Introspection for `reiny check`. It resolves the **whole catalog** the schema.yaml describes rather
-/// than one package's view of it (in a workspace, all of `[internals]`; per-project, own publications
+/// than one package's view of it (in a workspace, all of `[shared_types]`; per-project, own `exported_types`
 /// plus dependencies). No proto is compiled, so it works without the `compile` feature. Validation
 /// (identifiers, topic collisions) still runs, so a misconfigured layout surfaces here.
 pub fn describe(dir: &Path) -> Result<Resolution> {
@@ -466,9 +478,9 @@ pub fn describe(dir: &Path) -> Result<Resolution> {
             Mode::PerProject,
             resolve_per_project(&manifest, &manifest_root)?,
         )
-    } else if !manifest.internals.is_empty() || !manifest.projects.is_empty() {
-        // The catalog view: bound to no single package. Say so when there is a [schema].
-        let mut entries = internals_entries(&manifest, &manifest_root)?;
+    } else if !manifest.shared_types.is_empty() || !manifest.projects.is_empty() {
+        // The catalog view: bound to no single package. Say so when there is a [schema_crates].
+        let mut entries = shared_types_entries(&manifest, &manifest_root)?;
         assign_owners(&mut entries, &schema_parts, &manifest_path)?;
         let mode = if schema_parts.is_empty() {
             Mode::Workspace
@@ -478,7 +490,7 @@ pub fn describe(dir: &Path) -> Result<Resolution> {
         (mode, entries)
     } else {
         bail!(
-            "{} has neither [project] (per-project) nor [internals]/[projects] (workspace)",
+            "{} has neither [project] (per-project) nor [shared_types]/[projects] (workspace)",
             manifest_path.display()
         );
     };
@@ -517,7 +529,7 @@ fn resolve_for(manifest_dir: &Path, pkg_name: &str) -> Result<Resolution> {
             Mode::PerProject,
             resolve_per_project(&manifest, &manifest_root)?,
         )
-    } else if !manifest.internals.is_empty() || !manifest.projects.is_empty() {
+    } else if !manifest.shared_types.is_empty() || !manifest.projects.is_empty() {
         resolve_workspace(
             &manifest,
             &manifest_root,
@@ -527,7 +539,7 @@ fn resolve_for(manifest_dir: &Path, pkg_name: &str) -> Result<Resolution> {
         )?
     } else {
         bail!(
-            "{} has neither [project] (per-project) nor [internals]/[projects] (workspace)",
+            "{} has neither [project] (per-project) nor [shared_types]/[projects] (workspace)",
             manifest_path.display()
         );
     };
@@ -554,8 +566,13 @@ fn project_infos(manifest: &Manifest) -> Vec<ProjectInfo> {
         .iter()
         .map(|(name, d)| ProjectInfo {
             name: name.clone(),
-            publications: d.publications.clone(),
-            dependencies: d.dependencies.clone(),
+            types: d
+                .types
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
         })
         .collect()
 }
@@ -569,15 +586,15 @@ use discovery::{find_manifest, parse_manifest};
 mod ports;
 pub use ports::compile_ports;
 
-/// per-project: own publications plus each dependency project's public types.
+/// per-project: own `exported_types` plus each dependency project's public types.
 fn resolve_per_project(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
     let _project = manifest.project.as_ref().expect("project present");
     let mut entries = Vec::new();
 
     // Our own public types.
-    for (alias, td) in &manifest.publications {
-        ensure_rust_ident(alias, "publication alias", "[publications]")?;
-        entries.push(make_entry(alias, td, root, Exposure::Publications)?);
+    for (alias, td) in &manifest.exported_types {
+        ensure_rust_ident(alias, "publication alias", "[exported_types]")?;
+        entries.push(make_entry(alias, td, root, Exposure::ExportedTypes)?);
     }
 
     // The dependency projects' public types (re-exported as dependencies::<dep>::*).
@@ -601,8 +618,8 @@ fn resolve_per_project(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
                 dep_manifest_path.display()
             )
         })?;
-        for (alias, td) in &dep_manifest.publications {
-            ensure_rust_ident(alias, "publication alias", "dependency [publications]")?;
+        for (alias, td) in &dep_manifest.exported_types {
+            ensure_rust_ident(alias, "publication alias", "dependency [exported_types]")?;
             entries.push(make_entry(
                 alias,
                 td,
@@ -615,8 +632,8 @@ fn resolve_per_project(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
     Ok(entries)
 }
 
-/// Workspace shared: all of [internals] into `internals::*`. A topic follows the type name, so it does
-/// not depend on which project publishes it. With a `[schema]`, the mode splits on whether we are the
+/// Workspace shared: all of [`shared_types`] into `shared_types::*`. A topic follows the type name, so it does
+/// not depend on which project publishes it. With a `[schema_crates]`, the mode splits on whether we are the
 /// schema crate itself or a consuming launch. Called from build.rs (`compile`) per package.
 #[cfg(feature = "compile")]
 fn resolve_workspace(
@@ -626,7 +643,7 @@ fn resolve_workspace(
     manifest_path: &Path,
     parts: &[SchemaPart],
 ) -> Result<(Mode, Vec<Entry>)> {
-    // The mode follows from whether there is a [schema] and whether we are the schema crate itself.
+    // The mode follows from whether there is a [schema_crates] and whether we are the schema crate itself.
     let in_projects = manifest.projects.contains_key(pkg_name);
     let mode = if parts.is_empty() {
         if in_projects {
@@ -643,7 +660,7 @@ fn resolve_workspace(
             part: Some(mine.name.clone()),
         }
     } else if in_projects {
-        // A consuming launch has to appear in [projects.<pkg>]. internals is the union of all parts.
+        // A consuming launch has to appear in [projects.<pkg>]. shared_types is the union of all parts.
         Mode::SchemaConsumer {
             crate_idents: parts.iter().map(SchemaPart::crate_ident).collect(),
         }
@@ -657,48 +674,48 @@ fn resolve_workspace(
         );
     };
 
-    // entries resolves [internals] in every mode (in consumer mode it only feeds introspection and
+    // entries resolves [shared_types] in every mode (in consumer mode it only feeds introspection and
     // diagnostics; no proto is compiled). The owning part follows from the proto path.
-    let mut entries = internals_entries(manifest, root)?;
+    let mut entries = shared_types_entries(manifest, root)?;
     assign_owners(&mut entries, parts, manifest_path)?;
 
     Ok((mode, entries))
 }
 
-/// Turn `[internals]` into `Exposure::Internals` entries (the owning part is still empty).
-fn internals_entries(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
+/// Turn `[shared_types]` into `Exposure::SharedTypes` entries (the owning part is still empty).
+fn shared_types_entries(manifest: &Manifest, root: &Path) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
-    for (alias, td) in &manifest.internals {
-        ensure_rust_ident(alias, "internals alias", "[internals]")?;
-        entries.push(make_entry(alias, td, root, Exposure::Internals)?);
+    for (alias, td) in &manifest.shared_types {
+        ensure_rust_ident(alias, "shared_types alias", "[shared_types]")?;
+        entries.push(make_entry(alias, td, root, Exposure::SharedTypes)?);
     }
     Ok(entries)
 }
 
 // ---------------------------------------------------------------------------
-// Normalizing [schema] and assigning ownership
+// Normalizing [schema_crates] and assigning ownership
 // ---------------------------------------------------------------------------
 
-/// The canonical form for comparing paths, so that `[internals].proto` and `[schema.*].protos`
+/// The canonical form for comparing paths, so that `[shared_types].proto` and `[schema_crates.*].protos`
 /// naming the same file in different spellings (`./x.proto` vs `x.proto`) still compare equal.
 fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Normalize `[schema]` into a list of parts and validate the identifiers and the dependencies.
-/// Empty when there is no `[schema]`.
+/// Normalize `[schema_crates]` into a list of parts and validate the identifiers and the dependencies.
+/// Empty when there is no `[schema_crates]`.
 fn normalize_schema(manifest: &Manifest, root: &Path) -> Result<Vec<SchemaPart>> {
-    let Some(map) = &manifest.schema else {
+    let Some(map) = &manifest.schema_crates else {
         return Ok(Vec::new());
     };
     if map.is_empty() {
-        bail!("[schema] に区画がありません([schema.<name>] を書いてください)");
+        bail!("[schema_crates] に区画がありません([schema_crates.<name>] を書いてください)");
     }
     let mut parts = Vec::new();
     for (name, def) in map {
         if def.protos.is_empty() {
             bail!(
-                "[schema.{name}] の protos が空です(この区画が所有する proto を列挙してください)"
+                "[schema_crates.{name}] の protos が空です(この区画が所有する proto を列挙してください)"
             );
         }
         let mut protos = Vec::new();
@@ -706,7 +723,7 @@ fn normalize_schema(manifest: &Manifest, root: &Path) -> Result<Vec<SchemaPart>>
             let abs = resolve_relative(root, Path::new(p));
             if !abs.is_file() {
                 bail!(
-                    "[schema.{name}] の proto が見つかりません: {}",
+                    "[schema_crates.{name}] の proto が見つかりません: {}",
                     abs.display()
                 );
             }
@@ -716,18 +733,18 @@ fn normalize_schema(manifest: &Manifest, root: &Path) -> Result<Vec<SchemaPart>>
             name: name.clone(),
             crate_name: def.crate_name.clone(),
             protos,
-            depends: def.depends.clone(),
+            depends_on: def.depends_on.clone(),
         });
     }
 
     for p in &parts {
-        ensure_rust_ident(&p.crate_ident(), "[schema].crate", "[schema]")?;
+        ensure_rust_ident(&p.crate_ident(), "[schema_crates].crate", "[schema_crates]")?;
     }
     validate_depends(&parts)?;
     Ok(parts)
 }
 
-/// Check that `depends` names real parts, has no cycles, and is **transitively closed**.
+/// Check that `depends_on` names real parts, has no cycles, and is **transitively closed**.
 ///
 /// The closure is required because of protoc: if `c`'s proto imports `b`'s and that `b` imports `a`'s,
 /// then `a`'s types land in `c`'s descriptor set as well. Unless `c` externs `a`, `a`'s types are
@@ -738,20 +755,20 @@ fn validate_depends(parts: &[SchemaPart]) -> Result<()> {
 
     for p in parts {
         let me = p.name.as_str();
-        for dep in &p.depends {
+        for dep in &p.depends_on {
             if dep == me {
-                bail!("[schema.{me}] の depends が自分自身を指しています");
+                bail!("[schema_crates.{me}] の depends_on が自分自身を指しています");
             }
             if !by_name.contains_key(dep.as_str()) {
-                bail!("[schema.{me}] の depends にある `{dep}` という区画がありません");
+                bail!("[schema_crates.{me}] の depends_on にある `{dep}` という区画がありません");
             }
         }
         // Walk the transitive closure and name what was left undeclared (this catches cycles too).
-        let mut stack: Vec<&str> = p.depends.iter().map(String::as_str).collect();
+        let mut stack: Vec<&str> = p.depends_on.iter().map(String::as_str).collect();
         let mut seen: Vec<&str> = Vec::new();
         while let Some(cur) = stack.pop() {
             if cur == me {
-                bail!("[schema] の depends に循環があります(`{me}` に戻ってきました)");
+                bail!("[schema_crates] の depends_on に循環があります(`{me}` に戻ってきました)");
             }
             if seen.contains(&cur) {
                 continue;
@@ -760,11 +777,11 @@ fn validate_depends(parts: &[SchemaPart]) -> Result<()> {
             let Some(part) = by_name.get(cur) else {
                 continue;
             };
-            for next in &part.depends {
-                if !p.depends.iter().any(|d| d == next) {
+            for next in &part.depends_on {
+                if !p.depends_on.iter().any(|d| d == next) {
                     bail!(
-                        "[schema.{me}] の depends は推移的に閉じている必要があります: \
-                         `{cur}` が `{next}` に依存しているので、[schema.{me}] の depends にも \
+                        "[schema_crates.{me}] の depends_on は推移的に閉じている必要があります: \
+                         `{cur}` が `{next}` に依存しているので、[schema_crates.{me}] の depends_on にも \
                          `{next}` を、Cargo の依存にもそのクレートを足してください"
                     );
                 }
@@ -775,7 +792,7 @@ fn validate_depends(parts: &[SchemaPart]) -> Result<()> {
     Ok(())
 }
 
-/// Decide each `[internals]` type's owning named part from its proto path.
+/// Decide each `[shared_types]` type's owning named part from its proto path.
 /// A proto belonging to no part, or one two parts fight over, is rejected here.
 fn assign_owners(entries: &mut [Entry], parts: &[SchemaPart], manifest_path: &Path) -> Result<()> {
     // An unpartitioned workspace compiles its catalog in each project.
@@ -790,7 +807,7 @@ fn assign_owners(entries: &mut [Entry], parts: &[SchemaPart], manifest_path: &Pa
             let key = canonical(proto);
             if let Some(prev) = owner_of.get(&key) {
                 bail!(
-                    "proto {} を [schema.{prev}] と [schema.{name}] が両方 protos に挙げています",
+                    "proto {} を [schema_crates.{prev}] と [schema_crates.{name}] が両方 protos に挙げています",
                     proto.display()
                 );
             }
@@ -802,7 +819,7 @@ fn assign_owners(entries: &mut [Entry], parts: &[SchemaPart], manifest_path: &Pa
         let key = canonical(&e.proto);
         let Some(owner) = owner_of.get(&key) else {
             bail!(
-                "{} の [internals] `{}` が使う proto {} は、どの [schema.<name>] の protos にも \
+                "{} の [shared_types] `{}` が使う proto {} は、どの [schema_crates.<name>] の protos にも \
                  挙がっていません(所有区画は proto パスで決まります)",
                 manifest_path.display(),
                 e.alias,
@@ -849,7 +866,7 @@ fn split_message(message: &str) -> Result<(Vec<String>, String)> {
 
 /// "What this package compiles and what it merely references", gathered into one place.
 /// For a workspace / per-project it simply holds everything; only while building
-/// one `[schema.<name>]` part is it narrowed to our share, with `externs` filled in.
+/// one `[schema_crates.<name>]` part is it narrowed to our share, with `externs` filled in.
 #[cfg(feature = "compile")]
 struct CompilePlan<'a> {
     /// The types to emit (when building a part, only the ones we own).
@@ -909,13 +926,13 @@ fn compile_plan(resolution: &Resolution) -> Result<CompilePlan<'_>> {
         .schema_parts
         .iter()
         .find(|p| p.name == part_name)
-        .with_context(|| format!("[schema.{part_name}] が見つかりません"))?;
+        .with_context(|| format!("[schema_crates.{part_name}] が見つかりません"))?;
     let protos = part.protos.clone();
 
     // Make the common ancestor of our protos the single include. The file names in the descriptor
     // follow from it too, so it must be the very include handed downstream.
     let root = common_ancestor(&protos)
-        .with_context(|| format!("[schema.{part_name}] の protos に共通の親がありません"))?;
+        .with_context(|| format!("[schema_crates.{part_name}] の protos に共通の親がありません"))?;
     let own_names = protos
         .iter()
         .map(|p| {
@@ -928,12 +945,12 @@ fn compile_plan(resolution: &Resolution) -> Result<CompilePlan<'_>> {
 
     let mut includes = vec![root.clone()];
     let mut externs = Vec::new();
-    for dep_name in &part.depends {
+    for dep_name in &part.depends_on {
         let dep = resolution
             .schema_parts
             .iter()
             .find(|p| p.name == *dep_name)
-            .with_context(|| format!("[schema.{dep_name}] が見つかりません"))?;
+            .with_context(|| format!("[schema_crates.{dep_name}] が見つかりません"))?;
         let (include, types) = read_dep_metadata(&dep.crate_name)?;
         if !includes.contains(&include) {
             includes.push(include);
@@ -1065,7 +1082,7 @@ fn compile_protos(
         .out_dir(out_dir)
         // Bundle every package into one file so it can be included as nested pub mods.
         .include_file("reiny_protos.rs")
-        // Both the type → fingerprint (Topic::SCHEMA) and the FQN list handed downstream come from here.
+        // Both the type → fingerprint (MessageType::SCHEMA_FINGERPRINT) and the FQN list handed downstream come from here.
         .file_descriptor_set_path(protoc_path(&descriptor_path));
     // Types owned by another schema crate get "the reference rewritten, nothing generated".
     // That is the mechanism keeping a leaf type from being generated twice across the split.
@@ -1242,7 +1259,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 /// Look up the fingerprint of the fully qualified message name `message` in an encoded
 /// `FileDescriptorSet`. `Ok(None)` when the set does not have it. It is the same computation as a
-/// generated type's `Topic::SCHEMA`, so it can be matched against what rides on the bus.
+/// generated type's `MessageType::SCHEMA_FINGERPRINT`, so it can be matched against what rides on the bus.
 #[cfg(feature = "descriptors")]
 pub fn message_fingerprint(file_set: &[u8], message: &str) -> Result<Option<u64>> {
     let fds = decode_file_set(file_set)?;
@@ -1343,22 +1360,22 @@ fn render_generated(
     out.push_str("}\n\n");
 
     // The per-module re-exports.
-    let publications: Vec<&Entry> = entries
+    let exported_types: Vec<&Entry> = entries
         .iter()
         .copied()
-        .filter(|e| e.exposure == Exposure::Publications)
+        .filter(|e| e.exposure == Exposure::ExportedTypes)
         .collect();
-    if !publications.is_empty() {
-        render_reexport_module(&mut out, "publications", "super", &publications);
+    if !exported_types.is_empty() {
+        render_reexport_module(&mut out, "exported_types", "super", &exported_types);
     }
 
-    let internals: Vec<&Entry> = entries
+    let shared_types: Vec<&Entry> = entries
         .iter()
         .copied()
-        .filter(|e| e.exposure == Exposure::Internals)
+        .filter(|e| e.exposure == Exposure::SharedTypes)
         .collect();
-    if !internals.is_empty() {
-        render_reexport_module(&mut out, "internals", "super", &internals);
+    if !shared_types.is_empty() {
+        render_reexport_module(&mut out, "shared_types", "super", &shared_types);
     }
 
     // dependencies nests by project name.
@@ -1395,10 +1412,10 @@ fn render_generated(
         out.push_str("}\n\n");
     }
 
-    // The descriptor set prost wrote. `Topic::DESCRIPTOR` points at it and a publisher announces it at
+    // The descriptor set prost wrote. `MessageType::DESCRIPTOR` points at it and a publisher announces it at
     // `@schema` (`reiny bag record` picks it up and embeds it in the MCAP).
     out.push_str(
-        "/// The `FileDescriptorSet` of this crate's protos (for `reiny::Topic::DESCRIPTOR`).\n",
+        "/// The `FileDescriptorSet` of this crate's protos (for `reiny::MessageType::DESCRIPTOR`).\n",
     );
     out.push_str("#[doc(hidden)]\n#[allow(dead_code, unreachable_pub)]\n");
     out.push_str(
@@ -1410,8 +1427,8 @@ fn render_generated(
     // Every generated topic must carry its fingerprint and real descriptor.
     let mut seen = Vec::new();
     out.push_str(
-        "// type → topic (publish: reiny/<domain>/<id>/<TYPE>, \
-         subscribe: reiny/<domain>/*/<TYPE>)\n",
+        "// type → topic (publish: reiny/<domain>/<id>/<TYPE_NAME>, \
+         subscribe: reiny/<domain>/*/<TYPE_NAME>)\n",
     );
     for e in entries {
         let path = e.type_path();
@@ -1424,21 +1441,20 @@ fn render_generated(
             .get(&fq_name)
             .with_context(|| format!("missing schema fingerprint for message {fq_name}"))?;
         let schema = format!(
-            " const SCHEMA: u64 = {fp:#018x}; \
+            " const SCHEMA_FINGERPRINT: u64 = {fp:#018x}; \
                  const DESCRIPTOR: Option<::reiny::Descriptor> = \
                  Some(::reiny::Descriptor {{ message: {fq_name:?}, file_set: REINY_DESCRIPTORS }});"
         );
         writeln!(
             out,
-            "impl ::reiny::Topic for {path} {{ const TYPE: &'static str = {:?};{schema} }}",
-            e.ident
+            "impl ::reiny::MessageType for {path} {{ const TYPE_NAME: &'static str = {fq_name:?};{schema} }}"
         )
         .ok();
     }
 
     // [services]: request type → response type. The impl lands in the crate defining the request type.
     if !services.is_empty() {
-        out.push_str("\n// [services] (the request type is the service's address: reiny/<domain>/<id>/<TYPE>)\n");
+        out.push_str("\n// [services] (the request type is the service's address: reiny/<domain>/<id>/<TYPE_NAME>)\n");
         for (request, response) in services {
             writeln!(
                 out,
@@ -1491,25 +1507,25 @@ fn service_impls(resolution: &Resolution, plan_entries: &[&Entry]) -> Vec<(Strin
 }
 
 /// The thin output for a schema-consuming launch. No proto is recompiled; the schema crates'
-/// `internals` is simply shown as `crate::internals` (the `Topic`/`Message` impls exist exactly once,
+/// `shared_types` is simply shown as `crate::shared_types` (the `MessageType`/`Message` impls exist exactly once,
 /// in the schema crate, and coherence makes them global).
 #[cfg(feature = "compile")]
 fn render_consumer(crate_idents: &[String]) -> String {
     let mut out = String::new();
     out.push_str("// @generated by reiny-build — schema consumer (no proto recompiled).\n");
-    // Re-export the schema crates' public types as internals. The `impl Topic` / `impl Message` tied to
+    // Re-export the schema crates' public types as shared_types. The `impl MessageType` / `impl Message` tied to
     // each type are already defined in the schema crate, so showing the types is all that is needed.
-    // Across a multi-crate split it is the union of every part (aliases are [internals] keys: no duplicates).
-    out.push_str("pub mod internals {\n");
+    // Across a multi-crate split it is the union of every part (aliases are [shared_types] keys: no duplicates).
+    out.push_str("pub mod shared_types {\n");
     for ident in crate_idents {
-        writeln!(out, "    pub use ::{ident}::internals::*;").ok();
+        writeln!(out, "    pub use ::{ident}::shared_types::*;").ok();
     }
     out.push_str("}\n");
     out
 }
 
 /// From the `[config]` TOML table, generate the typed `config::Config` (with defaults) and an extension
-/// trait that grows `config()` on `::reiny::Cloudy`. `#[reiny::main]`'s glob re-export brings the trait
+/// trait that grows `config()` on `::reiny::ModuleContext`. `#[reiny::main]`'s glob re-export brings the trait
 /// into scope, so user code can write `cloudy.config()`.
 #[cfg(feature = "compile")]
 fn render_config(table: &toml::Table) -> Result<String> {
@@ -1597,9 +1613,9 @@ fn render_config(table: &toml::Table) -> Result<String> {
 
     // The `cloudy.config()` extension. The glob re-export brings it into scope.
     out.push_str(
-        "#[doc(hidden)]\npub trait __CloudyConfigExt { fn config(&self) -> config::Config; }\n",
+        "#[doc(hidden)]\npub trait __ModuleContextConfigExt { fn config(&self) -> config::Config; }\n",
     );
-    out.push_str("impl __CloudyConfigExt for ::reiny::Cloudy {\n");
+    out.push_str("impl __ModuleContextConfigExt for ::reiny::ModuleContext {\n");
     out.push_str("    fn config(&self) -> config::Config {\n");
     out.push_str("        match self.config_table() {\n");
     out.push_str("            Some(t) => config::Config::__from_table(t),\n");
@@ -1695,24 +1711,24 @@ fn validate_config(config: Option<&toml::Table>) -> Result<()> {
 /// Whether two different types were assigned the same topic segment (type name). Since type = topic, two
 /// different types sharing a segment collide on the wire. Reject that early.
 fn validate_no_topic_collision(entries: &[Entry], manifest_path: &Path) -> Result<()> {
-    // ident (= topic segment) → the first type path seen.
+    // Complete protobuf name → the first type path seen.
     let mut by_segment: BTreeMap<String, String> = BTreeMap::new();
     for e in entries {
         let path = e.type_path();
-        if let Some(prev) = by_segment.get(&e.ident) {
+        if let Some(prev) = by_segment.get(&e.fq_name()) {
             // Another alias for the same type is not a collision. A different type would cross the wiring.
             if *prev != path {
                 bail!(
                     "トピックセグメント `{}` が異なる型に重複しています(`{}` と `{}`)。\
                      型 = トピックなので衝突します({})",
-                    e.ident,
+                    e.fq_name(),
                     prev,
                     path,
                     manifest_path.display()
                 );
             }
         } else {
-            by_segment.insert(e.ident.clone(), path);
+            by_segment.insert(e.fq_name(), path);
         }
     }
     Ok(())
@@ -1720,11 +1736,11 @@ fn validate_no_topic_collision(entries: &[Entry], manifest_path: &Path) -> Resul
 
 /// Look the `[services]` aliases up in the catalog and validate them.
 ///
-/// - An alias is a `[publications]` / `[internals]` key, or a per-project dependency type `<dep>::<Alias>`.
+/// - An alias is a `[exported_types]` / `[shared_types]` key, or a per-project dependency type `<dep>::<Alias>`.
 /// - The same request type cannot serve two services (Rust has one associated type; this names the
 ///   section and stops before rustc's coherence error does).
-/// - In a multi-crate `[schema]`, the response's owning part must be the request's own part or in its
-///   `depends` (the impl can only be written in the crate that defines the request type).
+/// - In a multi-crate `[schema_crates]`, the response's owning part must be the request's own part or in its
+///   `depends_on` (the impl can only be written in the crate that defines the request type).
 fn resolve_services(
     manifest: &Manifest,
     entries: &[Entry],
@@ -1739,7 +1755,7 @@ fn resolve_services(
             find_alias(entries, alias).with_context(|| {
                 format!(
                     "[services] `{name}` の {what} `{alias}` はカタログにありません\
-                     ([publications] / [internals] のキー、または依存型なら `<dep>::<Alias>`)({})",
+                     ([exported_types] / [shared_types] のキー、または依存型なら `<dep>::<Alias>`)({})",
                     manifest_path.display()
                 )
             })
@@ -1763,12 +1779,12 @@ fn resolve_services(
             let reachable = part.is_some_and(|p| {
                 resp.owner
                     .as_deref()
-                    .is_some_and(|o| p.depends.iter().any(|d| d == o))
+                    .is_some_and(|o| p.depends_on.iter().any(|d| d == o))
             });
             if !reachable {
                 bail!(
-                    "[services] `{name}` の response `{}` は [schema.{}] が所有していますが、\
-                     request `{}` を所有する [schema.{req_owner}] の depends に入っていません\
+                    "[services] `{name}` の response `{}` は [schema_crates.{}] が所有していますが、\
+                     request `{}` を所有する [schema_crates.{req_owner}] の depends_on に入っていません\
                      (impl は request 型を定義するクレートに出ます)({})",
                     def.response,
                     resp.owner.as_deref().unwrap_or("?"),
@@ -1794,7 +1810,8 @@ fn find_alias(entries: &[Entry], alias: &str) -> Option<usize> {
         })
     } else {
         entries.iter().position(|e| {
-            matches!(e.exposure, Exposure::Publications | Exposure::Internals) && e.alias == alias
+            matches!(e.exposure, Exposure::ExportedTypes | Exposure::SharedTypes)
+                && e.alias == alias
         })
     }
 }
@@ -1825,11 +1842,11 @@ fn report_verbose(res: &Resolution) {
         ));
     }
     for part in res.schema_crates() {
-        let label = part.part.as_deref().unwrap_or("(single)");
-        let deps = if part.depends.is_empty() {
+        let label = &part.name;
+        let deps = if part.depends_on.is_empty() {
             String::new()
         } else {
-            format!(" depends on {}", part.depends.join(", "))
+            format!(" depends on {}", part.depends_on.join(", "))
         };
         warn(&format!("schema [{label}] = {}{deps}", part.crate_name));
     }
@@ -1838,11 +1855,11 @@ fn report_verbose(res: &Resolution) {
             "type {} = {} -> topic reiny/<domain>/<id>/{} [{}]{}",
             t.alias,
             t.message,
-            t.topic_segment,
+            t.type_name,
             t.module,
             t.owner
                 .as_deref()
-                .map_or_else(String::new, |o| format!(" owned by [schema.{o}]"))
+                .map_or_else(String::new, |o| format!(" owned by [schema_crates.{o}]"))
         ));
     }
     for s in res.services() {
@@ -1909,7 +1926,7 @@ mod tests {
             alias: "Ping".into(),
             package: vec!["ping".into()],
             ident: "Ping".into(),
-            exposure: Exposure::Publications,
+            exposure: Exposure::ExportedTypes,
             proto: PathBuf::from("/x/ping.proto"),
             owner: None,
         };
@@ -1923,7 +1940,7 @@ mod tests {
             [project]
             name = "ping"
             version = "0.1.0"
-            [publications]
+            [exported_types]
             Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
             [dependencies]
             pong = { version = "0.1", path = "../pong" }
@@ -1931,7 +1948,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m.project.unwrap().name, "ping");
-        assert!(m.publications.contains_key("Ping"));
+        assert!(m.exported_types.contains_key("Ping"));
         assert_eq!(m.dependencies["pong"].path, PathBuf::from("../pong"));
     }
 
@@ -1939,44 +1956,43 @@ mod tests {
     fn workspace_manifest_parses() {
         let m: Manifest = toml::from_str(
             r#"
-            [workspace]
-            version = "0.1.0"
-            [internals]
+            [shared_types]
             Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
             Pong = { proto = "proto/pong.proto", message = "pong.Pong" }
             [projects.ping]
-            publications = ["Ping"]
-            dependencies = ["Pong"]
+            types = ["Ping", "Pong"]
         "#,
         )
         .unwrap();
         assert!(m.project.is_none());
-        assert_eq!(m.internals.len(), 2);
-        assert_eq!(m.projects["ping"].publications, vec!["Ping".to_string()]);
+        assert_eq!(m.shared_types.len(), 2);
+        assert_eq!(
+            m.projects["ping"].types,
+            vec!["Ping".to_string(), "Pong".to_string()]
+        );
 
-        // [projects.*] shows up verbatim as the introspection view (reiny run's flow diagram).
+        // Package type usage is deduplicated in the introspection view.
         let infos = project_infos(&m);
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].name, "ping");
-        assert_eq!(infos[0].publications, vec!["Ping".to_string()]);
-        assert_eq!(infos[0].dependencies, vec!["Pong".to_string()]);
+        assert_eq!(infos[0].types, vec!["Ping".to_string(), "Pong".to_string()]);
     }
 
     #[test]
     fn schema_manifest_parses() {
         let m: Manifest = toml::from_str(
             r#"
-            [internals]
+            [shared_types]
             Ping = { proto = "proto/ping.proto", message = "ping.Ping" }
-            [schema.messages]
+            [schema_crates.messages]
             crate = "myapp-schema"
             protos = ["proto/ping.proto"]
             [projects.ping]
-            publications = ["Ping"]
+            types = ["Ping"]
         "#,
         )
         .unwrap();
-        let parts = m.schema.unwrap();
+        let parts = m.schema_crates.unwrap();
         assert_eq!(parts.len(), 1);
         assert_eq!(parts["messages"].crate_name, "myapp-schema");
         assert_eq!(parts["messages"].protos, ["proto/ping.proto"]);
@@ -1986,32 +2002,32 @@ mod tests {
     fn multi_schema_manifest_parses() {
         let m: Manifest = toml::from_str(
             r#"
-            [internals]
+            [shared_types]
             Pose = { proto = "proto/geometry/geometry.proto", message = "hs.Pose" }
-            [schema.geometry]
+            [schema_crates.geometry]
             crate = "myapp-proto-geometry"
             protos = ["proto/geometry/geometry.proto"]
-            [schema.state]
+            [schema_crates.state]
             crate = "myapp-proto-state"
             protos = ["proto/state/state.proto"]
-            depends = ["geometry"]
+            depends_on = ["geometry"]
         "#,
         )
         .unwrap();
-        let parts = m.schema.unwrap();
+        let parts = m.schema_crates.unwrap();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts["state"].crate_name, "myapp-proto-state");
-        assert_eq!(parts["state"].depends, vec!["geometry".to_string()]);
+        assert_eq!(parts["state"].depends_on, vec!["geometry".to_string()]);
         assert_eq!(parts["geometry"].protos.len(), 1);
     }
 
-    /// A part for tests (protos never touch a real file here — only the depends validation is exercised).
-    fn part(name: &str, depends: &[&str]) -> SchemaPart {
+    /// A part for tests (protos never touch a real file here — only the `depends_on` validation is exercised).
+    fn part(name: &str, depends_on: &[&str]) -> SchemaPart {
         SchemaPart {
             name: name.to_string(),
             crate_name: format!("p-{name}"),
             protos: Vec::new(),
-            depends: depends.iter().map(|d| (*d).to_string()).collect(),
+            depends_on: depends_on.iter().map(|d| (*d).to_string()).collect(),
         }
     }
 
@@ -2051,13 +2067,13 @@ mod tests {
                 name: "geometry".into(),
                 crate_name: "p-geometry".into(),
                 protos: vec![PathBuf::from("/x/geometry.proto")],
-                depends: Vec::new(),
+                depends_on: Vec::new(),
             },
             SchemaPart {
                 name: "state".into(),
                 crate_name: "p-state".into(),
                 protos: vec![PathBuf::from("/x/state.proto")],
-                depends: vec!["geometry".into()],
+                depends_on: vec!["geometry".into()],
             },
         ];
         let mut entries = vec![
@@ -2065,7 +2081,7 @@ mod tests {
                 alias: "Pose".into(),
                 package: vec!["hs".into()],
                 ident: "Pose".into(),
-                exposure: Exposure::Internals,
+                exposure: Exposure::SharedTypes,
                 proto: PathBuf::from("/x/geometry.proto"),
                 owner: None,
             },
@@ -2073,7 +2089,7 @@ mod tests {
                 alias: "RobotState".into(),
                 package: vec!["hs".into()],
                 ident: "RobotState".into(),
-                exposure: Exposure::Internals,
+                exposure: Exposure::SharedTypes,
                 proto: PathBuf::from("/x/state.proto"),
                 owner: None,
             },
@@ -2177,14 +2193,14 @@ mod tests {
     }
 
     #[test]
-    fn topic_collision_is_rejected() {
-        // The same ident in a different package yields the same topic segment → a collision.
+    fn distinct_packages_have_distinct_type_names() {
+        // The same identifier in different packages yields distinct full transport names.
         let entries = vec![
             Entry {
                 alias: "A".into(),
                 package: vec!["a".into()],
                 ident: "Ping".into(),
-                exposure: Exposure::Internals,
+                exposure: Exposure::SharedTypes,
                 proto: PathBuf::from("/x/a.proto"),
                 owner: None,
             },
@@ -2192,13 +2208,12 @@ mod tests {
                 alias: "B".into(),
                 package: vec!["b".into()],
                 ident: "Ping".into(),
-                exposure: Exposure::Internals,
+                exposure: Exposure::SharedTypes,
                 proto: PathBuf::from("/x/b.proto"),
                 owner: None,
             },
         ];
-        let err = validate_no_topic_collision(&entries, Path::new("/x/schema.yaml")).unwrap_err();
-        assert!(err.to_string().contains("Ping"));
+        assert!(validate_no_topic_collision(&entries, Path::new("/x/schema.yaml")).is_ok());
     }
 
     fn svc_entries() -> Vec<Entry> {
@@ -2211,15 +2226,15 @@ mod tests {
             owner: None,
         };
         vec![
-            mk("Add", "Add", Exposure::Internals),
-            mk("Sum", "Sum", Exposure::Internals),
+            mk("Add", "Add", Exposure::SharedTypes),
+            mk("Sum", "Sum", Exposure::SharedTypes),
             mk("Echo", "Echo", Exposure::Dependencies("dep".into())),
         ]
     }
 
     fn svc_manifest(services: &str) -> Manifest {
         toml::from_str(&format!(
-            "[internals]\nAdd = {{ proto = \"calc.proto\", message = \"calc.Add\" }}\n[services]\n{services}"
+            "[shared_types]\nAdd = {{ proto = \"calc.proto\", message = \"calc.Add\" }}\n[services]\n{services}"
         ))
         .unwrap()
     }
@@ -2264,7 +2279,7 @@ mod tests {
                 alias: "A".into(),
                 package: vec!["a".into()],
                 ident: "Ping".into(),
-                exposure: Exposure::Publications,
+                exposure: Exposure::ExportedTypes,
                 proto: PathBuf::from("/x/a.proto"),
                 owner: None,
             },
@@ -2295,7 +2310,7 @@ mod tests {
 
         let fingerprints = BTreeMap::from([(entry.fq_name(), 42)]);
         let out = render_generated(&[entry], None, &fingerprints, &[]).unwrap();
-        assert!(out.contains("const SCHEMA: u64 = 0x000000000000002a;"));
+        assert!(out.contains("const SCHEMA_FINGERPRINT: u64 = 0x000000000000002a;"));
         assert!(out.contains(
             "Some(::reiny::Descriptor { message: \"calc.Add\", file_set: REINY_DESCRIPTORS })"
         ));
@@ -2308,7 +2323,7 @@ mod tests {
     #[cfg(feature = "compile")]
     fn consumer_render_reexports_schema_crate() {
         let out = render_consumer(&["myapp_schema".to_string()]);
-        assert!(out.contains("pub use ::myapp_schema::internals::*"));
+        assert!(out.contains("pub use ::myapp_schema::shared_types::*"));
     }
 
     /// A two-file `FileDescriptorSet` (msg.proto imports geometry.proto), assembled by hand.

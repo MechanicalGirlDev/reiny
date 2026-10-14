@@ -18,7 +18,7 @@ async fn binding_files_are_strict_and_never_downgrade_to_standalone() {
         opts.module_report_path = None;
 
         // When startup parses that contract, then it fails instead of widening subscriptions.
-        assert!(Cloudy::open(opts).await.is_err());
+        assert!(ModuleContext::open(opts).await.is_err());
     }
 }
 
@@ -31,7 +31,7 @@ async fn invalid_namespace_segments_are_rejected_at_startup() {
         let opts = options(Arc::new(Local::new()), bindings(namespace));
 
         // When startup validates the namespace, then invalid paths never reach the engine.
-        assert!(Cloudy::open(opts).await.is_err());
+        assert!(ModuleContext::open(opts).await.is_err());
     }
 }
 
@@ -45,7 +45,7 @@ async fn managed_config_parse_errors_are_fatal() {
     opts.config_path = Some(path);
 
     // When startup loads it, then defaults cannot conceal the invalid configuration.
-    assert!(Cloudy::open(opts).await.is_err());
+    assert!(ModuleContext::open(opts).await.is_err());
 }
 
 #[tokio::test]
@@ -60,7 +60,7 @@ async fn missing_bindings_are_rejected_before_opening_the_engine() {
     opts.config_path = Some(path);
 
     // When it opens, then absence of bindings cannot become an unrestricted context.
-    assert!(Cloudy::open(opts).await.is_err());
+    assert!(ModuleContext::open(opts).await.is_err());
 }
 
 #[tokio::test]
@@ -74,8 +74,8 @@ async fn relative_binding_and_report_paths_are_rejected() {
     report_path.module_report_path = Some(PathBuf::from("report.json"));
 
     // When either boundary is opened, then the ambiguous path is rejected.
-    assert!(Cloudy::open(binding_path).await.is_err());
-    assert!(Cloudy::open(report_path).await.is_err());
+    assert!(ModuleContext::open(binding_path).await.is_err());
+    assert!(ModuleContext::open(report_path).await.is_err());
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn owner_report_marker_cannot_be_cleared_for_an_unbound_engine() -> crate::Resul
         opts.engine = Some(bus.clone());
         opts.module_report_path = None;
         // When application code clears its inherited option before opening a second bus.
-        let opened = runtime.block_on(Cloudy::open(opts));
+        let opened = runtime.block_on(ModuleContext::open(opts));
         // Then the owned process cannot downgrade and creates no launch token.
         assert!(opened.is_err());
         assert_eq!(

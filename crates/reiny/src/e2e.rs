@@ -1,7 +1,7 @@
 //! Three real zenoh sessions, exercising the three things 0.3 added — presence / latched / domain
 //! isolation — end to end.
 //!
-//! They live in `src/` rather than `tests/` because `Cloudy::new` is private (growing the public API
+//! They live in `src/` rather than `tests/` because `ModuleContext::new` is private (growing the public API
 //! for a test's sake would be the wrong trade). Multicast scouting is off and the sessions are wired
 //! deterministically over one loopback TCP link, so nothing depends on CI's network.
 
@@ -16,9 +16,11 @@ use crate::engine::{
     BoxFuture, Callback, Caps, Engine, Guard, Key, Presence, QueryCallback, QueryParams,
     RawPublisher, RawReplies, Sample, Zenoh,
 };
-use crate::{Cloudy, Descriptor, History, PresenceEvent, Qos, Topic, shutdown::Shutdown};
+use crate::{
+    Descriptor, History, MessageType, ModuleContext, PresenceEvent, Qos, shutdown::Shutdown,
+};
 
-/// A wire type just for these tests. `impl Topic` is hand-written because that is precisely reiny's
+/// A wire type just for these tests. `impl MessageType` is hand-written because that is precisely reiny's
 /// promise — "a third party joins with their own type" — so this doubles as a regression test for it.
 #[derive(Clone, PartialEq, prost::Message)]
 struct Probe {
@@ -26,9 +28,9 @@ struct Probe {
     seq: u32,
 }
 
-impl Topic for Probe {
-    const TYPE: &'static str = "ReinyE2eProbe";
-    const SCHEMA: u64 = 0x1234;
+impl MessageType for Probe {
+    const TYPE_NAME: &'static str = "ReinyE2eProbe";
+    const SCHEMA_FINGERPRINT: u64 = 0x1234;
     const DESCRIPTOR: Option<crate::Descriptor> = None;
 }
 
@@ -46,16 +48,16 @@ struct StampedV2 {
     seq: u32,
 }
 
-impl Topic for StampedV1 {
-    const TYPE: &'static str = "ReinyE2eStamped";
+impl MessageType for StampedV1 {
+    const TYPE_NAME: &'static str = "ReinyE2eStamped";
     const DESCRIPTOR: Option<crate::Descriptor> = None;
-    const SCHEMA: u64 = 0x1111_1111_1111_1111;
+    const SCHEMA_FINGERPRINT: u64 = 0x1111_1111_1111_1111;
 }
 
-impl Topic for StampedV2 {
-    const TYPE: &'static str = "ReinyE2eStamped";
+impl MessageType for StampedV2 {
+    const TYPE_NAME: &'static str = "ReinyE2eStamped";
     const DESCRIPTOR: Option<crate::Descriptor> = None;
-    const SCHEMA: u64 = 0x2222_2222_2222_2222;
+    const SCHEMA_FINGERPRINT: u64 = 0x2222_2222_2222_2222;
 }
 
 /// A type that announces a descriptor. The bytes need not be a real descriptor set — reiny never
@@ -66,9 +68,9 @@ struct Described {
     seq: u32,
 }
 
-impl Topic for Described {
-    const TYPE: &'static str = "ReinyE2eDescribed";
-    const SCHEMA: u64 = 0x1234;
+impl MessageType for Described {
+    const TYPE_NAME: &'static str = "e2e.Described";
+    const SCHEMA_FINGERPRINT: u64 = 0x1234;
     const DESCRIPTOR: Option<Descriptor> = Some(Descriptor {
         message: "e2e.Described",
         file_set: b"not-a-real-descriptor-set",
@@ -108,8 +110,8 @@ async fn open_session(entries: &[(&str, String)]) -> zenoh::Session {
         .unwrap_or_else(|e| panic!("opening zenoh session: {e}"))
 }
 
-async fn cloudy(session: zenoh::Session, id: &str, domain: &str) -> Cloudy {
-    Cloudy::new(
+async fn cloudy(session: zenoh::Session, id: &str, domain: &str) -> ModuleContext {
+    ModuleContext::new(
         Arc::new(Zenoh::from_session(session)),
         id.to_string(),
         domain.to_string(),
@@ -123,7 +125,7 @@ async fn cloudy(session: zenoh::Session, id: &str, domain: &str) -> Cloudy {
 
 const PATIENCE: Duration = Duration::from_secs(5);
 
-/// All callers have already constructed their Cloudy instances. History subscribes atomically to
+/// All callers have already constructed their `ModuleContext` instances. History subscribes atomically to
 /// their launch-token arrivals, including the local launch, instead of polling transport counts.
 pub(crate) async fn wait_peers(session: &zenoh::Session, peers: usize) {
     let launches = session
@@ -255,7 +257,7 @@ async fn buffered_samples(buffered: &flume::Receiver<Sample>, ty: &str, count: u
 async fn presence_latched_and_domain_isolation() {
     let alpha = cloudy(session(true).await, "alpha", "lab").await;
     let (buffered_tx, buffered) = flume::unbounded();
-    let beta = Cloudy::new(
+    let beta = ModuleContext::new(
         Arc::new(Observed {
             zenoh: Zenoh::from_session(session(false).await),
             buffered: buffered_tx,
@@ -339,7 +341,11 @@ async fn presence_latched_and_domain_isolation() {
     receive_buffers(&alpha, &beta, &buffered).await;
 }
 
-async fn domain_isolation(alpha: &Cloudy, gamma: &Cloudy, publisher: &crate::Publisher<Probe>) {
+async fn domain_isolation(
+    alpha: &ModuleContext,
+    gamma: &ModuleContext,
+    publisher: &crate::Publisher<Probe>,
+) {
     // --- domain isolation: on the same fabric, a different domain sees nothing ---
     let other = gamma.publishers::<Probe>().await.expect("publishers()");
     assert!(
@@ -375,7 +381,11 @@ async fn domain_isolation(alpha: &Cloudy, gamma: &Cloudy, publisher: &crate::Pub
     assert_eq!((isolated.value.seq, isolated.source.as_str()), (9, "delta"));
 }
 
-async fn schema_fingerprints(alpha: &Cloudy, beta: &Cloudy, buffered: &flume::Receiver<Sample>) {
+async fn schema_fingerprints(
+    alpha: &ModuleContext,
+    beta: &ModuleContext,
+    buffered: &flume::Receiver<Sample>,
+) {
     // --- schema fingerprints: same topic, different shape, nothing arrives ---
     let (_stamped_observer, stamped_ready) = subscriber_signal(
         alpha.session().unwrap(),
@@ -395,7 +405,7 @@ async fn schema_fingerprints(alpha: &Cloudy, beta: &Cloudy, buffered: &flume::Re
         .expect("mismatching subscriber");
     matched_signal(&stamped_ready).await;
     stamped.send(StampedV1 { seq: 42 }).await.expect("send");
-    buffered_samples(buffered, StampedV1::TYPE, 2).await;
+    buffered_samples(buffered, StampedV1::TYPE_NAME, 2).await;
 
     let got = timeout(PATIENCE, same.recv())
         .await
@@ -415,11 +425,11 @@ async fn schema_fingerprints(alpha: &Cloudy, beta: &Cloudy, buffered: &flume::Re
     .await;
 }
 
-async fn schema_discovery(alpha: &Cloudy, beta: &Cloudy) {
+async fn schema_discovery(alpha: &ModuleContext, beta: &ModuleContext) {
     // --- @schema: a publisher with a DESCRIPTOR announces it beside its own key ---
     let (_schema_observer, schema_ready) = queryable_signal(
         beta.session().unwrap(),
-        "reiny/lab/alpha/ReinyE2eDescribed/@schema/e2e.Described".to_string(),
+        "reiny/lab/alpha/e2e.Described/@schema/e2e.Described".to_string(),
     );
     let described = alpha
         .publisher::<Described>()
@@ -443,7 +453,7 @@ async fn schema_discovery(alpha: &Cloudy, beta: &Cloudy) {
     assert_eq!(
         named,
         [(
-            "reiny/lab/alpha/ReinyE2eDescribed/@schema/e2e.Described".to_string(),
+            "reiny/lab/alpha/e2e.Described/@schema/e2e.Described".to_string(),
             b"not-a-real-descriptor-set".to_vec()
         )]
     );
@@ -464,7 +474,11 @@ async fn schema_discovery(alpha: &Cloudy, beta: &Cloudy) {
     drop(described);
 }
 
-async fn receive_buffers(alpha: &Cloudy, beta: &Cloudy, buffered: &flume::Receiver<Sample>) {
+async fn receive_buffers(
+    alpha: &ModuleContext,
+    beta: &ModuleContext,
+    buffered: &flume::Receiver<Sample>,
+) {
     // --- latest(n): letting samples pile up unread drops the oldest (the default Fifo keeps all 5) ---
     let (_burst_observer, burst_ready) = subscriber_signal(
         alpha.session().unwrap(),
@@ -481,7 +495,7 @@ async fn receive_buffers(alpha: &Cloudy, beta: &Cloudy, buffered: &flume::Receiv
     for seq in 1..=5 {
         burst.send(Probe { seq }).await.expect("send");
     }
-    buffered_samples(buffered, Probe::TYPE, 10).await;
+    buffered_samples(buffered, Probe::TYPE_NAME, 10).await;
     assert_eq!(ring.stats().received, 5);
     assert_eq!(ring.stats().dropped, 3);
     assert_eq!(fifo.stats().received, 5);
@@ -516,7 +530,7 @@ async fn receive_buffers(alpha: &Cloudy, beta: &Cloudy, buffered: &flume::Receiv
         }
     }
     burst.send(Probe { seq: 99 }).await.expect("send");
-    buffered_samples(buffered, Probe::TYPE, 2).await;
+    buffered_samples(buffered, Probe::TYPE_NAME, 2).await;
     for sub in [&mut ring, &mut fifo] {
         // After it arrives, provoke a "start taking it out, then drop" with an already-expired recv.
         let got = match timeout(Duration::ZERO, sub.recv()).await {

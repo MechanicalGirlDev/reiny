@@ -11,11 +11,11 @@ fn write(dir: &std::path::Path, name: &str, text: &str) {
     std::fs::write(path, text).expect("write fixture");
 }
 
-const PROVIDER: &str = "version: 2\ndeployment: test\nproviders:\n  process: {type: process}\n";
+const PROVIDER: &str = "version: 3\ndeployment: test\nproviders:\n  process: {type: process}\n";
 const PRODUCER: &str =
-    "version: 2\nrun: {provider: process, bin: producer}\nout:\n  state: {type: test.State}\n";
+    "version: 3\nrun: {provider: process, bin: producer}\nout:\n  state: {type: test.State}\n";
 const CONSUMER: &str =
-    "version: 2\nrun: {provider: process, bin: consumer}\nin:\n  state: {type: test.State}\n";
+    "version: 3\nrun: {provider: process, bin: consumer}\nin:\n  state: {type: test.State}\n";
 
 fn address(namespace: &str, input: bool, name: &str) -> PortAddress {
     PortAddress {
@@ -41,7 +41,7 @@ fn sibling_connection_resolves_exact_namespace_when_types_match() {
     write(
         fixture.path(),
         "c/main.yaml",
-        "version: 2\nrun: {provider: process, bin: consumer}\nin:\n  second: {type: test.State}\n  first: {type: test.State}\n",
+        "version: 3\nrun: {provider: process, bin: consumer}\nin:\n  second: {type: test.State}\n  first: {type: test.State}\n",
     );
     // When the deployment is planned.
     let plan = DeploymentPlan::load(fixture.path(), false).expect("valid plan");
@@ -92,13 +92,13 @@ fn parent_forwarding_resolves_original_publisher_without_relay() {
     write(
         fixture.path(),
         "branch/main.yaml",
-        "version: 2\nmodules:\n  producer:\n    source: ./producer\n    out: {state: {type: test.State}}\nout:\n  state: {type: test.State, from: producer.state}\n",
+        "version: 3\nmodules:\n  producer:\n    source: ./producer\n    out: {state: {type: test.State}}\nout:\n  state: {type: test.State, from: producer.state}\n",
     );
     write(fixture.path(), "branch/producer/main.yaml", PRODUCER);
     write(
         fixture.path(),
         "c/main.yaml",
-        "version: 2\nin:\n  state: {type: test.State}\nmodules:\n  consumer:\n    source: ./consumer\n    in: {state: {type: test.State, from: in.state}}\n",
+        "version: 3\nin:\n  state: {type: test.State}\nmodules:\n  consumer:\n    source: ./consumer\n    in: {state: {type: test.State, from: in.state}}\n",
     );
     write(fixture.path(), "c/consumer/main.yaml", CONSUMER);
     // When aliases are resolved.
@@ -152,7 +152,7 @@ fn fan_in_preserves_declared_order_through_cached_aliases() {
     write(
         fixture.path(),
         "branch/main.yaml",
-        "version: 2\nmodules:\n  a: {source: producer}\n  b: {source: producer}\nout:\n  first: {from: a.state}\n  second: {from: b.state}\n",
+        "version: 3\nmodules:\n  a: {source: producer}\n  b: {source: producer}\nout:\n  first: {from: a.state}\n  second: {from: b.state}\n",
     );
     write(fixture.path(), "branch/producer/main.yaml", PRODUCER);
     write(fixture.path(), "c/main.yaml", CONSUMER);
@@ -176,7 +176,7 @@ fn fan_in_preserves_declared_order_through_cached_aliases() {
     write(
         fixture.path(),
         "branch/main.yaml",
-        "version: 2\nmodules:\n  a: {source: producer}\nout:\n  first: {from: a.state}\n  second: {from: a.state}\n",
+        "version: 3\nmodules:\n  a: {source: producer}\nout:\n  first: {from: a.state}\n  second: {from: a.state}\n",
     );
     assert!(matches!(
         DeploymentPlan::load(fixture.path(), false),
@@ -196,7 +196,7 @@ fn unused_export_still_checks_its_declared_contract() {
     write(
         fixture.path(),
         "branch/main.yaml",
-        "version: 2\nmodules:\n  a: {source: producer}\nout:\n  unused: {type: test.Other, from: a.state}\n",
+        "version: 3\nmodules:\n  a: {source: producer}\nout:\n  unused: {type: test.Other, from: a.state}\n",
     );
     write(fixture.path(), "branch/producer/main.yaml", PRODUCER);
     assert!(matches!(
@@ -253,7 +253,7 @@ fn feedback_between_executable_modules_is_not_an_alias_cycle() {
             "{PROVIDER}modules:\n  a:\n    source: ./a\n    in: {{state: {{type: test.State, from: b.state}}}}\n    out: {{state: {{type: test.State}}}}\n  b:\n    source: ./b\n    in: {{state: {{type: test.State, from: a.state}}}}\n    out: {{state: {{type: test.State}}}}\n"
         ),
     );
-    let both = "version: 2\nrun: {provider: process, bin: peer}\nin:\n  state: {type: test.State}\nout:\n  state: {type: test.State}\n";
+    let both = "version: 3\nrun: {provider: process, bin: peer}\nin:\n  state: {type: test.State}\nout:\n  state: {type: test.State}\n";
     write(fixture.path(), "a/main.yaml", both);
     write(fixture.path(), "b/main.yaml", both);
     // When the communication graph is resolved.
@@ -280,7 +280,7 @@ fn pure_alias_cycle_fails_when_no_executable_can_publish() {
             "{PROVIDER}modules:\n  a:\n    source: ./a\n    in: {{state: {{type: test.State, from: b.state}}}}\n    out: {{state: {{type: test.State}}}}\n  b:\n    source: ./b\n    in: {{state: {{type: test.State, from: a.state}}}}\n    out: {{state: {{type: test.State}}}}\n  producer: {{source: ./producer}}\n"
         ),
     );
-    let alias = "version: 2\nmodules:\n  producer: {source: ../producer}\nin:\n  state: {type: test.State}\nout:\n  state: {type: test.State, from: in.state}\n";
+    let alias = "version: 3\nmodules:\n  producer: {source: ../producer}\nin:\n  state: {type: test.State}\nout:\n  state: {type: test.State, from: in.state}\n";
     write(fixture.path(), "a/main.yaml", alias);
     write(fixture.path(), "b/main.yaml", alias);
     write(fixture.path(), "producer/main.yaml", PRODUCER);
@@ -372,7 +372,7 @@ fn manifests_without_executable_or_child_composition_are_rejected() {
         "main.yaml",
         &format!("{PROVIDER}modules:\n  catalog: {{source: ./catalog}}\n"),
     );
-    write(fixture.path(), "catalog/main.yaml", "version: 2\n");
+    write(fixture.path(), "catalog/main.yaml", "version: 3\n");
     assert!(matches!(
         DeploymentPlan::load(fixture.path(), false),
         Err(ModuleError::Invalid { .. })
@@ -399,7 +399,7 @@ fn provider_mapping_selects_parent_configuration_without_child_redefinition() {
     write(
         fixture.path(),
         "main.yaml",
-        "version: 2\ndeployment: test\nproviders:\n  remote: {type: process, bin_dir: remote-bin}\nmodules:\n  child:\n    source: ./child\n    providers: {process: remote}\n    out: {state: {type: test.State}}\n",
+        "version: 3\ndeployment: test\nproviders:\n  remote: {type: process, bin_dir: remote-bin}\nmodules:\n  child:\n    source: ./child\n    providers: {process: remote}\n    out: {state: {type: test.State}}\n",
     );
     write(fixture.path(), "child/main.yaml", PRODUCER);
     // When provider slots are resolved.
@@ -416,7 +416,7 @@ fn companion_library_changes_replace_prepared_fingerprint_without_overwriting_ol
     write(
         fixture.path(),
         "main.yaml",
-        "version: 2\ndeployment: test\nproviders:\n  process: {type: process, bin_dir: bin}\nrun: {provider: process, bin: producer}\n",
+        "version: 3\ndeployment: test\nproviders:\n  process: {type: process, bin_dir: bin}\nrun: {provider: process, bin: producer}\n",
     );
     let binary = format!("bin/producer{}", std::env::consts::EXE_SUFFIX);
     write(fixture.path(), &binary, "binary content");
@@ -443,7 +443,7 @@ fn working_directory_changes_replace_prepared_fingerprint_with_identical_binary(
     write(
         fixture.path(),
         "main.yaml",
-        "version: 2\ndeployment: test\nproviders:\n  process: {type: process, bin_dir: bin}\nrun: {provider: process, bin: producer}\n",
+        "version: 3\ndeployment: test\nproviders:\n  process: {type: process, bin_dir: bin}\nrun: {provider: process, bin: producer}\n",
     );
     let binary = format!("bin/producer{}", std::env::consts::EXE_SUFFIX);
     write(fixture.path(), &binary, "binary content");
@@ -500,7 +500,7 @@ fn instance_config_assets_and_args_replace_app_defaults_relative_to_caller() {
     write(
         fixture.path(),
         "apps/app/main.yaml",
-        "version: 2\nrun: {provider: process, bin: app, config: defaults.yaml, config_assets: [default.bin], args: [app-default]}\n",
+        "version: 3\nrun: {provider: process, bin: app, config: defaults.yaml, config_assets: [default.bin], args: [app-default]}\n",
     );
     write(fixture.path(), "apps/app/defaults.yaml", "default: true");
     write(fixture.path(), "settings/a.yaml", "instance: a");
@@ -556,7 +556,7 @@ fn instance_overrides_require_an_executable_and_assets_require_config() {
             "main.yaml",
             &format!("{PROVIDER}modules:\n  app: {{source: app, {overrides}}}\n"),
         );
-        write(fixture.path(), "app/main.yaml", "version: 2\n");
+        write(fixture.path(), "app/main.yaml", "version: 3\n");
         assert!(matches!(
             DeploymentPlan::load(fixture.path(), false),
             Err(ModuleError::Invalid { module, .. }) if module == "test/app"
@@ -565,7 +565,7 @@ fn instance_overrides_require_an_executable_and_assets_require_config() {
     write(
         fixture.path(),
         "app/main.yaml",
-        "version: 2\nrun: {provider: process, bin: app}\n",
+        "version: 3\nrun: {provider: process, bin: app}\n",
     );
     assert!(matches!(
         DeploymentPlan::load(fixture.path(), false),
@@ -594,7 +594,7 @@ fn replay_last_rejects_volatile_source_before_startup() {
     write(
         fixture.path(),
         "c/main.yaml",
-        "version: 2\nrun: {provider: process, bin: consumer}\nin:\n  state: {type: test.State, replay: last, buffer: {latest: 1}}\n",
+        "version: 3\nrun: {provider: process, bin: consumer}\nin:\n  state: {type: test.State, replay: last, buffer: {latest: 1}}\n",
     );
     // When the compatibility of the connection is checked.
     let result = DeploymentPlan::load(fixture.path(), false);
@@ -616,12 +616,12 @@ fn app_policy_is_carried_in_bindings_without_becoming_project_policy() {
     write(
         fixture.path(),
         "a/main.yaml",
-        "version: 2\nrun: {provider: process, bin: producer}\nout:\n  state: {type: test.State, qos: sensor, retention: last}\n",
+        "version: 3\nrun: {provider: process, bin: producer}\nout:\n  state: {type: test.State, qos: sensor, retention: last}\n",
     );
     write(
         fixture.path(),
         "c/main.yaml",
-        "version: 2\nrun: {provider: process, bin: consumer}\nin:\n  state: {type: test.State, replay: last, buffer: {latest: 3}}\n",
+        "version: 3\nrun: {provider: process, bin: consumer}\nin:\n  state: {type: test.State, replay: last, buffer: {latest: 3}}\n",
     );
     // When app policies are resolved.
     let plan = DeploymentPlan::load(fixture.path(), false).expect("policy-compatible plan");
@@ -658,12 +658,12 @@ fn rpc_fan_in_is_rejected_instead_of_broadcasting() {
     write(
         fixture.path(),
         "server/main.yaml",
-        "version: 2\nrun: {provider: process, bin: server}\nout:\n  command: {kind: rpc, type: test.Request, response: test.Response}\n",
+        "version: 3\nrun: {provider: process, bin: server}\nout:\n  command: {kind: rpc, type: test.Request, response: test.Response}\n",
     );
     write(
         fixture.path(),
         "client/main.yaml",
-        "version: 2\nrun: {provider: process, bin: client}\nin:\n  command: {kind: rpc, type: test.Request, response: test.Response}\n",
+        "version: 3\nrun: {provider: process, bin: client}\nin:\n  command: {kind: rpc, type: test.Request, response: test.Response}\n",
     );
     // When a deployment is planned.
     let result = DeploymentPlan::load(fixture.path(), false);
@@ -697,7 +697,7 @@ fn legacy_manifest_is_rejected_at_the_explicit_version_boundary() {
         "main.yaml",
         "version: 1\ndeployment: legacy\nproviders:\n  process: {type: process}\nrun: {provider: process, bin: old}\n",
     );
-    // When the v2 planner loads it.
+    // When the v3 planner loads it.
     let result = DeploymentPlan::load(fixture.path(), false);
     // Then it cannot silently use the weaker v1 contract.
     assert!(matches!(result, Err(ModuleError::Invalid { .. })));
@@ -717,17 +717,17 @@ fn rpc_alias_preserves_request_and_response_without_caller_redeclarations() {
     write(
         fixture.path(),
         "service/main.yaml",
-        "version: 2\nmodules:\n  server: {source: server}\nout:\n  command: {from: server.command}\n",
+        "version: 3\nmodules:\n  server: {source: server}\nout:\n  command: {from: server.command}\n",
     );
     write(
         fixture.path(),
         "service/server/main.yaml",
-        "version: 2\nrun: {provider: process, bin: server}\nout:\n  command: {kind: rpc, type: test.Request, response: test.Response}\n",
+        "version: 3\nrun: {provider: process, bin: server}\nout:\n  command: {kind: rpc, type: test.Request, response: test.Response}\n",
     );
     write(
         fixture.path(),
         "client/main.yaml",
-        "version: 2\nrun: {provider: process, bin: client}\nin:\n  command: {kind: rpc, type: test.Request, response: test.Response}\n",
+        "version: 3\nrun: {provider: process, bin: client}\nin:\n  command: {kind: rpc, type: test.Request, response: test.Response}\n",
     );
     // When the alias is resolved.
     let plan = DeploymentPlan::load(fixture.path(), false).expect("RPC alias");
@@ -771,7 +771,7 @@ fn reusable_definition_is_checked_without_caller_bindings_or_executable_files() 
     write(
         fixture.path(),
         "main.yaml",
-        "version: 2\nrun: {provider: external, bin: missing, config_assets: [model.bin]}\nin: {state: {type: test.State}}\n",
+        "version: 3\nrun: {provider: external, bin: missing, config_assets: [model.bin]}\nin: {state: {type: test.State}}\n",
     );
     // When the definition alone is checked.
     let checked = reiny_launch::check_manifest(fixture.path()).expect("definition");
@@ -785,11 +785,11 @@ fn malformed_reusable_definitions_are_rejected_without_a_deployment() {
     // Given definitions that previously bypassed the deployment-only CLI checks.
     for definition in [
         "version: 1\nrun: {provider: process, bin: app}\n",
-        "version: 2\n",
-        "version: 2\nrun: {provider: process, bin: app}\nmodules: {child: {source: child}}\n",
-        "version: 2\nbuild: {type: cargo}\n",
-        "version: 2\nrun: {provider: process, bin: app}\nin: {request: {kind: rpc, type: test.Request}}\n",
-        "version: 2\nrun: {provider: process, bin: app}\nowned_children: {worker: {inputs: [missing]}}\n",
+        "version: 3\n",
+        "version: 3\nrun: {provider: process, bin: app}\nmodules: {child: {source: child}}\n",
+        "version: 3\nbuild: {type: cargo}\n",
+        "version: 3\nrun: {provider: process, bin: app}\nin: {request: {kind: rpc, type: test.Request}}\n",
+        "version: 3\nrun: {provider: process, bin: app}\nowned_children: {worker: {inputs: [missing]}}\n",
     ] {
         let fixture = tempfile::tempdir().expect("fixture");
         write(fixture.path(), "main.yaml", definition);
@@ -814,12 +814,12 @@ fn explicit_caller_defaults_preserve_app_owned_endpoint_policies() {
     write(
         fixture.path(),
         "a/main.yaml",
-        "version: 2\nrun: {provider: process, bin: producer}\nout: {state: {type: test.State, qos: sensor, retention: last}}\n",
+        "version: 3\nrun: {provider: process, bin: producer}\nout: {state: {type: test.State, qos: sensor, retention: last}}\n",
     );
     write(
         fixture.path(),
         "c/main.yaml",
-        "version: 2\nrun: {provider: process, bin: consumer}\nin: {state: {type: test.State, replay: last, buffer: {latest: 3}}}\n",
+        "version: 3\nrun: {provider: process, bin: consumer}\nin: {state: {type: test.State, replay: last, buffer: {latest: 3}}}\n",
     );
     // When the invocation is parsed and resolved.
     let plan = DeploymentPlan::load(fixture.path(), false).expect("compatible defaults");

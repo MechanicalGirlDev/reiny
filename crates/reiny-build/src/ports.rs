@@ -16,12 +16,13 @@ struct PortManifest {
     #[serde(default, rename = "out")]
     outputs: BTreeMap<String, PortDef>,
     #[serde(default)]
-    uses: BTreeMap<String, PortDef>,
+    rpc_clients: BTreeMap<String, PortDef>,
     #[serde(default)]
-    provides: BTreeMap<String, PortDef>,
+    rpc_servers: BTreeMap<String, PortDef>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PortDef {
     #[serde(rename = "type")]
     type_name: String,
@@ -45,10 +46,10 @@ enum PortKind {
 /// include!(concat!(env!("OUT_DIR"), "/reiny_ports.rs"));
 /// ```
 ///
-/// The YAML requires `version: 2`. Named streams live under `in` / `out`;
-/// named RPCs live under `uses` / `provides` with `type` and `response` FQNs.
+/// The YAML requires `version: 3`. Named streams live under `in` / `out`;
+/// named RPCs live under `rpc_clients` / `rpc_servers` with `type` and `response` FQNs.
 /// Each FQN must be in the package's `schema.yaml` catalog. Catalog entries
-/// alone never grant a port. Generated constants use the Rust types' `Topic`
+/// alone never grant a port. Generated constants use the Rust types' `MessageType`
 /// wire names and fingerprints, so they work with `reiny-core` on `no_std`.
 /// Other runtime metadata is not interpreted here.
 pub fn compile_ports(path: impl AsRef<Path>) -> Result<()> {
@@ -68,11 +69,12 @@ fn render_ports(path: &Path, resolution: &Resolution) -> Result<String> {
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let manifest: PortManifest =
         serde_yaml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    if manifest.version != 2 {
+    if manifest.version != super::STATIC_PORTS_VERSION {
         bail!(
-            "{}: unsupported port contract version {} (expected 2)",
+            "{}: unsupported port contract version {} (expected {})",
             path.display(),
-            manifest.version
+            manifest.version,
+            super::STATIC_PORTS_VERSION
         );
     }
     let mut out = String::from(
@@ -83,8 +85,8 @@ fn render_ports(path: &Path, resolution: &Resolution) -> Result<String> {
     for (section, input, ports, rpc_section) in [
         ("in", true, &manifest.inputs, false),
         ("out", false, &manifest.outputs, false),
-        ("uses", true, &manifest.uses, true),
-        ("provides", false, &manifest.provides, true),
+        ("rpc_clients", true, &manifest.rpc_clients, true),
+        ("rpc_servers", false, &manifest.rpc_servers, true),
     ] {
         for (name, port) in ports {
             if name.is_empty() || name.contains('/') {
@@ -107,8 +109,8 @@ fn render_ports(path: &Path, resolution: &Resolution) -> Result<String> {
             let direction = match (input, rpc) {
                 (true, false) => "Input",
                 (false, false) => "Output",
-                (true, true) => "Client",
-                (false, true) => "Service",
+                (true, true) => "RpcClient",
+                (false, true) => "RpcServer",
             };
             let ty = port_type_path(resolution, &port.type_name)
                 .with_context(|| format!("{}: [{section}.{name}].type", path.display()))?;
@@ -119,8 +121,8 @@ fn render_ports(path: &Path, resolution: &Resolution) -> Result<String> {
                 let response = port_type_path(resolution, response)
                     .with_context(|| format!("{}: [{section}.{name}].response", path.display()))?;
                 format!(
-                    "Some(::reiny::PortType {{ ty: <{response} as ::reiny::Topic>::TYPE, \
-                     schema: <{response} as ::reiny::Topic>::SCHEMA }})"
+                    "Some(::reiny::PortType {{ ty: <{response} as ::reiny::MessageType>::TYPE_NAME, \
+                     schema: <{response} as ::reiny::MessageType>::SCHEMA_FINGERPRINT }})"
                 )
             } else {
                 if port.response.is_some() {
@@ -134,7 +136,7 @@ fn render_ports(path: &Path, resolution: &Resolution) -> Result<String> {
             writeln!(
                 out,
                 "    ::reiny::StaticPort {{ name: {name:?}, direction: ::reiny::PortDirection::{direction}, \
-                 ty: <{ty} as ::reiny::Topic>::TYPE, schema: <{ty} as ::reiny::Topic>::SCHEMA, \
+                 ty: <{ty} as ::reiny::MessageType>::TYPE_NAME, schema: <{ty} as ::reiny::MessageType>::SCHEMA_FINGERPRINT, \
                  response: {response} }},"
             )?;
         }
@@ -150,8 +152,8 @@ fn port_type_path(resolution: &Resolution, fqn: &str) -> Result<String> {
         .find(|entry| entry.fq_name() == fqn)
         .with_context(|| format!("type '{fqn}' is not in schema.yaml"))?;
     let module = match &entry.exposure {
-        Exposure::Publications => "publications".to_owned(),
-        Exposure::Internals => "internals".to_owned(),
+        Exposure::ExportedTypes => "exported_types".to_owned(),
+        Exposure::SharedTypes => "shared_types".to_owned(),
         Exposure::Dependencies(name) => format!("dependencies::{name}"),
     };
     Ok(format!("crate::{module}::{}", entry.alias))
@@ -167,7 +169,7 @@ mod tests {
         fixture.write("proto/types.proto", "");
         fixture.write(
             "schema.yaml",
-            "version: 2\nschema:\n  project: {name: app}\n  publications:\n    State: {proto: proto/types.proto, message: app.State}\n    Request: {proto: proto/types.proto, message: app.Request}\n    Response: {proto: proto/types.proto, message: app.Response}\n",
+            "version: 3\nschema:\n  project: {name: app}\n  exported_types:\n    State: {proto: proto/types.proto, message: app.State}\n    Request: {proto: proto/types.proto, message: app.Request}\n    Response: {proto: proto/types.proto, message: app.Response}\n",
         );
         fixture
     }
@@ -178,7 +180,7 @@ mod tests {
         fixture.write("main.yaml", "invalid yaml: [");
         fixture.write(
             "mcu.yaml",
-            "version: 2\nin:\n  receive: {type: app.State}\nout:\n  transmit: {type: app.State}\nuses:\n  call: {type: app.Request, response: app.Response}\nprovides:\n  serve: {type: app.Request, response: app.Response}\n",
+            "version: 3\nin:\n  receive: {type: app.State}\nout:\n  transmit: {type: app.State}\nrpc_clients:\n  call: {type: app.Request, response: app.Response}\nrpc_servers:\n  serve: {type: app.Request, response: app.Response}\n",
         );
         let resolution = describe(fixture.root()).unwrap();
         let generated = render_ports(&fixture.path("mcu.yaml"), &resolution).unwrap();
@@ -186,17 +188,21 @@ mod tests {
         for (name, direction) in [
             ("receive", "Input"),
             ("transmit", "Output"),
-            ("call", "Client"),
-            ("serve", "Service"),
+            ("call", "RpcClient"),
+            ("serve", "RpcServer"),
         ] {
             assert!(generated.contains(&format!(
                 "name: {name:?}, direction: ::reiny::PortDirection::{direction}"
             )));
         }
-        assert!(generated.contains("<crate::publications::State as ::reiny::Topic>::TYPE"));
-        assert!(generated.contains("<crate::publications::Request as ::reiny::Topic>::SCHEMA"));
+        assert!(
+            generated.contains("<crate::exported_types::State as ::reiny::MessageType>::TYPE_NAME")
+        );
         assert!(generated.contains(
-            "Some(::reiny::PortType { ty: <crate::publications::Response as ::reiny::Topic>::TYPE"
+            "<crate::exported_types::Request as ::reiny::MessageType>::SCHEMA_FINGERPRINT"
+        ));
+        assert!(generated.contains(
+            "Some(::reiny::PortType { ty: <crate::exported_types::Response as ::reiny::MessageType>::TYPE_NAME"
         ));
         assert!(!generated.contains("std::"));
     }
@@ -218,14 +224,14 @@ mod tests {
         let resolution = describe(fixture.root()).unwrap();
         for text in [
             "version: 1\n",
-            "version: 2\nin: {bad: {type: app.Unknown}}\n",
-            "version: 2\nuses: {bad: {type: app.Request}}\n",
-            "version: 2\nprovides: {bad: {type: app.Request, response: app.Unknown}}\n",
-            "version: 2\nout: {bad: {type: app.State, response: app.Response}}\n",
-            "version: 2\nin: {'': {type: app.State}}\n",
-            "version: 2\nin: {bad: {type: app.State, kind: typo}}\n",
-            "version: 2\nuses: {bad: {type: app.Request, response: app.Response, kind: stream}}\n",
-            "version: 2\nin: {same: {type: app.State}}\nuses: {same: {type: app.Request, response: app.Response}}\n",
+            "version: 3\nin: {bad: {type: app.Unknown}}\n",
+            "version: 3\nrpc_clients: {bad: {type: app.Request}}\n",
+            "version: 3\nrpc_servers: {bad: {type: app.Request, response: app.Unknown}}\n",
+            "version: 3\nout: {bad: {type: app.State, response: app.Response}}\n",
+            "version: 3\nin: {'': {type: app.State}}\n",
+            "version: 3\nin: {bad: {type: app.State, kind: typo}}\n",
+            "version: 3\nrpc_clients: {bad: {type: app.Request, response: app.Response, kind: stream}}\n",
+            "version: 3\nin: {same: {type: app.State}}\nrpc_clients: {same: {type: app.Request, response: app.Response}}\n",
         ] {
             fixture.write("ports.yaml", text);
             assert!(
@@ -240,14 +246,16 @@ mod tests {
         let fixture = fixture("runtime-rpc-static-ports");
         fixture.write(
             "main.yaml",
-            "version: 2\nin:\n  call: {kind: rpc, type: app.Request, response: app.Response}\nout:\n  serve: {kind: rpc, type: app.Request, response: app.Response}\n",
+            "version: 3\nin:\n  call: {kind: rpc, type: app.Request, response: app.Response}\nout:\n  serve: {kind: rpc, type: app.Request, response: app.Response}\n",
         );
         let generated = render_ports(
             &fixture.path("main.yaml"),
             &describe(fixture.root()).unwrap(),
         )
         .unwrap();
-        assert!(generated.contains("name: \"call\", direction: ::reiny::PortDirection::Client"));
-        assert!(generated.contains("name: \"serve\", direction: ::reiny::PortDirection::Service"));
+        assert!(generated.contains("name: \"call\", direction: ::reiny::PortDirection::RpcClient"));
+        assert!(
+            generated.contains("name: \"serve\", direction: ::reiny::PortDirection::RpcServer")
+        );
     }
 }

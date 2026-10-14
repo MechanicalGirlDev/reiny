@@ -2,10 +2,10 @@
 
 use reiny::prelude::*;
 
-use crate::internals::{Ping, Pong};
+use crate::shared_types::{Ping, Pong};
 
 #[reiny::main]
-async fn main(cloudy: Cloudy) -> reiny::Result<()> {
+async fn main(cloudy: ModuleContext) -> reiny::Result<()> {
     let pongs = cloudy.output::<Pong>("pong")?;
     let mut pings = cloudy.input::<Ping>("ping")?;
     cloudy.ready()?;

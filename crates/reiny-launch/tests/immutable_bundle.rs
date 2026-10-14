@@ -31,7 +31,7 @@ fn fixture() -> anyhow::Result<tempfile::TempDir> {
     fs::write(root.path().join("zenoh.json5"), b"{}\n")?;
     fs::write(
         root.path().join("main.yaml"),
-        r"version: 2
+        r"version: 3
 deployment: frozen
 providers:
   process:
@@ -255,7 +255,7 @@ fn caller_assets_replace_defaults_and_freeze_from_selected_config_parent() -> an
     fs::write(root.path().join("app/config/override.bin"), b"app override")?;
     fs::write(
         root.path().join("app/main.yaml"),
-        "version: 2\nrun: {provider: process, bin: app, config: config/app.yaml, config_assets: [nested/input.bin]}\n",
+        "version: 3\nrun: {provider: process, bin: app, config: config/app.yaml, config_assets: [nested/input.bin]}\n",
     )?;
     fs::create_dir_all(root.path().join("settings/nested"))?;
     fs::create_dir(root.path().join("assets"))?;
@@ -267,7 +267,7 @@ fn caller_assets_replace_defaults_and_freeze_from_selected_config_parent() -> an
     fs::write(root.path().join("assets/override.bin"), b"caller override")?;
     fs::write(
         root.path().join("main.yaml"),
-        r"version: 2
+        r"version: 3
 deployment: frozen
 providers:
   process: {type: process, bin_dir: bin}

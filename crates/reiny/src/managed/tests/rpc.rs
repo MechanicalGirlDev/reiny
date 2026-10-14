@@ -8,9 +8,9 @@ pub(super) struct RequestProbe {
     value: u32,
 }
 
-impl Topic for RequestProbe {
-    const TYPE: &'static str = "RequestProbe";
-    const SCHEMA: u64 = 0xabcd;
+impl MessageType for RequestProbe {
+    const TYPE_NAME: &'static str = "test.RequestProbe";
+    const SCHEMA_FINGERPRINT: u64 = 0xabcd;
     const DESCRIPTOR: Option<Descriptor> = Some(Descriptor {
         message: "test.RequestProbe",
         file_set: b"request-descriptor",
@@ -29,7 +29,7 @@ fn rpc_contract() -> EndpointContract {
     }
 }
 
-async fn client(bus: Arc<dyn Engine>) -> Cloudy {
+async fn client(bus: Arc<dyn Engine>) -> ModuleContext {
     let mut binding = bindings(RECEIVER);
     binding.inputs.insert(
         "request".into(),
@@ -38,10 +38,12 @@ async fn client(bus: Arc<dyn Engine>) -> Cloudy {
             sources: vec![SENDER.into()],
         },
     );
-    Cloudy::open(options(bus, binding)).await.expect("client")
+    ModuleContext::open(options(bus, binding))
+        .await
+        .expect("client")
 }
 
-async fn service(bus: Arc<dyn Engine>) -> Cloudy {
+async fn service(bus: Arc<dyn Engine>) -> ModuleContext {
     let mut binding = bindings(SENDER);
     binding.outputs.insert(
         "request".into(),
@@ -49,12 +51,14 @@ async fn service(bus: Arc<dyn Engine>) -> Cloudy {
             contract: rpc_contract(),
         },
     );
-    Cloudy::open(options(bus, binding)).await.expect("service")
+    ModuleContext::open(options(bus, binding))
+        .await
+        .expect("service")
 }
 
-async fn standalone_node(bus: Arc<dyn Engine>, namespace: &str) -> Cloudy {
+async fn standalone_node(bus: Arc<dyn Engine>, namespace: &str) -> ModuleContext {
     // Internal transport regression fixture; application startup cannot construct this context.
-    Cloudy::new(
+    ModuleContext::new(
         bus,
         namespace.to_string(),
         DOMAIN.to_string(),
@@ -71,11 +75,15 @@ async fn named_rpc_uses_exact_target_and_reports_both_compiled_schemas() {
     let bus = Arc::new(Local::new());
     let service = service(bus.clone()).await;
     let client = client(bus.clone()).await;
-    let mut server = service.provides::<RequestProbe>("request").expect("server");
-    let caller = client.uses::<RequestProbe>("request").expect("caller");
+    let mut server = service
+        .rpc_server::<RequestProbe>("request")
+        .expect("server");
+    let caller = client
+        .rpc_client::<RequestProbe>("request")
+        .expect("caller");
     let others = Arc::new(AtomicU64::new(0));
     let count = others.clone();
-    let other_key = Key::topic(DOMAIN, Some("deployment/other"), RequestProbe::TYPE);
+    let other_key = Key::topic(DOMAIN, Some("deployment/other"), RequestProbe::TYPE_NAME);
     let reply_key = other_key.clone();
     let _other = bus
         .respond(
@@ -86,7 +94,7 @@ async fn named_rpc_uses_exact_target_and_reports_both_compiled_schemas() {
                     .reply(
                         &reply_key,
                         Probe { value: 99 }.encode_to_vec(),
-                        crate::pubsub::fingerprint(Some(Probe::SCHEMA)),
+                        crate::pubsub::fingerprint(Some(Probe::SCHEMA_FINGERPRINT)),
                     )
                     .expect("other reply");
             }),
@@ -134,7 +142,7 @@ async fn server_rejects_unstamped_malformed_and_mismatching_requests() {
             standalone_node(bus.clone(), SENDER).await
         };
         let mut server = if managed {
-            service.provides::<RequestProbe>("request")
+            service.rpc_server::<RequestProbe>("request")
         } else {
             service.serve::<RequestProbe>()
         }
@@ -144,7 +152,7 @@ async fn server_rejects_unstamped_malformed_and_mismatching_requests() {
             assert_eq!(request.value.value, 2);
             request.reply(Probe { value: 2 }).await.expect("reply");
         });
-        let key = Key::topic(DOMAIN, Some(SENDER), RequestProbe::TYPE);
+        let key = Key::topic(DOMAIN, Some(SENDER), RequestProbe::TYPE_NAME);
         for attachment in [
             None,
             Some(vec![1]),
@@ -172,7 +180,7 @@ async fn server_rejects_unstamped_malformed_and_mismatching_requests() {
             standalone_node(bus, RECEIVER).await
         };
         let caller = if managed {
-            client.uses::<RequestProbe>("request")
+            client.rpc_client::<RequestProbe>("request")
         } else {
             client.caller::<RequestProbe>().to(SENDER).build()
         }
@@ -202,13 +210,13 @@ async fn caller_rejects_unstamped_malformed_and_mismatching_responses() {
             standalone_node(bus.clone(), RECEIVER).await
         };
         let caller = if managed {
-            client.uses::<RequestProbe>("request")
+            client.rpc_client::<RequestProbe>("request")
         } else {
             client.caller::<RequestProbe>().to(SENDER).build()
         }
         .expect("caller");
         let count = AtomicU64::new(0);
-        let key = Key::topic(DOMAIN, Some(SENDER), RequestProbe::TYPE);
+        let key = Key::topic(DOMAIN, Some(SENDER), RequestProbe::TYPE_NAME);
         let reply_key = key.clone();
         let _server = bus
             .respond(
@@ -218,7 +226,7 @@ async fn caller_rejects_unstamped_malformed_and_mismatching_responses() {
                         0 => None,
                         1 => Some(vec![1]),
                         2 => crate::pubsub::fingerprint(Some(0xffff)),
-                        _ => crate::pubsub::fingerprint(Some(Probe::SCHEMA)),
+                        _ => crate::pubsub::fingerprint(Some(Probe::SCHEMA_FINGERPRINT)),
                     };
                     query
                         .reply(&reply_key, Probe { value: 3 }.encode_to_vec(), attachment)
@@ -267,9 +275,11 @@ async fn operation_and_response_type_mismatches_cannot_register() {
     binding
         .outputs
         .insert("request".into(), OutputBinding { contract: wrong });
-    let cloudy = Cloudy::open(options(bus, binding)).await.expect("module");
-    assert!(cloudy.uses::<RequestProbe>("request").is_err());
-    assert!(cloudy.provides::<RequestProbe>("request").is_err());
+    let cloudy = ModuleContext::open(options(bus, binding))
+        .await
+        .expect("module");
+    assert!(cloudy.rpc_client::<RequestProbe>("request").is_err());
+    assert!(cloudy.rpc_server::<RequestProbe>("request").is_err());
     assert!(cloudy.input::<RequestProbe>("request").is_err());
     assert!(cloudy.output::<RequestProbe>("request").is_err());
     assert!(cloudy.ready().is_err());
@@ -286,7 +296,11 @@ async fn rpc_multiple_targets_are_rejected_before_launch_presence() {
             sources: vec![SENDER.into(), "deployment/other".into()],
         },
     );
-    assert!(Cloudy::open(options(bus.clone(), binding)).await.is_err());
+    assert!(
+        ModuleContext::open(options(bus.clone(), binding))
+            .await
+            .is_err()
+    );
     assert_eq!(
         bus.alive(&Key::launch(DOMAIN, Some(RECEIVER)), PATIENCE)
             .await

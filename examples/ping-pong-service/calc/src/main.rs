@@ -2,11 +2,11 @@
 
 use reiny::prelude::*;
 
-use crate::internals::{Add, Sum};
+use crate::shared_types::{Add, Sum};
 
 #[reiny::main]
-async fn main(cloudy: Cloudy) -> reiny::Result<()> {
-    let mut adds = cloudy.provides::<Add>("adder")?;
+async fn main(cloudy: ModuleContext) -> reiny::Result<()> {
+    let mut adds = cloudy.rpc_server::<Add>("adder")?;
     cloudy.ready()?;
 
     while let Some(req) = adds.recv().await {

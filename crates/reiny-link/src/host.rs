@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use prost::Message;
-use reiny_core::{PortDirection, PortType, Service, StaticPort, Topic};
+use reiny_core::{MessageType, PortDirection, PortType, Service, StaticPort};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -34,11 +34,11 @@ impl HostLink {
 pub struct PeerType {
     /// See [`wire::type_hash`].
     pub hash: u32,
-    /// `Topic::TYPE`.
+    /// `MessageType::TYPE_NAME`.
     pub name: String,
     /// The OR of [`wire::flags`].
     pub flags: u8,
-    /// The peer's `Topic::SCHEMA`.
+    /// The peer's `MessageType::SCHEMA_FINGERPRINT`.
     pub schema: u64,
 }
 
@@ -81,7 +81,7 @@ pub enum HostEvent {
 impl HostEvent {
     /// Decode a Data / Request as the type `T`. `None` if the type hash differs.
     #[must_use]
-    pub fn decode<T: Topic + Message + Default>(&self) -> Option<T> {
+    pub fn decode<T: MessageType + Message + Default>(&self) -> Option<T> {
         match self {
             Self::Data {
                 hash,
@@ -94,7 +94,7 @@ impl HostEvent {
                 schema,
                 payload,
                 ..
-            } if *hash == wire::type_hash(T::TYPE) && *schema == T::SCHEMA => {
+            } if *hash == wire::type_hash(T::TYPE_NAME) && *schema == T::SCHEMA_FINGERPRINT => {
                 T::decode(payload.as_slice()).ok()
             }
             _ => None,
@@ -193,7 +193,7 @@ impl Host {
     }
 
     /// Send the type `T`. `Ok(false)` if the peer does not subscribe to it.
-    pub fn send<T: Topic + Message>(&self, name: &str, msg: &T) -> Result<bool, Error> {
+    pub fn send<T: MessageType + Message>(&self, name: &str, msg: &T) -> Result<bool, Error> {
         let sent = lock(&self.link).send(name, msg)?;
         self.wake.notify_one();
         Ok(sent)
@@ -218,24 +218,23 @@ impl Host {
             let link = lock(&self.link);
             link.check_port::<S>(
                 name,
-                PortDirection::Client,
+                PortDirection::RpcClient,
                 Some(PortType {
-                    ty: S::Response::TYPE,
-                    schema: S::Response::SCHEMA,
+                    ty: S::Response::TYPE_NAME,
+                    schema: S::Response::SCHEMA_FINGERPRINT,
                 }),
             )
             .map_err(CallError::Link)?;
-            if link
-                .peer_types()
-                .any(|t| t.hash == wire::type_hash(S::TYPE) && t.schema != S::SCHEMA)
-            {
+            if link.peer_types().any(|t| {
+                t.hash == wire::type_hash(S::TYPE_NAME) && t.schema != S::SCHEMA_FINGERPRINT
+            }) {
                 return Err(CallError::Link(Error::SchemaMismatch));
             }
         }
         let (schema, bytes) = self
-            .call_raw(wire::type_hash(S::TYPE), req.encode_to_vec(), timeout)
+            .call_raw(wire::type_hash(S::TYPE_NAME), req.encode_to_vec(), timeout)
             .await?;
-        if schema != S::Response::SCHEMA {
+        if schema != S::Response::SCHEMA_FINGERPRINT {
             return Err(CallError::Link(Error::SchemaMismatch));
         }
         S::Response::decode(bytes.as_slice()).map_err(CallError::Decode)
@@ -509,9 +508,9 @@ mod tests {
         #[prost(int32, tag = "1")]
         v: i32,
     }
-    impl Topic for A {
-        const TYPE: &'static str = "HostA";
-        const SCHEMA: u64 = 0xa;
+    impl MessageType for A {
+        const TYPE_NAME: &'static str = "HostA";
+        const SCHEMA_FINGERPRINT: u64 = 0xa;
         const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
 
@@ -520,16 +519,16 @@ mod tests {
         #[prost(int32, tag = "1")]
         v: i32,
     }
-    impl Topic for B {
-        const TYPE: &'static str = "HostB";
-        const SCHEMA: u64 = 0xb;
+    impl MessageType for B {
+        const TYPE_NAME: &'static str = "HostB";
+        const SCHEMA_FINGERPRINT: u64 = 0xb;
         const DESCRIPTOR: Option<reiny_core::Descriptor> = None;
     }
 
     fn data(hash: u32, payload: Vec<u8>) -> HostEvent {
         HostEvent::Data {
             hash,
-            schema: A::SCHEMA,
+            schema: A::SCHEMA_FINGERPRINT,
             seq: 0,
             payload,
         }
@@ -540,14 +539,14 @@ mod tests {
     /// exactly the silent corruption the type-as-address rule exists to prevent.
     #[test]
     fn decode_matches_on_the_type_hash() {
-        let ev = data(wire::type_hash(A::TYPE), A { v: 7 }.encode_to_vec());
+        let ev = data(wire::type_hash(A::TYPE_NAME), A { v: 7 }.encode_to_vec());
         assert_eq!(ev.decode::<A>(), Some(A { v: 7 }));
         assert_eq!(ev.decode::<B>(), None, "decoded as the wrong type");
 
         // A Request decodes the same way; the other two events carry no payload at all.
         let req = HostEvent::Request {
-            hash: wire::type_hash(A::TYPE),
-            schema: A::SCHEMA,
+            hash: wire::type_hash(A::TYPE_NAME),
+            schema: A::SCHEMA_FINGERPRINT,
             seq: 3,
             payload: A { v: 1 }.encode_to_vec(),
         };
@@ -567,15 +566,15 @@ mod tests {
     /// write to.
     #[test]
     fn decode_rejects_garbage_payloads() {
-        let ev = data(wire::type_hash(A::TYPE), vec![0xff, 0xff, 0xff]);
+        let ev = data(wire::type_hash(A::TYPE_NAME), vec![0xff, 0xff, 0xff]);
         assert_eq!(ev.decode::<A>(), None);
     }
 
     #[test]
     fn decode_rejects_another_fingerprint_for_the_same_type_hash() {
         let ev = HostEvent::Data {
-            hash: wire::type_hash(A::TYPE),
-            schema: A::SCHEMA + 1,
+            hash: wire::type_hash(A::TYPE_NAME),
+            schema: A::SCHEMA_FINGERPRINT + 1,
             seq: 0,
             payload: A { v: 7 }.encode_to_vec(),
         };

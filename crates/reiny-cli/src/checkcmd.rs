@@ -43,14 +43,11 @@ pub(crate) fn check(path: Option<&Path>) -> Result<()> {
     if !schema_crates.is_empty() {
         println!("schema crates ({}):", schema_crates.len());
         for c in &schema_crates {
-            let part = c
-                .part
-                .as_deref()
-                .map_or_else(|| " (single)".to_string(), |p| format!(" [schema.{p}]"));
-            let deps = if c.depends.is_empty() {
+            let part = format!(" [schema.schema_crates.{}]", c.name);
+            let deps = if c.depends_on.is_empty() {
                 String::new()
             } else {
-                format!(" — depends on {}", c.depends.join(", "))
+                format!(" — depends on {}", c.depends_on.join(", "))
             };
             println!("  {}{part}{deps}", c.crate_name);
         }
@@ -84,11 +81,7 @@ pub(crate) fn check(path: Option<&Path>) -> Result<()> {
     // Line the columns up.
     let w_alias = types.iter().map(|t| t.alias.len()).max().unwrap_or(0);
     let w_msg = types.iter().map(|t| t.message.len()).max().unwrap_or(0);
-    let w_topic = types
-        .iter()
-        .map(|t| t.topic_segment.len())
-        .max()
-        .unwrap_or(0);
+    let w_topic = types.iter().map(|t| t.type_name.len()).max().unwrap_or(0);
     let w_mod = types.iter().map(|t| t.module.len()).max().unwrap_or(0);
 
     for t in &types {
@@ -101,7 +94,7 @@ pub(crate) fn check(path: Option<&Path>) -> Result<()> {
             "  {:<w_alias$}  {:<w_msg$}  ->  reiny/<domain>/<id>/{:<w_topic$}  [{:<w_mod$}]  {}{owner}",
             t.alias,
             t.message,
-            t.topic_segment,
+            t.type_name,
             t.module,
             proto.display(),
         );

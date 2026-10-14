@@ -5,14 +5,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use reiny_core::bindings::{
-    CONTRACT_VERSION, EndpointContract, ModuleBindings, ModuleReport, PortKind, PortReport,
+    EndpointContract, MODULE_REPORT_VERSION, ModuleBindings, ModuleReport, PortKind, PortReport,
     QosProfile, ReceiveBuffer, Replay, ResponseReport, Retention,
 };
 
 use crate::engine::{Guard, Key, READY_CHUNK, STOP_CHUNK};
 use crate::{
-    Caller, Cloudy, Durability, Publisher, Qos, Result, Server, Service, Subscriber, Topic,
-    validate_segment,
+    Durability, MessageType, ModuleContext, Publisher, Qos, Result, RpcClient, RpcServer, Service,
+    Subscriber, validate_segment,
 };
 
 mod bridging;
@@ -82,7 +82,7 @@ pub(crate) struct ManagedPort {
 }
 
 impl ManagedPort {
-    fn new(cloudy: &Cloudy, live: Arc<()>) -> Self {
+    fn new(cloudy: &ModuleContext, live: Arc<()>) -> Self {
         Self {
             _live: live,
             ports: Arc::downgrade(&cloudy.module.ports),
@@ -102,14 +102,14 @@ impl Drop for ManagedPort {
     }
 }
 
-fn compiled_type<T: Topic>(declared: &str) -> Result<ResponseReport> {
-    validate_segment("transport type", T::TYPE)?;
-    let actual = T::DESCRIPTOR.map_or(T::TYPE, |descriptor| descriptor.message);
+fn compiled_type<T: MessageType>(declared: &str) -> Result<ResponseReport> {
+    validate_segment("transport type", T::TYPE_NAME)?;
+    let actual = T::TYPE_NAME;
     anyhow::ensure!(
-        declared == T::TYPE || declared == actual,
+        declared == actual,
         "declared port type '{declared}' differs from actual type '{actual}'"
     );
-    let schema = T::SCHEMA;
+    let schema = T::SCHEMA_FINGERPRINT;
     Ok(ResponseReport {
         type_name: actual.to_string(),
         schema,
@@ -117,7 +117,7 @@ fn compiled_type<T: Topic>(declared: &str) -> Result<ResponseReport> {
 }
 
 impl Registration {
-    fn of<T: Topic>(contract: &EndpointContract, live: &Arc<()>) -> Result<Self> {
+    fn of<T: MessageType>(contract: &EndpointContract, live: &Arc<()>) -> Result<Self> {
         let compiled = compiled_type::<T>(&contract.type_name)?;
         Ok(Self {
             contract: PortReport {
@@ -126,7 +126,7 @@ impl Registration {
                 contract: contract.clone(),
                 response: None,
             },
-            transport_type: T::TYPE.to_string(),
+            transport_type: T::TYPE_NAME.to_string(),
             live: Arc::downgrade(live),
         })
     }
@@ -142,7 +142,7 @@ impl Registration {
     }
 }
 
-impl Cloudy {
+impl ModuleContext {
     pub(crate) fn configure_module(
         &mut self,
         bindings: Option<ModuleBindings>,
@@ -225,9 +225,12 @@ impl Cloudy {
 
     /// Open a stream input from exactly its configured sources, with app-owned replay and buffering.
     ///
-    /// Use [`Cloudy::watch_input_ready`] before [`Cloudy::ready`] when an initial volatile
+    /// Use [`ModuleContext::watch_input_ready`] before [`ModuleContext::ready`] when an initial volatile
     /// publication must wait for a connected application to finish opening its ports.
-    pub fn input<T: prost::Message + Default + Topic>(&self, name: &str) -> Result<Subscriber<T>> {
+    pub fn input<T: prost::Message + Default + MessageType>(
+        &self,
+        name: &str,
+    ) -> Result<Subscriber<T>> {
         let contract = self.named_contract(name, true, PortKind::Stream)?;
         let mut ports = self.lock_ports(name, true)?;
         let live = Arc::new(());
@@ -275,7 +278,7 @@ impl Cloudy {
     }
 
     /// Open a stream output using the app's transport policy and retained history.
-    pub fn output<T: prost::Message + Topic>(&self, name: &str) -> Result<Publisher<T>> {
+    pub fn output<T: prost::Message + MessageType>(&self, name: &str) -> Result<Publisher<T>> {
         let contract = self.named_contract(name, false, PortKind::Stream)?;
         let mut ports = self.lock_ports(name, false)?;
         check_output_type::<T>(&ports)?;
@@ -296,7 +299,7 @@ impl Cloudy {
     }
 
     /// Open a named RPC caller to its single exact target, verifying both schema fingerprints.
-    pub fn uses<S: Service>(&self, name: &str) -> Result<Caller<S>> {
+    pub fn rpc_client<S: Service>(&self, name: &str) -> Result<RpcClient<S>> {
         let contract = self.named_contract(name, true, PortKind::Rpc)?;
         let mut ports = self.lock_ports(name, true)?;
         let live = Arc::new(());
@@ -316,13 +319,13 @@ impl Cloudy {
     }
 
     /// Open a named RPC server at the app's endpoint namespace.
-    pub fn provides<S: Service>(&self, name: &str) -> Result<Server<S>> {
+    pub fn rpc_server<S: Service>(&self, name: &str) -> Result<RpcServer<S>> {
         let contract = self.named_contract(name, false, PortKind::Rpc)?;
         let mut ports = self.lock_ports(name, false)?;
         check_output_type::<S>(&ports)?;
         let live = Arc::new(());
         let registration = Registration::rpc::<S>(contract, &live)?;
-        let mut server = Server::declare(self)?;
+        let mut server = RpcServer::declare(self)?;
         server.managed = Some(ManagedPort::new(self, live));
         ports.outputs.insert(name.to_string(), registration);
         Ok(server)
@@ -344,7 +347,7 @@ impl Cloudy {
         }
         anyhow::ensure!(self.engine.caps().liveliness, "ready() requires liveliness");
         let mut report = ModuleReport {
-            version: CONTRACT_VERSION,
+            version: MODULE_REPORT_VERSION,
             namespace: self.id.clone(),
             inputs: BTreeMap::new(),
             outputs: BTreeMap::new(),
@@ -391,10 +394,10 @@ impl Cloudy {
         }
         let mut transport_types = BTreeSet::new();
         for port in report.outputs.values() {
-            let short = port.type_name.rsplit('.').next().unwrap_or(&port.type_name);
+            let type_name = &port.type_name;
             anyhow::ensure!(
-                transport_types.insert(short),
-                "duplicate output transport type '{short}'"
+                transport_types.insert(type_name),
+                "duplicate output transport type '{type_name}'"
             );
         }
         if let Some(path) = &self.module.report_path {
@@ -409,14 +412,14 @@ impl Cloudy {
     }
 }
 
-fn check_output_type<T: Topic>(ports: &Ports) -> Result<()> {
+fn check_output_type<T: MessageType>(ports: &Ports) -> Result<()> {
     anyhow::ensure!(
         ports
             .outputs
             .values()
-            .all(|port| port.transport_type != T::TYPE),
+            .all(|port| port.transport_type != T::TYPE_NAME),
         "duplicate output transport type '{}'",
-        T::TYPE
+        T::TYPE_NAME
     );
     Ok(())
 }

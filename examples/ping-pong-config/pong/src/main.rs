@@ -5,10 +5,10 @@ use std::time::Duration;
 use reiny::prelude::*;
 
 use crate::dependencies::ping::Ping;
-use crate::publications::Pong;
+use crate::exported_types::Pong;
 
 #[reiny::main]
-async fn main(cloudy: Cloudy) -> reiny::Result<()> {
+async fn main(cloudy: ModuleContext) -> reiny::Result<()> {
     let cfg = cloudy.config();
     tracing::info!(reply = %cfg.reply, delay_ms = cfg.delay_ms, "pong configured");
 

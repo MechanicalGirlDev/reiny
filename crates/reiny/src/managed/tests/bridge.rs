@@ -10,14 +10,16 @@ async fn bridged_namespace_preserves_ready_stop_and_owner_departure() {
     bridge_options.module_report_path = None;
     bridge_options.engine = Some(left.clone());
     bridge_options.module_bindings = Some(bindings("bridge"));
-    let bridge_left = Cloudy::open(bridge_options).await.expect("left bridge");
+    let bridge_left = ModuleContext::open(bridge_options)
+        .await
+        .expect("left bridge");
     let bridge_right = bridge_left
         .with_engine(right.clone())
         .await
         .expect("right bridge");
     let _bridge =
         crate::bridge::forward(&bridge_left, &bridge_right, &BTreeMap::new()).expect("bridge");
-    let module = Cloudy::open(options(left, bindings(SENDER)))
+    let module = ModuleContext::open(options(left, bindings(SENDER)))
         .await
         .expect("module");
     let ready = Key::topic(DOMAIN, Some(SENDER), "@ready");

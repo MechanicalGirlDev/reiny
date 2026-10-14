@@ -1,7 +1,7 @@
 # ping-pong-service
 
 Typed SDK request/response services remain supported inside namespaced modules.
-The root `schema.yaml` catalog defines Add and Sum under `schema.internals`; `schema.services.Adder` maps
+The root `schema.yaml` catalog defines Add and Sum under `schema.shared_types`; `schema.services.Adder` maps
 the request alias to the response alias and generates `impl reiny::Service for Add`.
 The calc app declares an `adder` RPC output with request `calc.Add` and response
 `calc.Sum`; asker declares the matching RPC input. The project wires that input

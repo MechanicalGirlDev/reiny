@@ -5,7 +5,7 @@ The `#[reiny::main]` proc-macro implementation for
 
 You normally do not depend on this crate directly — use `#[reiny::main]` via the
 [`reiny`](https://crates.io/crates/reiny) crate. The macro wraps an async `main`
-in the `reiny` runtime, constructing and passing a `Cloudy`.
+in the `reiny` runtime, constructing and passing a `ModuleContext`.
 
 The macro includes types generated from the build-time `schema` block in
 `main.yaml`. Runtime composition and provider selection remain runtime concerns.

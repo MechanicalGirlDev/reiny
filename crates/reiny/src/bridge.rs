@@ -18,7 +18,7 @@ use crate::engine::{
     Engine, Guard, Key, LAUNCH_CHUNK, Presence, QueryParams, READY_CHUNK, RawQuery, SERVICE_CHUNK,
     STOP_CHUNK,
 };
-use crate::{Cloudy, Result};
+use crate::{ModuleContext, Result};
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -59,12 +59,7 @@ fn validate_routes(from: &ModuleBindings, into: &ModuleBindings) -> Result<()> {
     }
     let mut types = BTreeSet::new();
     for (name, output) in &into.outputs {
-        let ty = output
-            .contract
-            .type_name
-            .rsplit('.')
-            .next()
-            .unwrap_or(&output.contract.type_name);
+        let ty = &output.contract.type_name;
         anyhow::ensure!(
             types.insert(ty),
             "duplicate bridge output transport type '{ty}'"
@@ -94,7 +89,11 @@ fn validate_routes(from: &ModuleBindings, into: &ModuleBindings) -> Result<()> {
 /// `schemas` maps each declared protobuf FQN to its compiled fingerprint, including RPC responses.
 /// Register all routes before calling `ready()` on the contexts. No undeclared type or source is
 /// forwarded, and missing schema metadata is an error rather than a raw transport fallback.
-pub fn forward(a: &Cloudy, b: &Cloudy, schemas: &BTreeMap<String, u64>) -> Result<Bridge> {
+pub fn forward(
+    a: &ModuleContext,
+    b: &ModuleContext,
+    schemas: &BTreeMap<String, u64>,
+) -> Result<Bridge> {
     anyhow::ensure!(
         a.id() == b.id() && a.domain() == b.domain(),
         "bridge contexts must share id and domain"
@@ -143,8 +142,8 @@ pub fn forward(a: &Cloudy, b: &Cloudy, schemas: &BTreeMap<String, u64>) -> Resul
 }
 
 fn forward_ports(
-    from: &Cloudy,
-    into: &Cloudy,
+    from: &ModuleContext,
+    into: &ModuleContext,
     schemas: &BTreeMap<String, u64>,
     bridge: &mut Bridge,
 ) -> Result<()> {
@@ -206,8 +205,8 @@ fn forward_ports(
 }
 
 fn forward_rpc(
-    from: &Cloudy,
-    into: &Cloudy,
+    from: &ModuleContext,
+    into: &ModuleContext,
     name: &str,
     output_name: &str,
     input: &crate::bindings::InputBinding,
@@ -225,12 +224,7 @@ fn forward_rpc(
         .sources
         .first()
         .ok_or_else(|| anyhow::anyhow!("RPC requires exact target"))?;
-    let ty = input
-        .contract
-        .type_name
-        .rsplit('.')
-        .next()
-        .unwrap_or(&input.contract.type_name);
+    let ty = &input.contract.type_name;
     let target = Key::topic(from.domain(), Some(source), ty);
     let output_key = Key::topic(into.domain(), Some(into.endpoint_namespace()), ty);
     let engine = from.engine().clone();
@@ -317,8 +311,8 @@ async fn relay_rpc(
 type Injected = Arc<Mutex<HashMap<String, usize>>>;
 
 fn control_flow(
-    from: &Cloudy,
-    into: &Cloudy,
+    from: &ModuleContext,
+    into: &ModuleContext,
     injected: Injected,
     echoes: Injected,
 ) -> Result<JoinHandle<()>> {
