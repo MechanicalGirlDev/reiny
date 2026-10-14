@@ -24,7 +24,7 @@ prost-build = { workspace = true, optional = true }
 # Decode descriptors for fingerprints and schema-owned message names.
 prost = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
-reiny-core = { path = "../reiny-core", version = "0.10.1", default-features = false, optional = true }
+reiny-core = { path = "../reiny-core", version = "0.11.0", default-features = false, optional = true }
 protoc-bin-vendored = { workspace = true, optional = true }
 serde = { workspace = true }
 toml = { workspace = true }

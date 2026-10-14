@@ -2,13 +2,28 @@
 
 ## Unreleased
 
+## 0.11.0 - 2026-10-14
+
+**Breaking Rust API and communication contracts.** Upgrade the SDK, CLI,
+generated bindings and all peers together. Rebuild applications and generated
+static Link port tables; old contracts are rejected without compatibility
+aliases or type-based routing.
+
 ### Breaking migration
 
 - `Cloudy` becomes `ModuleContext`; `Topic` becomes `MessageType`, with
   `TYPE_NAME` (complete protobuf name, including its package) and
   `SCHEMA_FINGERPRINT`. Package-less names remain valid; `Descriptor`,
   `DESCRIPTOR`, and the request-response `Service` trait remain. Rebuild peers:
-  wire keys and Link hashes now include packages. Fingerprints are unchanged.
+  wire keys carry complete payload names and exact endpoint identities.
+- Data and RPC addresses are exact `{namespace, port}` pairs, not payload types.
+  Same-type streams and same-request RPC servers remain independent. Envelopes
+  and foreign bindings expose `source_port`; delegated child endpoints retain
+  their host's endpoint namespace. Bag replay requires explicit endpoint maps.
+- Schema fingerprints use version 2 and a canonical binary encoding of the
+  complete reachable message/enum closure, including recursive schemas.
+  Changes to nested fields or enum values are incompatible; descriptor
+  declaration order and unrelated messages do not change the fingerprint.
 - SDK `uses`/`provides` become `rpc_client`/`rpc_server`, and `Caller`/`Server`
   become `RpcClient`/`RpcServer`. Link declarations and static directions use
   the same RPC names; static YAML sections are `rpc_clients`/`rpc_servers`.
@@ -19,7 +34,13 @@
   description/version metadata. Package `schema.dependencies` stays unchanged.
   Generated modules are `exported_types`, `shared_types`, and
   `dependencies::<project>`. Legacy and unknown catalog fields are rejected.
-- Resolved bindings and reports remain independently version 2 for this increment.
+- Resolved bindings and compiled reports use independent version-3 boundaries.
+  Wire keys use epoch 3 and Link frames/Hello use epoch 2. Deployment status
+  remains independently version 2 and authenticated control remains version 1.
+- Reiny send-path congestion is explicit `CongestionControl`:
+  `BackendDefault`, `Block`, or `Drop`. Blocking is not a delivery guarantee.
+  ROS routes use separate `DdsQos` / `DdsReliability` policies; regenerate
+  bindings and replace the removed reliability vocabulary and profiles.
 - `reiny compress` becomes `reiny bundle`. Removed names have no aliases.
 
 All notable changes to the reiny workspace crates (`reiny`, `reiny-core`,
@@ -37,6 +58,23 @@ Versions are kept in lockstep via `[workspace.package].version`.
 - Concrete endpoint policy validation is shared by core, SDK, CLI and launcher.
 - Bundling uses prepared app configuration trees and structural binding
   equality while retaining bundle reload and content verification.
+- Link validates named endpoint tables and both RPC fingerprints before
+  admitting a peer. SDK engines, bridges, CLI data commands, FFI, ROS and
+  iceoryx2 preserve exact endpoint provenance and reject ambiguous contracts.
+
+### Added
+
+- Executable `named-ports` and `schema-fingerprint` examples demonstrate
+  independent same-type streams/RPC and transitive schema compatibility.
+- Regression coverage for malformed/cyclic descriptors, atomic Hello
+  admission, pending RPC sequence wraparound, exact replay/provenance and
+  independent congestion/DDS policies.
+
+### Fixed
+
+- ROS loopback verification drains discovery events from registration and
+  awaits the exact writer-side reader match before volatile publication.
+- The renamed bundle walkthrough preserves its executable mode.
 
 ### Breaking Rust API
 

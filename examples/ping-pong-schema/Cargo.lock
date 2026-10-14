@@ -1974,7 +1974,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reiny"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "flume 0.12.0",
@@ -1992,7 +1992,7 @@ dependencies = [
 
 [[package]]
 name = "reiny-build"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "prost",
@@ -2007,7 +2007,7 @@ dependencies = [
 
 [[package]]
 name = "reiny-core"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "prost",
  "serde",
@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "reiny-macros"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "proc-macro2",
  "quote",

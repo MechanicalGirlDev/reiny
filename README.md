@@ -118,7 +118,7 @@ have `main.yaml`; Rust payload catalogs live in `schema.yaml`. The wiring rules 
 [`docs/modules.md`](docs/modules.md).
 
 ```sh
-cargo install reiny-cli --version 0.10.1 --locked   # installs the `reiny` command
+cargo install reiny-cli --version 0.11.0 --locked   # installs the `reiny` command
 reiny new my-module
 reiny check my-module      # validate and show the type → topic map (no build)
 
