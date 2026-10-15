@@ -123,15 +123,13 @@ fn run_inner(
                     // Windows has completion + JobObject layers. On Unix the
                     // native child returns itself from the second inner_mut.
                     let status = tree.child.inner_mut().inner_mut().wait().await?;
-                    // A failing leader must not leave a long-lived build.rs or
-                    // command descendant holding our diagnostic pipes open.
-                    if !status.success() {
-                        match tree.child.start_kill() {
-                            Ok(()) => {}
-                            #[cfg(unix)]
-                            Err(error) if error.raw_os_error() == Some(3) => {}
-                            Err(error) => return Err(error.into()),
-                        }
+                    // The builder transaction ends with its leader, including
+                    // compiler telemetry or command descendants holding pipes.
+                    match tree.child.start_kill() {
+                        Ok(()) => {}
+                        #[cfg(unix)]
+                        Err(error) if error.raw_os_error() == Some(3) => {}
+                        Err(error) => return Err(error.into()),
                     }
                     tree.child.wait().await?;
                     Ok::<_, anyhow::Error>(status)

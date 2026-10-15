@@ -578,8 +578,8 @@ fn main() {
     let mut counter = fs::OpenOptions::new().create(true).append(true).open("invocations").unwrap();
     writeln!(counter,"run").unwrap();
     if mode == "fail" { std::process::exit(23); }
-    if mode == "tree" || mode == "tree-fail" { Command::new(env::current_exe().unwrap()).arg("descendant").spawn().unwrap(); }
-    if mode == "tree" || mode == "tree-fail" || mode == "gate" || mode == "fail-gate" {
+    if mode == "tree" || mode == "tree-fail" || mode == "tree-success" { Command::new(env::current_exe().unwrap()).arg("descendant").spawn().unwrap(); }
+    if mode == "tree" || mode == "tree-fail" || mode == "tree-success" || mode == "gate" || mode == "fail-gate" {
         let mut socket = TcpStream::connect(env::var("GATE").unwrap()).unwrap();
         writeln!(socket,"{mode} {}",std::process::id()).unwrap();
         let mut byte = [0]; socket.read_exact(&mut byte).unwrap();
@@ -728,9 +728,12 @@ fn connect_gate(listener: TcpListener, count: usize) -> mpsc::Receiver<Result<Ve
                         > 0,
                     "invalid PID"
                 );
-                streams.push(stream);
+                streams.push((line.starts_with("descendant "), stream));
             }
-            Ok(streams)
+            // Release descendants first: releasing a leader may immediately
+            // terminate its children and close their control sockets.
+            streams.sort_by_key(|(descendant, _)| !*descendant);
+            Ok(streams.into_iter().map(|(_, stream)| stream).collect())
         })();
         let _ = send.send(result);
     });
@@ -1271,6 +1274,53 @@ fn failed_leader_reaps_a_descendant_that_keeps_diagnostic_pipes_open() -> Result
     for stream in streams {
         closed(stream)?;
     }
+    Ok(())
+}
+
+#[test]
+fn successful_leader_reaps_a_descendant_that_keeps_diagnostic_pipes_open() -> Result<()> {
+    let (_root, mut plan, _builder) = command_plan("tree-success")?;
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let Some(BuildSpec::Command(build)) = &mut plan.nodes[0].build else {
+        anyhow::bail!("command fixture")
+    };
+    build
+        .env
+        .insert("GATE".into(), listener.local_addr()?.to_string());
+    let gate = connect_gate(listener, 2);
+    let cancel = CancelToken::default();
+    let (done, finished) = mpsc::channel();
+    let worker = {
+        let token = cancel.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(plan.prepare_with(&PrepareOptions {
+                cancel: token,
+                ..PrepareOptions::default()
+            }));
+        })
+    };
+    let mut streams = gate.recv_timeout(DEADLINE)??;
+    for stream in &mut streams {
+        stream.write_all(b"f")?;
+    }
+    let outcome = finished.recv_timeout(DEADLINE);
+    let cleanup = if outcome.is_err() {
+        cancel.cancel();
+        Some(finished.recv_timeout(DEADLINE)?)
+    } else {
+        None
+    };
+    worker
+        .join()
+        .map_err(|_| anyhow::anyhow!("preparer panicked"))?;
+    for stream in streams {
+        closed(stream)?;
+    }
+    if let Some(cleanup) = cleanup {
+        assert!(matches!(cleanup, Err(PrepareError::Cancelled)));
+    }
+    let prepared = outcome.context("successful builder retained its background descendant")??;
+    prepared.verify()?;
     Ok(())
 }
 
