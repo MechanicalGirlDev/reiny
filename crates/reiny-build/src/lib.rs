@@ -1300,14 +1300,11 @@ fn find_message<'a>(
     &'a prost_types::FileDescriptorProto,
     &'a prost_types::DescriptorProto,
 )> {
-    for file in &fds.file {
+    fds.file.iter().find_map(|file| {
         let rest = if file.package().is_empty() {
             message
         } else {
-            match message.strip_prefix(file.package()) {
-                Some(r) => r.strip_prefix('.')?,
-                None => continue,
-            }
+            message.strip_prefix(file.package())?.strip_prefix('.')?
         };
         let mut segs = rest.split('.');
         let first = segs.next()?;
@@ -1315,9 +1312,8 @@ fn find_message<'a>(
         for seg in segs {
             cur = cur.nested_type.iter().find(|m| m.name() == seg)?;
         }
-        return Some((file, cur));
-    }
-    None
+        Some((file, cur))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2404,6 +2400,43 @@ mod tests {
 
         // A type that is not there is None.
         assert!(descriptor_subset(&set, "msg.Nope").unwrap().is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "descriptors")]
+    fn descriptor_subset_searches_all_files_and_exact_package_boundaries() {
+        use prost_types::{DescriptorProto, FileDescriptorProto, FileDescriptorSet};
+        for (package, message, fqn) in [
+            ("msg", "Ping", "msg.Ping"),
+            ("msgdeep", "Ping", "msgdeep.Ping"),
+            ("", "Ping", "Ping"),
+        ] {
+            let file = |name: &str, package: &str, message: &str| FileDescriptorProto {
+                name: Some(name.into()),
+                package: Some(package.into()),
+                syntax: Some("proto3".into()),
+                message_type: vec![DescriptorProto {
+                    name: Some(message.into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let bytes = prost::Message::encode_to_vec(&FileDescriptorSet {
+                file: vec![
+                    file("prefix.proto", "msg", "Unrelated"),
+                    file("unpackaged.proto", "", "Other"),
+                    file("selected.proto", package, message),
+                ],
+            });
+            let subset = descriptor_subset(&bytes, fqn).unwrap().unwrap();
+            let decoded: FileDescriptorSet = prost::Message::decode(&*subset).unwrap();
+            assert_eq!(decoded.file.len(), 1);
+            assert_eq!(decoded.file[0].name(), "selected.proto");
+            assert_eq!(
+                message_fingerprint(&bytes, fqn).unwrap(),
+                message_fingerprint(&subset, fqn).unwrap()
+            );
+        }
     }
 
     #[test]
