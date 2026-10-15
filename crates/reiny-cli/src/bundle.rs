@@ -9,13 +9,15 @@ use reiny_launch::{
 };
 
 /// Bundle a deployment and its launcher without flattening its invocation tree.
-pub(crate) fn bundle(
+pub(crate) fn bundle_with_control(
     config: &Path,
     out: &Path,
     launcher: Option<&str>,
     include_system: bool,
+    control: &crate::control::Control,
 ) -> Result<()> {
-    let plan = DeploymentPlan::load(config, false)
+    let options = crate::preparecmd::BuildOptions::default();
+    let plan = crate::preparecmd::load(config, &options, control)
         .with_context(|| format!("loading deployment {}", config.display()))?;
     let launcher_name = launcher.unwrap_or("reiny");
     ensure!(
@@ -43,10 +45,17 @@ pub(crate) fn bundle(
         out != plan.root,
         "bundle output cannot be the deployment root"
     );
-    let prepared = plan.prepare().context("preparing deployment artifacts")?;
+    let prepared = crate::preparecmd::materialize(
+        &plan,
+        &options,
+        control,
+        &crate::preparecmd::Protocol::new(None),
+    )
+    .context("preparing deployment artifacts")?;
 
     let mut manifests = BTreeMap::new();
     for (namespace, source) in &plan.module_sources {
+        control.check()?;
         let path = source.join("main.yaml");
         let manifest: ModuleManifest = serde_yaml::from_slice(&std::fs::read(&path)?)
             .with_context(|| format!("reading {}", path.display()))?;
@@ -54,6 +63,7 @@ pub(crate) fn bundle(
     }
     let origins = source_origins(&plan)?;
     for (index, origin) in origins.iter().enumerate() {
+        control.check()?;
         copy_tree(
             origin,
             &out.join("sources").join(index.to_string()),
@@ -65,6 +75,7 @@ pub(crate) fn bundle(
     // Instance directories retain module-local working-directory assets. Config files
     // instead point into complete origin trees, preserving their relative includes.
     for (namespace, source) in &plan.module_sources {
+        control.check()?;
         if manifests
             .get(namespace)
             .context("instance manifest missing")?
@@ -80,6 +91,7 @@ pub(crate) fn bundle(
             copy_tree(source, &destination, &out, true)?;
         }
     }
+    control.check()?;
     let providers = bundle_nodes(
         &plan,
         &prepared,
@@ -89,7 +101,9 @@ pub(crate) fn bundle(
         include_system,
     )?;
     write_manifests(&plan, &out, &origins, &mut manifests, &providers)?;
+    control.check()?;
     finalize_bundle(&plan, &out, launcher_name, include_system)?;
+    control.check()?;
     println!("bundled {} into {}", plan.deployment, out.display());
     Ok(())
 }
@@ -143,7 +157,9 @@ fn bundle_nodes(
             .context("executable has no directory")?;
         for entry in std::fs::read_dir(executable_dir)? {
             let entry = entry?;
-            if entry.path().is_file() {
+            if entry.path().is_dir() {
+                copy_config_tree(&entry.path(), &destination.join(entry.file_name()))?;
+            } else if entry.path().is_file() {
                 if entry.path() == node.executable {
                     copy_executable(&entry.path(), &destination.join(entry.file_name()))?;
                 } else {
@@ -159,6 +175,7 @@ fn bundle_nodes(
                 &destination.join(lib.file_name().context("library has no name")?),
             )?;
         }
+        write_bundle_files(&destination)?;
         let mut slot = format!("__bundle_{index}");
         while slots.contains(&slot) {
             slot.push('_');
@@ -192,6 +209,32 @@ fn bundle_nodes(
         }
     }
     Ok(providers)
+}
+
+/// Retain the exact runtime inventory when this distribution is prepared again.
+fn write_bundle_files(directory: &Path) -> Result<()> {
+    fn collect(root: &Path, directory: &Path, files: &mut BTreeSet<PathBuf>) -> Result<()> {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                collect(root, &entry.path(), files)?;
+            } else {
+                ensure!(kind.is_file(), "bundle runtime entry is not a regular file");
+                files.insert(entry.path().strip_prefix(root)?.to_owned());
+            }
+        }
+        Ok(())
+    }
+    let metadata = directory.join(".reiny-bundle.json");
+    ensure!(!metadata.try_exists()?, "reserved bundle metadata path");
+    let mut files = BTreeSet::new();
+    collect(directory, directory, &mut files)?;
+    std::fs::write(
+        metadata,
+        serde_json::to_vec(&serde_json::json!({"v": 1, "files": files}))?,
+    )?;
+    Ok(())
 }
 
 fn write_manifests(

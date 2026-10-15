@@ -38,6 +38,8 @@ serde_json = "1"
 serde_yaml = "0.9"
 getrandom = "0.3"
 ctrlc = { workspace = true }
+process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "job-object", "process-group", "kill-on-drop"] }
+tempfile = "3"
 clap = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
@@ -45,7 +47,12 @@ toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation"] }
+
 [dev-dependencies]
+# Inspect the actual ephemeral listener in process lifecycle fixtures.
+zenoh = { workspace = true, features = ["unstable"] }
 # topic_e2e が descriptor set を手組みする(protoc 無し)。
 prost-types = { workspace = true }
 tempfile = "3"

@@ -389,7 +389,13 @@ pub fn serve(
     let mut owner = Owner::new(prepared, observer)?;
     let mut result = (|| {
         on_listening()?;
+        if stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
         observer.configure(&owner.desired)?;
+        if stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
         owner.reconcile()?;
         owner.publish()?;
         owner.run(stop)
@@ -448,18 +454,19 @@ struct OwnedProcess {
 
 impl OwnedProcess {
     fn terminate(&mut self) -> Result<()> {
-        match self.child.start_kill() {
-            Ok(()) => {}
+        let killed = match self.child.start_kill() {
+            Ok(()) => Ok(()),
             // ESRCH means the owned Unix process group no longer exists.
             #[cfg(unix)]
-            Err(error) if error.raw_os_error() == Some(3) => {}
-            Err(error) => return Err(error).context("terminating owned process tree"),
-        }
-        self.runtime
+            Err(error) if error.raw_os_error() == Some(3) => Ok(()),
+            Err(error) => Err(error).context("terminating owned process tree"),
+        };
+        let waited = self
+            .runtime
             .block_on(self.child.wait())
-            .context("reaping owned process tree")?;
-        self.reaped = true;
-        Ok(())
+            .context("reaping owned process tree");
+        self.reaped = waited.is_ok();
+        killed.and(waited.map(|_| ()))
     }
 }
 
@@ -901,7 +908,10 @@ impl Owner<'_> {
         #[cfg(unix)]
         command.wrap(process_wrap::tokio::ProcessGroup::leader());
         #[cfg(windows)]
-        command.wrap(process_wrap::tokio::JobObject);
+        {
+            command.wrap(process_wrap::tokio::JobObject);
+            command.wrap(crate::WindowsJobCompletion::default());
+        }
         let _runtime = self.runtime.enter();
         let child = command
             .spawn()
@@ -1035,7 +1045,7 @@ impl Owner<'_> {
             .children
             .get_mut(name)
             .context("missing owned process")?;
-        if let Some(exit) = process.child.inner_mut().try_wait()? {
+        if let Some(exit) = process.child.inner_mut().inner_mut().try_wait()? {
             let success = exit.success();
             process.terminate()?;
             self.children.remove(name);
@@ -1269,9 +1279,9 @@ impl Owner<'_> {
                     .children
                     .get_mut(name)
                     .context("missing stopping process")?;
-                // Poll the leader only: JobObject::try_wait consumes the group's
-                // completion-port notification that terminate().wait() needs.
-                match process.child.inner_mut().try_wait() {
+                // Bypass completion + JobObject and observe only the leader.
+                // The native Unix child returns itself at the second layer.
+                match process.child.inner_mut().inner_mut().try_wait() {
                     Ok(exit) if exit.is_some() || Instant::now() >= deadline => {
                         done.push(name.clone());
                     }
@@ -1533,7 +1543,7 @@ fn reply(mut stream: TcpStream, result: Result<DeploymentStatus>) {
     }
 }
 
-fn validate_prepared(prepared: &PreparedDeployment) -> Result<()> {
+pub(crate) fn validate_prepared(prepared: &PreparedDeployment) -> Result<()> {
     ensure!(
         !prepared.deployment.is_empty() && !prepared.domain.is_empty(),
         "empty deployment identity"

@@ -483,12 +483,40 @@ impl DeploymentPlan {
     ///
     /// No build or executable module is run. `update` explicitly refreshes Git refs.
     pub fn load(path: &Path, update: bool) -> Result<Self, ModuleError> {
-        let root = manifest_dir(path)?;
-        let manifest = read_manifest(&root)?;
-        Self::resolve(root, manifest, update)
+        Self::load_with(path, update, &crate::CancelToken::default()).map_err(|error| match error {
+            crate::PrepareError::Failed(error) => error
+                .downcast::<ModuleError>()
+                .unwrap_or_else(ModuleError::Acquisition),
+            error => ModuleError::Acquisition(error.into()),
+        })
     }
 
-    fn resolve(root: PathBuf, manifest: ModuleManifest, update: bool) -> Result<Self, ModuleError> {
+    /// Resolve declarations and pinned Git sources with cancellable acquisition.
+    /// This never invokes any builder.
+    pub fn load_with(
+        path: &Path,
+        update: bool,
+        cancel: &crate::CancelToken,
+    ) -> Result<Self, crate::PrepareError> {
+        cancel.check()?;
+        let result = (|| {
+            let root = manifest_dir(path)?;
+            let manifest = read_manifest(&root)?;
+            Self::resolve(root, manifest, update, Some(cancel))
+        })();
+        if cancel.is_cancelled() {
+            Err(crate::PrepareError::Cancelled)
+        } else {
+            result.map_err(|error| crate::PrepareError::Failed(error.into()))
+        }
+    }
+
+    fn resolve(
+        root: PathBuf,
+        manifest: ModuleManifest,
+        update: bool,
+        cancel: Option<&crate::CancelToken>,
+    ) -> Result<Self, ModuleError> {
         let deployment = manifest.deployment.clone().ok_or_else(|| {
             invalid(
                 root.display().to_string(),
@@ -513,7 +541,10 @@ impl DeploymentPlan {
             }
         }
         let mut loader = Loader {
-            resolver: SourceResolver::open(&root, update)?,
+            resolver: match cancel {
+                Some(cancel) => SourceResolver::open_with(&root, update, cancel)?,
+                None => SourceResolver::open(&root, update)?,
+            },
             instances: BTreeMap::new(),
             source_stack: Vec::new(),
         };
@@ -547,7 +578,7 @@ pub fn check_manifest(path: &Path) -> Result<Option<DeploymentPlan>, ModuleError
     let root = manifest_dir(path)?;
     let manifest = read_manifest(&root)?;
     if manifest.deployment.is_some() {
-        DeploymentPlan::resolve(root, manifest, false).map(Some)
+        DeploymentPlan::resolve(root, manifest, false, None).map(Some)
     } else {
         let name = root.display().to_string();
         if manifest.domain.is_some() || !manifest.providers.is_empty() {
@@ -629,7 +660,7 @@ impl Loader {
         &mut self,
         namespace: &str,
         dir: &Path,
-        manifest: ModuleManifest,
+        mut manifest: ModuleManifest,
         providers: BTreeMap<String, ProviderSpec>,
         root: bool,
     ) -> Result<(), ModuleError> {
@@ -641,6 +672,10 @@ impl Loader {
             return Err(ModuleError::Cycle(format!("source {}", dir.display())));
         }
         validate_manifest(namespace, &manifest, &providers, root)?;
+        self.resolver.check_cancelled()?;
+        if let Some(build) = &mut manifest.build {
+            build.resolve_paths(&dir);
+        }
         self.source_stack.push(dir.clone());
         for (name, call) in &manifest.modules {
             let child_namespace = format!("{namespace}/{name}");

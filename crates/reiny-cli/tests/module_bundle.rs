@@ -1,7 +1,33 @@
 //! Parsed deployment contracts and executable relocation regressions.
 
-#[path = "../src/bundle.rs"]
-mod bundle;
+#[cfg(all(windows, target_env = "msvc"))]
+#[path = "module_bundle/native_runtime.rs"]
+mod native_runtime;
+
+mod bundle {
+    pub(super) fn bundle(
+        config: &std::path::Path,
+        out: &std::path::Path,
+        launcher: Option<&str>,
+        include_system: bool,
+    ) -> anyhow::Result<()> {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_reiny"));
+        command.arg("bundle").arg(config).arg("--out").arg(out);
+        if let Some(launcher) = launcher {
+            command.arg("--launcher").arg(launcher);
+        }
+        if include_system {
+            command.arg("--include-system");
+        }
+        let output = command.output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "bundle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
+}
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -221,14 +247,14 @@ fn bundle_runs_and_retains_config_relative_assets_when_original_tree_is_removed(
         )?,
         "runtime library fixture"
     );
-    let status = Command::new(&receiver.executable)
-        .args([
-            "--exact",
-            "bundle::tests::system_libraries_stay_out_of_the_bundle",
-        ])
+    let result = Command::new(&receiver.executable)
+        .arg("--list")
         .current_dir(&receiver.module_dir)
-        .status()?;
-    assert!(status.success());
+        .output()?;
+    assert!(result.status.success());
+    assert!(String::from_utf8(result.stdout)?.contains(
+        "bundle_runs_and_retains_config_relative_assets_when_original_tree_is_removed: test"
+    ));
     Ok(())
 }
 
@@ -444,6 +470,59 @@ out: {tick: {type: demo.Tick}}
             .join("../.git")
             .exists()
     );
+    Ok(())
+}
+
+#[test]
+fn command_files_survive_bundle_preparation_without_copying_undeclared_neighbors() -> Result<()> {
+    // Given a real command-built executable that reads its declared nested data.
+    let workspace = tempfile::tempdir()?;
+    let root = workspace.path().join("original");
+    write(
+        &root.join("main.yaml"),
+        &format!(
+            "version: 3\ndeployment: command-files\nproviders: {{process: {{type: process}}}}\nrun: {{provider: process, bin: worker}}\nbuild:\n  type: command\n  argv: [rustc, app.rs, -o, output{}]\n  outputs: {{worker: output{}}}\n  files: {{data/input.bin: data/input.bin}}\n",
+            std::env::consts::EXE_SUFFIX,
+            std::env::consts::EXE_SUFFIX,
+        ),
+    )?;
+    write(
+        &root.join("app.rs"),
+        r#"use std::io::Write;
+fn main() {
+    let executable = std::env::current_exe().unwrap();
+    let data = std::fs::read(executable.parent().unwrap().join("data/input.bin")).unwrap();
+    std::io::stdout().write_all(&data).unwrap();
+}
+"#,
+    )?;
+    write(&root.join("data/input.bin"), "declared runtime bytes")?;
+    let output = workspace.path().join("bundle");
+
+    // When the distribution is prepared after removing all original build inputs.
+    bundle::bundle(&root, &output, None, false)?;
+    std::fs::remove_dir_all(&root)?;
+    write(
+        &output.join("bin/_root/not-declared.txt"),
+        "do not silently snapshot the whole binary directory",
+    )?;
+    let plan = DeploymentPlan::load(&output, false)?;
+    assert!(plan.nodes.iter().all(|node| node.build.is_none()));
+    let prepared = plan.prepare()?;
+
+    // Then frozen data survives, unrelated neighbors do not, and the real app uses it.
+    let node = prepared.nodes.first().context("worker missing")?;
+    let directory = node.executable.parent().context("executable directory")?;
+    assert_eq!(
+        std::fs::read(directory.join("data/input.bin"))?,
+        b"declared runtime bytes"
+    );
+    assert!(!directory.join("not-declared.txt").exists());
+    let result = Command::new(&node.executable)
+        .current_dir(&node.module_dir)
+        .output()?;
+    assert!(result.status.success());
+    assert_eq!(result.stdout, b"declared runtime bytes");
     Ok(())
 }
 

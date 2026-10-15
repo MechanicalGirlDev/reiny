@@ -1,16 +1,18 @@
 //! Pinned Git module acquisition. Fetching never runs a module's build commands.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::file_lock::FileLock;
+use crate::progress::CancelToken;
+use crate::runner::{self, Stream};
 
 /// A Git repository and an exact reference containing a module.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -56,6 +58,7 @@ pub(crate) struct SourceResolver {
     records: BTreeMap<String, Record>,
     resolved: BTreeMap<(String, String), String>,
     failed: bool,
+    cancel: CancelToken,
 }
 
 impl SourceResolver {
@@ -64,16 +67,29 @@ impl SourceResolver {
     /// # Errors
     /// Returns an error for an inaccessible root, busy lock, or invalid lockfile.
     pub(crate) fn open(root: &Path, update: bool) -> Result<Self> {
+        Self::open_inner(root, update, &CancelToken::default(), false)
+    }
+
+    pub(crate) fn open_with(root: &Path, update: bool, cancel: &CancelToken) -> Result<Self> {
+        Self::open_inner(root, update, cancel, true)
+    }
+
+    fn open_inner(root: &Path, update: bool, cancel: &CancelToken, wait: bool) -> Result<Self> {
+        cancel.check()?;
         let root = root.canonicalize().context("canonicalize module root")?;
         let cache = root.join(".reiny/cache/git");
         fs::create_dir_all(&cache)?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(root.join(".reiny/source.lock"))?;
-        let lock = FileLock::new(lock).context("another source resolver holds the root lock")?;
+        let lock = if wait {
+            FileLock::wait(&root.join(".reiny/source.lock"), cancel)?
+        } else {
+            let lock = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(root.join(".reiny/source.lock"))?;
+            FileLock::new(lock).context("another source resolver holds the root lock")?
+        };
         let lock_path = root.join("lock.yaml");
         let records = if lock_path.exists() {
             let parsed: Lock = serde_yaml::from_slice(&fs::read(&lock_path)?)
@@ -100,7 +116,16 @@ impl SourceResolver {
             records,
             resolved: BTreeMap::new(),
             failed: false,
+            cancel: cancel.clone(),
         })
+    }
+
+    pub(crate) fn check_cancelled(&self) -> Result<()> {
+        self.cancel.check().map_err(Into::into)
+    }
+
+    fn git(&self, cwd: &Path, args: &[&str]) -> Result<String> {
+        git(cwd, args, &self.cancel)
     }
 
     /// Resolve a source under an invocation namespace without moving a locked pin.
@@ -129,6 +154,7 @@ impl SourceResolver {
         base: &Path,
         source: &GitSource,
     ) -> Result<PathBuf> {
+        self.check_cancelled()?;
         ensure!(
             self.lock.is_some(),
             "source transaction has already finished"
@@ -143,7 +169,7 @@ impl SourceResolver {
             !source.reference.is_empty() && !source.reference.starts_with('-'),
             "Git ref must be nonempty and must not begin with '-'"
         );
-        git(
+        self.git(
             &self.root,
             &["check-ref-format", "--allow-onelevel", &source.reference],
         )
@@ -161,34 +187,37 @@ impl SourceResolver {
         fs::create_dir_all(repo.parent().context("repository cache parent")?)?;
         if !repo.exists() {
             fs::create_dir(&repo)?;
-            if let Err(error) = git(&repo, &["init", "--bare", "--template="]) {
+            if let Err(error) = self.git(&repo, &["init", "--bare", "--template="]) {
                 fs::remove_dir_all(&repo)?;
                 return Err(error);
             }
         }
         let commit = if let Some(commit) = pinned {
             validate_commit(&commit)?;
-            if git(&repo, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_err() {
+            if self
+                .git(&repo, &["cat-file", "-e", &format!("{commit}^{{commit}}")])
+                .is_err()
+            {
                 // Never fetch the mutable ref as a substitute for a missing pin.
-                git(&repo, &["fetch", "--no-tags", "--", &url, &commit])?;
-                git(&repo, &["cat-file", "-e", &format!("{commit}^{{commit}}")])?;
+                self.git(&repo, &["fetch", "--no-tags", "--", &url, &commit])?;
+                self.git(&repo, &["cat-file", "-e", &format!("{commit}^{{commit}}")])?;
             }
             commit
         } else if let Some(commit) = self.resolved.get(&(url.clone(), source.reference.clone())) {
             commit.clone()
         } else {
-            git(
+            self.git(
                 &repo,
                 &["fetch", "--no-tags", "--", &url, &source.reference],
             )?;
-            let commit = git(&repo, &["rev-parse", "--verify", "FETCH_HEAD^{commit}"])?;
+            let commit = self.git(&repo, &["rev-parse", "--verify", "FETCH_HEAD^{commit}"])?;
             let commit = commit.trim().to_owned();
             validate_commit(&commit)?;
             self.resolved
                 .insert((url.clone(), source.reference.clone()), commit.clone());
             commit
         };
-        let checkout = materialize(&self.cache, &repo, &url, &commit)?;
+        let checkout = materialize(&self.cache, &repo, &url, &commit, &self.cancel)?;
         let module = checkout
             .join(&source.path)
             .canonicalize()
@@ -215,6 +244,7 @@ impl SourceResolver {
     /// # Errors
     /// Refuses a failed transaction and reports serialization or filesystem errors.
     pub(crate) fn finish(&mut self) -> Result<()> {
+        self.check_cancelled()?;
         ensure!(
             self.lock.is_some(),
             "source transaction has already finished"
@@ -231,29 +261,36 @@ impl SourceResolver {
             version: 1,
             modules: self.records.clone(),
         })?;
-        let staging = self.root.join(".reiny/lock.yaml.partial");
-        let mut file = File::create(&staging)?;
+        let mut file = tempfile::NamedTempFile::new_in(self.root.join(".reiny"))?;
         file.write_all(serialized.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(staging, self.root.join("lock.yaml")).context("publish Git module lockfile")?;
+        file.as_file().sync_all()?;
+        self.cancel.publish(|| {
+            file.persist(self.root.join("lock.yaml"))
+                .context("publish Git module lockfile")?;
+            Ok(())
+        })?;
         self.lock.take();
         Ok(())
     }
 }
 
-fn materialize(cache: &Path, repo: &Path, url: &str, commit: &str) -> Result<PathBuf> {
+fn materialize(
+    cache: &Path,
+    repo: &Path,
+    url: &str,
+    commit: &str,
+    cancel: &CancelToken,
+) -> Result<PathBuf> {
     let checkout = cache
         .join("checkouts")
         .join(hash(format!("{url}\0{commit}").as_bytes()));
     if !checkout.exists() {
         fs::create_dir_all(checkout.parent().context("checkout cache parent")?)?;
-        let staging = checkout.with_extension("partial");
-        if staging.exists() {
-            fs::remove_dir_all(&staging)?;
-        }
+        let staging = tempfile::Builder::new()
+            .prefix(".checkout-")
+            .tempdir_in(checkout.parent().context("checkout parent")?)?;
         let repo_arg = git_path(repo)?;
-        let stage_arg = git_path(&staging)?;
+        let stage_arg = git_path(staging.path())?;
         let result = (|| {
             git(
                 cache,
@@ -266,14 +303,17 @@ fn materialize(cache: &Path, repo: &Path, url: &str, commit: &str) -> Result<Pat
                     &repo_arg,
                     &stage_arg,
                 ],
+                cancel,
             )?;
-            git(&staging, &["checkout", "--detach", "--force", commit, "--"])?;
-            fs::rename(&staging, &checkout)?;
+            git(
+                staging.path(),
+                &["checkout", "--detach", "--force", commit, "--"],
+                cancel,
+            )?;
+            cancel.check()?;
+            fs::rename(staging.path(), &checkout)?;
             Ok::<(), anyhow::Error>(())
         })();
-        if result.is_err() && staging.exists() {
-            fs::remove_dir_all(&staging)?;
-        }
         result?;
     }
     checkout.canonicalize().context("canonicalize Git checkout")
@@ -365,8 +405,9 @@ fn git_path(path: &Path) -> Result<String> {
     }
 }
 
-fn git(cwd: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+fn git(cwd: &Path, args: &[&str], cancel: &CancelToken) -> Result<String> {
+    let mut command = Command::new("git");
+    command
         .args([
             "-c",
             "core.hooksPath=/dev/null",
@@ -377,16 +418,26 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String> {
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
-        .env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes")
-        .stdin(Stdio::null())
-        .output()
-        .context("start Git")?;
-    if !output.status.success() {
+        .env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes");
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let status = runner::run(command, cancel, |stream, text| {
+        let output = if stream == Stream::Stdout {
+            &mut stdout
+        } else {
+            &mut stderr
+        };
+        output.push_str(text);
+        output.push('\n');
+        Ok(())
+    })
+    .context("run Git")?;
+    if !status.success() {
         bail!(
             "Git {} failed: {}",
             args.first().copied().unwrap_or_default(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            stderr.trim()
         );
     }
-    String::from_utf8(output.stdout).context("Git returned non-UTF-8 output")
+    Ok(stdout)
 }

@@ -1,5 +1,6 @@
 //! Module deployment, typed bus inspection and build-time schema tools.
 
+mod applycmd;
 mod bagcmd;
 mod bridgecmd;
 mod buildcmd;
@@ -7,8 +8,10 @@ mod bundle;
 mod bus;
 mod checkcmd;
 mod codec;
+mod control;
 mod flowart;
 mod modulecmd;
+mod preparecmd;
 mod scaffold;
 mod servicecmd;
 mod topiccmd;
@@ -33,14 +36,22 @@ struct Cli {
 #[derive(Args)]
 struct StartArgs {
     /// Root module directory or its main.yaml.
-    #[arg(default_value = ".")]
-    path: PathBuf,
+    #[arg(conflicts_with = "prepared")]
+    path: Option<PathBuf>,
+    /// Apply verified frozen artifacts without resolving or rebuilding sources.
+    #[arg(long, conflicts_with_all = ["path", "bin_dir", "release", "build_cache", "jobs"])]
+    prepared: Option<PathBuf>,
     /// Leave the deployment owner running after readiness is confirmed.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "control_stdin")]
     detach: bool,
-    /// Override the prebuilt binary directory; declared Cargo builds are unchanged.
+    #[command(flatten)]
+    build: preparecmd::BuildOptions,
+    /// Emit versioned JSON lines exclusively on stdout.
+    #[arg(long, value_enum)]
+    events: Option<preparecmd::Events>,
+    /// Accept cancellation controls; stdin EOF also cancels.
     #[arg(long)]
-    bin_dir: Option<PathBuf>,
+    control_stdin: bool,
     /// Supervisor log level.
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -51,6 +62,23 @@ struct StartArgs {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Report exact preparation and controlled-apply capabilities.
+    Capabilities {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Freeze a deployment into a new verified prepared file.
+    Prepare {
+        path: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, value_enum)]
+        events: Option<preparecmd::Events>,
+        #[arg(long)]
+        control_stdin: bool,
+        #[command(flatten)]
+        build: preparecmd::BuildOptions,
+    },
     /// Create a standalone module with main.yaml and a Cargo build declaration.
     New {
         path: PathBuf,
@@ -75,6 +103,8 @@ enum Command {
     Build {
         #[arg(long)]
         release: bool,
+        #[arg(long, value_enum)]
+        events: Option<preparecmd::Events>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -136,7 +166,24 @@ enum Command {
     Supervise { prepared: PathBuf },
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error:#}");
+            if matches!(
+                error.downcast_ref::<reiny_launch::PrepareError>(),
+                Some(reiny_launch::PrepareError::Cancelled)
+            ) {
+                std::process::ExitCode::from(130)
+            } else {
+                std::process::ExitCode::FAILURE
+            }
+        }
+    }
+}
+
+fn run() -> Result<()> {
     let arguments: Vec<String> = std::env::args().collect();
     if let Some(path) = positional_module(&arguments) {
         init_tracing("info");
@@ -152,7 +199,11 @@ fn main() -> Result<()> {
             return modulecmd::apply(dir, false, None, 30.0);
         }
     }
-    match Cli::parse().command {
+    dispatch(Cli::parse().command)
+}
+
+fn dispatch(command: Command) -> Result<()> {
+    match command {
         Command::New {
             path,
             publish,
@@ -165,12 +216,35 @@ fn main() -> Result<()> {
         } => scaffold::init(path.as_deref(), publish.as_deref(), name.as_deref()),
         Command::Add { path } => scaffold::add(&path),
         Command::Check { path } => checkcmd::check(path.as_deref()),
-        Command::Build { release, args } => buildcmd::build(release, &args),
+        Command::Capabilities { json } => capabilities(json),
+        Command::Prepare {
+            path,
+            out,
+            events,
+            control_stdin,
+            build,
+        } => {
+            init_tracing("info");
+            let control = control::Control::install(control_stdin)?;
+            preparecmd::prepare(
+                &path,
+                Some(&out),
+                &build,
+                &control,
+                &preparecmd::Protocol::new(events),
+            )?;
+            Ok(())
+        }
+        Command::Build {
+            release,
+            events,
+            args,
+        } => buildcmd::build(release, events, &args),
         Command::Plan { path, json } => modulecmd::plan(&path, false, json),
         Command::Update { path, json } => modulecmd::plan(&path, true, json),
         Command::Apply(args) | Command::Run(args) => {
             init_tracing(&args.log_level);
-            modulecmd::apply(&args.path, args.detach, args.bin_dir, args.ready_timeout)
+            modulecmd::apply_args(args)
         }
         Command::Status { path, json } => modulecmd::status(&path, json),
         Command::Stop { path, json } => modulecmd::stop(&path, json),
@@ -183,7 +257,16 @@ fn main() -> Result<()> {
             out,
             launcher,
             include_system,
-        } => bundle::bundle(&config, &out, launcher.as_deref(), include_system),
+        } => {
+            let control = control::Control::install(false)?;
+            bundle::bundle_with_control(
+                &config,
+                &out,
+                launcher.as_deref(),
+                include_system,
+                &control,
+            )
+        }
         Command::Bag(args) => {
             init_tracing("info");
             bagcmd::run(args)
@@ -207,6 +290,32 @@ fn main() -> Result<()> {
     }
 }
 
+fn capabilities(json: bool) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct Capabilities {
+        reiny_version: &'static str,
+        prepare_protocol: u32,
+        prepared_file: u32,
+        apply_protocol: u32,
+        build_kinds: [&'static str; 2],
+        controlled_apply: bool,
+    }
+    let capabilities = Capabilities {
+        reiny_version: reiny_launch::VERSION,
+        prepare_protocol: reiny_launch::PREPARE_PROTOCOL_VERSION,
+        prepared_file: reiny_launch::PREPARED_FILE_VERSION,
+        apply_protocol: reiny_launch::APPLY_PROTOCOL_VERSION,
+        build_kinds: ["cargo", "command"],
+        controlled_apply: true,
+    };
+    if json {
+        println!("{}", serde_json::to_string(&capabilities)?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(&capabilities)?);
+    }
+    Ok(())
+}
+
 fn positional_module(argv: &[String]) -> Option<PathBuf> {
     const COMMANDS: &[&str] = &[
         "new",
@@ -214,6 +323,8 @@ fn positional_module(argv: &[String]) -> Option<PathBuf> {
         "add",
         "check",
         "build",
+        "prepare",
+        "capabilities",
         "plan",
         "apply",
         "run",

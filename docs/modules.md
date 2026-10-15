@@ -130,16 +130,113 @@ build:
   type: "cargo"
   manifest: "../Cargo.toml"  # default Cargo.toml, module-relative
   package: "relay"
-  profile: "debug"           # default release
+  profile: "dev"             # default release
   features: []
   default_features: true
   locked: true
+  cwd: ".."                  # module-relative; defaults to "."
+  target: "x86_64-pc-windows-msvc" # optional Cargo target triple
+  env: { RUSTFLAGS: "-C debuginfo=1" }
 ```
 
 Every runtime manifest must declare `run` or a nonempty `modules` mapping.
 `run` and `modules` are mutually exclusive in one file. `build` is only
 allowed next to `run`. Without `build`, the executable must already exist in
 the provider's `bin_dir`.
+
+Cargo builds accept `manifest`, `package`, `profile`, `features`,
+`default_features`, `locked`, `cwd`, `target`, and string-valued `env`.
+Relative `manifest` and `cwd` paths are resolved against the declaring
+`main.yaml`; Cargo runs in `cwd`, retaining applicable ancestor `.cargo`
+configuration. Unless `--build-cache` is supplied, Cargo's persistent target
+directory uses `CARGO_TARGET_DIR` when set, otherwise
+`<deployment-root>/.reiny/build`. Compatible requests share a target only when
+their resolved manifest, package, cwd, profile, normalized feature set,
+default-feature and lock settings, target, compiler environment, and cache
+root match. `--jobs` bounds independent groups; work sharing a Cargo target is
+serialized.
+
+An explicit command builder can produce executables and bundle files without
+an implicit shell:
+
+```yaml
+build:
+  type: command
+  argv: ["sh", "build.sh"]       # shell use is explicit
+  cwd: "."
+  env: { BUILD_MODE: release }
+  outputs:
+    app: "out/app"               # logical names have no platform suffix
+    helper: "out/helper"
+  files:
+    "data/table.bin": "out/table.bin" # bundle destination: source path
+```
+
+On Windows, a project can explicitly invoke its command interpreter, for
+example `argv: ["cmd.exe", "/d", "/c", "build.cmd"]`, with an output source
+such as `out/app.exe`. `outputs` must declare `run.bin` and every
+`run.companions` executable. Reiny stages each under its logical name with the
+platform executable suffix. `files` maps safe relative bundle destinations to
+source files relative to `cwd`; executable and file sources must exist as
+files. Only declared `outputs` and `files` are frozen; list every additional
+runtime file the prepared module needs rather than relying on other files in
+the builder's output directory. Reiny rejects missing, duplicate or
+case-conflicting outputs and unsafe destinations rather than guessing a
+binary path. Command builders run on each prepare; they are not treated as
+cached when their output bytes happen to match. Prebuilt modules omit `build`
+and use the installed provider binaries. `--release` affects Cargo profiles
+only, and `--bin-dir` affects only modules without a build declaration.
+
+`reiny bundle` preserves declared command `files` when the distribution is
+prepared again as prebuilt. Each bundled binary directory contains a private
+`.reiny-bundle.json` file list for its frozen executables, companions, runtime
+libraries and declared files. That name is reserved at the binary directory
+root. Preparation rejects invalid versions, unsafe paths, missing executables
+or files, and does not copy unrelated neighbors from the binary directory.
+
+Preparation can expose progress, cancel owned builders, and create a
+source-independent verified snapshot:
+
+```sh
+reiny capabilities --json
+reiny prepare main.yaml --out prepared.json --events jsonl \
+  --build-cache .reiny-build-cache --jobs 2
+reiny apply --prepared prepared.json
+```
+
+The JSON capability response identifies `reiny_version`,
+`prepare_protocol`, `prepared_file`, `apply_protocol`, `build_kinds`, and
+`controlled_apply`. Consumers should require the expected version and protocol
+values instead of inferring support from the version string alone.
+For this CLI, `reiny capabilities --json` returns:
+
+```json
+{"reiny_version":"0.11.0","prepare_protocol":1,"prepared_file":1,"apply_protocol":1,"build_kinds":["cargo","command"],"controlled_apply":true}
+```
+
+The prepared output must be new; Reiny does not replace an existing file.
+Apply verifies the versioned envelope, payload hash, bindings, frozen
+executables, companions, configuration/assets and resources before starting
+the owner. It does not resolve sources or rebuild. This SHA-256 integrity
+check detects changed or missing bytes; it is not a signature. Frozen files
+are independent of later source or Cargo-output changes, while the declared
+application working directory must still exist. Use `--events jsonl` for
+newline-terminated, sequenced progress events on stdout; diagnostics remain
+available in the retained preparation log and on stderr. Add
+`--control-stdin` when a supervising process will send
+`{"v":1,"cmd":"cancel"}` or when stdin EOF should cancel. Ctrl+C also cancels
+and reaps builder descendants before prepare exits. `prepare` without
+`--control-stdin` does not treat an already-closed stdin as cancellation.
+JSONL records are UTF-8 objects with `v: 1`, a strictly increasing `seq`, and
+an event payload. Preparation emits `started`, phase changes, `planned`, group
+state transitions, Cargo `compiled` records, diagnostics, and exactly one
+terminal `finished` record. Groups cover Cargo, command, prebuilt executable,
+configuration, and resource work; Cargo progress reports observed compiler
+artifacts rather than an estimated total. A controlled apply stays attached to
+the owner for its lifetime and reports owner/readiness/status events through
+the same sequence envelope. Its cancel control is the same JSON line; EOF
+cancels only when `--control-stdin` is selected. `--control-stdin` and
+`--detach` cannot be combined.
 
 `run.kind: service` treats natural exit as failure; `task` treats successful
 exit as completed work. Readiness still requires the app to open its declared
@@ -345,8 +442,11 @@ publication and RPC server with a wired verification task.
 
 | Command | Effect |
 | --- | --- |
+| `reiny capabilities --json` | Report the exact CLI version and supported preparation, prepared-file, apply, builder and controlled-apply protocols. |
+| `reiny prepare <path> --out <new-file> [--events jsonl] [--control-stdin] [--bin-dir <dir>] [--release] [--build-cache <dir>] [--jobs <n>]` | Resolve and freeze a deployment without starting applications. `--bin-dir` applies only to prebuilt modules; `--release` overrides Cargo profiles only. |
 | `reiny plan [path] [--json]` | Resolve sources and show modules and connections. Builds nothing. |
 | `reiny apply [path] [--detach]` | Prepare artifacts (declared builds, staged files), start or reconcile managed processes, wait for explicit readiness and compare reported port schemas. |
+| `reiny apply --prepared <file> [--detach] [--ready-timeout <seconds>] [--events jsonl] [--control-stdin]` | Verify and apply frozen artifacts without resolving sources or running builders. This form is mutually exclusive with a source path and build options. |
 | `reiny run [path]` | Same contract as `apply`, in the foreground. Ctrl+C stops the deployment. |
 | `reiny status [path] [--json]` | Read state from the live owner. Retained state may show `owner_alive: false`. |
 | `reiny stop [path] [--json]` | Ask modules to stop cooperatively, then reap. Remaining owned process trees are killed. |
@@ -371,8 +471,11 @@ toward source, excluding both endpoints. The human-readable plan uses the
 same graph to show named sources and alias paths. These records describe the
 existing wiring; they do not create additional communication grants.
 
-`apply` and `run` share `--bin-dir`, `--log-level` and `--ready-timeout`
-(seconds, default 30). A bare `reiny <path>` or `reiny --config <path>` is
+Source `apply` and `run` share `--bin-dir`, `--release`, `--build-cache`,
+`--jobs`, `--log-level` and `--ready-timeout` (seconds, default 30). Prepared
+apply instead accepts only `--prepared`, `--detach`, `--ready-timeout`,
+`--events`, and `--control-stdin`; `--control-stdin` conflicts with `--detach`.
+A bare `reiny <path>` or `reiny --config <path>` is
 shorthand for a foreground `apply` of that root. `apply --detach` returns once readiness is confirmed.
 A foreground run registers its stop subscription before it handles Ctrl+C.
 Finite task deployments also return successfully when every task is completed

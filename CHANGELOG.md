@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Breaking Rust API
+
+- `BuildSpec` is now a tagged `Cargo` / `Command` enum rather than the
+  Cargo-only struct. Update Rust struct literals to `BuildSpec::Cargo(CargoBuild)`
+  or `BuildSpec::Command(CommandBuild)`; command builders declare their argv,
+  executable outputs and bundled files explicitly.
+- `DeploymentPlan` adds `prepare_with` and cancellable `load_with`;
+  `reiny-launch` exposes preparation progress/cancellation types and
+  `PreparedDeployment` file verification APIs. The CLI adds versioned
+  `prepare`, `apply --prepared`, and `capabilities --json` contracts.
+
 ## 0.11.0 - 2026-10-14
 
 **Breaking Rust API and communication contracts.** Upgrade the SDK, CLI,

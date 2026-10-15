@@ -80,6 +80,9 @@ struct RecordArgs {
     /// Do not record the latched values (the snapshot) from before recording started.
     #[arg(long)]
     no_snapshot: bool,
+    /// Register before publishers start; emit `bag_ready` and `bag_finished` JSONL on stdout.
+    #[arg(long)]
+    ready_json: bool,
     #[command(flatten)]
     bus: BusArgs,
 }
@@ -95,6 +98,9 @@ struct RecordChannels<W: std::io::Write + std::io::Seek> {
 }
 
 fn record(args: &RecordArgs) -> Result<()> {
+    if args.ready_json {
+        return record_registered(args);
+    }
     let bindings = args.bus.bindings()?;
     let domain = args.bus.runtime_options("reiny-cli").domain;
     let contracts = record_contracts(args, &bindings, &domain)?;
@@ -184,6 +190,350 @@ fn record(args: &RecordArgs) -> Result<()> {
     tracing::info!(messages = count, out = %out.display(), "recording finished");
     println!("{} — {count} messages", out.display());
     Ok(())
+}
+
+/// This is transport tooling, not a compiled application port: registration and schema
+/// verification are separate. In particular, `bag_ready` never claims SDK module readiness.
+#[derive(serde::Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+enum RecordEvent<'a> {
+    BagReady {
+        v: u32,
+        domain: &'a str,
+        inputs: usize,
+        sources: usize,
+    },
+    BagFinished {
+        v: u32,
+        messages: u64,
+    },
+}
+
+fn record_event(event: &RecordEvent<'_>) -> Result<()> {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer(&mut stdout, event)?;
+    writeln!(stdout)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+enum PendingRecord {
+    Live(reiny::engine::Sample),
+    Presence(reiny::engine::Presence),
+}
+
+struct RegisteredRecord {
+    // Drop the receiver first, unblocking callbacks before dropping declarations.
+    receiver: Option<zenoh::handlers::FifoChannelHandler<PendingRecord>>,
+    _guards: Vec<reiny::engine::Guard>,
+    engine: reiny::engine::Zenoh,
+    bindings: reiny::bindings::ModuleBindings,
+    contracts: BTreeMap<String, reiny::bindings::EndpointContract>,
+    domain: String,
+}
+
+fn record_registered(args: &RecordArgs) -> Result<()> {
+    let bindings = args.bus.bindings()?;
+    anyhow::ensure!(
+        std::env::var_os("REINY_MODULE_REPORT").is_none(),
+        "--ready-json registers a transport recorder, not a managed application; run it before apply"
+    );
+    let domain = args.bus.runtime_options("reiny-cli").domain;
+    let contracts = record_contracts(args, &bindings, &domain)?;
+    let (stop, mut stopping) = tokio::sync::watch::channel(false);
+    let interrupt = stop.clone();
+    ctrlc::set_handler(move || {
+        interrupt.send_replace(true);
+    })
+    .context("installing Ctrl+C handler")?;
+    let (session, _) = args.bus.open()?;
+    let engine = reiny::engine::Zenoh::from_session(session);
+    let runtime = tokio::runtime::Runtime::new()?;
+    let out = args
+        .out
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("{}.mcap", utc_stamp(now_unix_nanos()))));
+    let file = std::io::BufWriter::new(
+        std::fs::File::create(&out).with_context(|| format!("creating {}", out.display()))?,
+    );
+    let mut state = RecordChannels {
+        writer: mcap::Writer::with_options(
+            file,
+            mcap::WriteOptions::new().compression(Some(mcap::Compression::Zstd)),
+        )
+        .map_err(anyhow::Error::msg)?,
+        channels: BTreeMap::new(),
+        schemas: BTreeMap::new(),
+        fingerprints: BTreeMap::new(),
+    };
+    let mut registered = register_record(engine, bindings, contracts, domain, stop)?;
+    anyhow::ensure!(!*stopping.borrow(), "bag registration cancelled");
+    record_event(&RecordEvent::BagReady {
+        v: 1,
+        domain: &registered.domain,
+        inputs: registered.bindings.inputs.len(),
+        sources: registered.contracts.len(),
+    })?;
+    let result = runtime.block_on(registered.record_pending(args, &mut state, &mut stopping));
+    // Even a rejected sample leaves an inspectable finalized file, but never a success sentinel.
+    state.writer.finish().map_err(anyhow::Error::msg)?;
+    let count = result?;
+    record_event(&RecordEvent::BagFinished {
+        v: 1,
+        messages: count,
+    })?;
+    Ok(())
+}
+
+fn register_record(
+    engine: reiny::engine::Zenoh,
+    bindings: reiny::bindings::ModuleBindings,
+    contracts: BTreeMap<String, reiny::bindings::EndpointContract>,
+    domain: String,
+    stop: tokio::sync::watch::Sender<bool>,
+) -> Result<RegisteredRecord> {
+    use reiny::engine::{Engine, Key};
+    use zenoh::handlers::IntoHandler;
+    let mut guards = Vec::new();
+    // The receiver drops before the guards, unblocking callbacks even on failure.
+    let (sender, receiver) = zenoh::handlers::FifoChannel::new(256).into_handler();
+    for key in contracts.keys() {
+        let key = Key::parse(key).context("invalid declared record key")?;
+        let sender = sender.clone();
+        guards.push(engine.subscribe(
+            &key,
+            Box::new(move |sample| {
+                sender.call(PendingRecord::Live(sample));
+            }),
+        )?);
+    }
+    // Watch retained sources only after every live subscription is installed.
+    for (key, contract) in &contracts {
+        if contract.replay == Replay::Last {
+            let key = Key::parse(key).context("invalid declared record key")?;
+            let sender = sender.clone();
+            guards.push(engine.watch_alive(
+                &key,
+                Box::new(move |event| {
+                    sender.call(PendingRecord::Presence(event));
+                }),
+            )?);
+        }
+    }
+    for (name, port) in &bindings.inputs {
+        guards.push(
+            engine.declare_alive(
+                &Key::input(&domain, &bindings.namespace, name, &port.contract.type_name)
+                    .with_chunk(reiny::engine::SUB_CHUNK),
+            )?,
+        );
+    }
+    let stop_key = Key::module(
+        &domain,
+        Some(&bindings.namespace),
+        reiny::engine::STOP_CHUNK,
+    );
+    let reply_key = stop_key.clone();
+    guards.push(engine.respond(
+        &stop_key,
+        Box::new(move |query| {
+            stop.send_replace(true);
+            let _ = query.reply(&reply_key, b"ack".to_vec(), None);
+        }),
+    )?);
+    Ok(RegisteredRecord {
+        receiver: Some(receiver),
+        _guards: guards,
+        engine,
+        bindings,
+        contracts,
+        domain,
+    })
+}
+
+impl RegisteredRecord {
+    async fn record_pending<W: std::io::Write + std::io::Seek>(
+        &mut self,
+        args: &RecordArgs,
+        state: &mut RecordChannels<W>,
+        stopping: &mut tokio::sync::watch::Receiver<bool>,
+    ) -> Result<u64> {
+        use reiny::engine::Engine;
+        let filter = Filter::new(&args.types, &args.from, &args.exclude_types);
+        let mut count = 0;
+        let mut seen = std::collections::HashSet::new();
+        let mut queried = std::collections::HashSet::new();
+        let mut snapshots = std::collections::VecDeque::<Box<dyn reiny::engine::RawReplies>>::new();
+        let deadline = async {
+            match args.duration {
+                Some(seconds) => tokio::time::sleep(Duration::from_secs_f64(seconds)).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(deadline);
+        let mut closing = false;
+        let mut pending = std::collections::VecDeque::new();
+        loop {
+            let sample = tokio::select! {
+                biased;
+                _ = stopping.changed(), if !closing => {
+                    closing = true;
+                    if let Some(receiver) = self.receiver.take() {
+                        pending.extend(receiver.drain());
+                    }
+                    snapshots.clear();
+                    continue;
+                }
+                () = &mut deadline, if !closing => {
+                    closing = true;
+                    if let Some(receiver) = self.receiver.take() {
+                        pending.extend(receiver.drain());
+                    }
+                    snapshots.clear();
+                    continue;
+                }
+                event = async {
+                    match &self.receiver {
+                        Some(receiver) => receiver.recv_async().await.ok(),
+                        None => pending.pop_front(),
+                    }
+                } => {
+                    match event {
+                        None => break,
+                        Some(PendingRecord::Live(sample)) => {
+                            seen.insert(sample.key.clone());
+                            sample
+                        }
+                        Some(PendingRecord::Presence(reiny::engine::Presence::Joined(key))) => {
+                            if !closing && queried.insert(key.clone()) {
+                                snapshots.push_back(self.engine.query(&key, record_query())?);
+                            }
+                            continue;
+                        }
+                        Some(PendingRecord::Presence(reiny::engine::Presence::Left(key))) => {
+                            queried.remove(&key);
+                            seen.remove(&key);
+                            continue;
+                        }
+                    }
+                }
+                reply = async {
+                    match snapshots.front_mut() {
+                        Some(replies) => replies.next().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match reply {
+                        None => { snapshots.pop_front(); continue; }
+                        Some(Err(_)) => continue,
+                        Some(Ok(sample)) if seen.contains(&sample.key) => continue,
+                        Some(Ok(sample)) => sample,
+                    }
+                }
+            };
+            if self.write_verified(state, &sample, &filter).await? {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    async fn write_verified<W: std::io::Write + std::io::Seek>(
+        &self,
+        state: &mut RecordChannels<W>,
+        sample: &reiny::engine::Sample,
+        filter: &Filter,
+    ) -> Result<bool> {
+        let key = sample.key.to_string();
+        let contract = self
+            .contracts
+            .get(&key)
+            .context("undeclared record source")?;
+        if !state.fingerprints.contains_key(&key) {
+            self.discover_schema(&sample.key, state).await?;
+        }
+        let fingerprint = sample
+            .attachment
+            .as_deref()
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+            .map(u64::from_le_bytes);
+        let now = now_unix_nanos();
+        write_sample(
+            state,
+            &key,
+            &sample.payload,
+            fingerprint,
+            now,
+            sample.timestamp.unwrap_or(now),
+            contract.replay == Replay::Last,
+            filter,
+        )
+    }
+
+    async fn discover_schema<W: std::io::Write + std::io::Seek>(
+        &self,
+        source_key: &reiny::engine::Key,
+        state: &mut RecordChannels<W>,
+    ) -> Result<()> {
+        use reiny::engine::{Engine, Key};
+        let key = source_key.to_string();
+        let contract = &self.contracts[&key];
+        let schema_key = source_key.with_chunk(format!("@schema/{}", contract.type_name));
+        let mut replies = self.engine.query(&schema_key, record_query())?;
+        let mut descriptor = None;
+        while let Some(reply) = replies.next().await {
+            let reply =
+                reply.map_err(|error| anyhow::anyhow!("{}", String::from_utf8_lossy(&error)))?;
+            anyhow::ensure!(
+                reply.key == schema_key,
+                "descriptor source differs from declared endpoint"
+            );
+            let set = reiny_build::descriptor_subset(&reply.payload, &contract.type_name)?
+                .context("descriptor does not contain declared type")?;
+            let fingerprint = schema_fingerprint(&set, &contract.type_name)?;
+            if let Some((previous, _)) = &descriptor {
+                anyhow::ensure!(*previous == fingerprint, "conflicting endpoint descriptors");
+            }
+            descriptor = Some((fingerprint, set));
+        }
+        let (fingerprint, set) =
+            descriptor.with_context(|| format!("no descriptor for declared endpoint {key}"))?;
+        for port in self.bindings.inputs.values() {
+            if port.sources.iter().any(|source| {
+                source_key.source.as_deref() == Some(&source.namespace)
+                    && source_key.port() == Some(&source.port)
+            }) {
+                for source in &port.sources {
+                    let other = Key::output(
+                        &self.domain,
+                        &source.namespace,
+                        &source.port,
+                        &port.contract.type_name,
+                    )
+                    .to_string();
+                    anyhow::ensure!(
+                        state
+                            .fingerprints
+                            .get(&other)
+                            .is_none_or(|expected| *expected == fingerprint),
+                        "declared input sources disagree on schema fingerprint"
+                    );
+                }
+            }
+        }
+        state.fingerprints.insert(key.clone(), fingerprint);
+        state.schemas.insert(key, (contract.type_name.clone(), set));
+        Ok(())
+    }
+}
+
+fn record_query() -> reiny::engine::QueryParams {
+    reiny::engine::QueryParams {
+        payload: None,
+        attachment: None,
+        timeout: Duration::from_secs(3),
+    }
 }
 
 fn record_contracts(

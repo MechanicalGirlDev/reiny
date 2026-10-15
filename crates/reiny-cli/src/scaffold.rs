@@ -422,7 +422,13 @@ mod tests {
         let module: reiny_launch::ModuleManifest = serde_yaml::from_str(&text).unwrap();
         assert_eq!(module.version, 3);
         assert_eq!(module.outputs["ping"].type_name, "ping.Ping");
-        assert!(!module.build.unwrap().locked);
+        assert!(matches!(
+            module.build,
+            Some(reiny_launch::BuildSpec::Cargo(reiny_launch::CargoBuild {
+                locked: false,
+                ..
+            }))
+        ));
         assert_eq!(module.run.unwrap().bin, "demo");
         let catalog: Value =
             serde_yaml::from_str(&schema_yaml("demo", Some("Ping")).unwrap()).unwrap();
@@ -439,7 +445,13 @@ mod tests {
         assert_eq!(module.version, 3);
         assert!(module.inputs.is_empty());
         assert!(module.outputs.is_empty());
-        assert!(module.build.unwrap().locked);
+        assert!(matches!(
+            module.build,
+            Some(reiny_launch::BuildSpec::Cargo(reiny_launch::CargoBuild {
+                locked: true,
+                ..
+            }))
+        ));
     }
 
     #[test]

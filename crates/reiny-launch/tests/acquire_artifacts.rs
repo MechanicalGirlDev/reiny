@@ -7,6 +7,10 @@ pub mod acquire;
 pub mod artifacts;
 #[path = "../src/file_lock.rs"]
 mod file_lock;
+#[path = "../src/progress.rs"]
+pub mod progress;
+#[path = "../src/runner.rs"]
+mod runner;
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -16,7 +20,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use acquire::{GitSource, SourceResolver};
-use artifacts::{BuildKind, BuildSpec, prepare};
+use artifacts::{BuildKind, BuildSpec, CargoBuild};
+#[cfg(windows)]
+use reiny_launch::WindowsJobCompletion;
 use tempfile::TempDir;
 
 fn git(repo: &Path, args: &[&str]) -> String {
@@ -68,7 +74,8 @@ fn source(repo: &Path) -> GitSource {
 }
 
 fn resolve(root: &Path, source: &GitSource, update: bool) -> PathBuf {
-    let mut resolver = SourceResolver::open(root, update).unwrap();
+    let mut resolver =
+        SourceResolver::open_with(root, update, &progress::CancelToken::default()).unwrap();
     let path = resolver.resolve("module", root, source).unwrap();
     resolver.finish().unwrap();
     path
@@ -264,11 +271,15 @@ fn schemas_have_defaults_and_reject_unknown_fields() {
     assert_eq!(source.path, PathBuf::from("."));
     assert!(serde_yaml::from_str::<GitSource>("git: a\nref: b\nunknown: true\n").is_err());
     let build: BuildSpec = serde_yaml::from_str("type: cargo\n").unwrap();
-    assert!(matches!(build.kind, BuildKind::Cargo));
+    assert!(matches!(build.kind(), BuildKind::Cargo));
+    let BuildSpec::Cargo(build) = build else {
+        panic!("expected Cargo")
+    };
     assert_eq!(build.manifest, PathBuf::from("Cargo.toml"));
     assert_eq!(build.profile, "release");
     assert!(build.package.is_none() && build.features.is_empty());
     assert!(build.default_features && build.locked);
+    assert!(build.cwd.is_none() && build.target.is_none() && build.env.is_empty());
     assert!(serde_yaml::from_str::<BuildSpec>("type: shell\n").is_err());
     assert!(serde_yaml::from_str::<BuildSpec>("type: cargo\ncommand: evil\n").is_err());
 }
@@ -277,6 +288,29 @@ fn output(executable: &Path) -> String {
     let output = Command::new(executable).output().unwrap();
     assert!(output.status.success());
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn prepare(
+    spec: &BuildSpec,
+    module_dir: &Path,
+    bin: &str,
+    cache: &Path,
+) -> anyhow::Result<PathBuf> {
+    let request =
+        artifacts::BuildRequest::new(spec, module_dir, cache, &std::env::vars_os().collect())?;
+    assert_eq!(request.kind(), progress::GroupKind::Cargo);
+    assert_ne!(request.key, "");
+    let built = request.execute(
+        &std::collections::BTreeSet::from([bin.to_owned()]),
+        cache,
+        &progress::CancelToken::default().child(),
+        &progress::Events::new(None),
+        "fixture",
+    )?;
+    if built.fresh {
+        assert!(built.executables[bin].is_file());
+    }
+    Ok(built.executables[bin].clone())
 }
 
 struct Running(Child);
@@ -334,15 +368,15 @@ fn main() {
 "#
     .to_owned();
     fs::write(project.join("src/main.rs"), &code).unwrap();
-    let spec = BuildSpec {
-        kind: BuildKind::Cargo,
+    let spec = BuildSpec::Cargo(CargoBuild {
         manifest: PathBuf::from("nested/Cargo.toml"),
         package: Some("artifact-fixture".to_owned()),
         profile: "launch".to_owned(),
         features: vec!["chosen".to_owned()],
         default_features: false,
         locked: true,
-    };
+        ..CargoBuild::default()
+    });
     (spec, code)
 }
 

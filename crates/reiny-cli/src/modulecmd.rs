@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -14,7 +13,6 @@ use reiny::zenoh::{self, Wait};
 use reiny::{RuntimeOptions, ZenohSource};
 use reiny_launch::{DeploymentClient, DeploymentPlan, ModuleObserver, PreparedDeployment};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::bus::KEY_ROOT;
 
@@ -65,7 +63,7 @@ pub(crate) fn plan(path: &Path, update: bool, json: bool) -> Result<()> {
         println!("deployment {} (domain {})", plan.deployment, plan.domain);
         for node in &plan.nodes {
             let preparation = if node.build.is_some() {
-                "check Cargo build"
+                "check declared build"
             } else {
                 "verify installed binary"
             };
@@ -195,50 +193,60 @@ pub(crate) fn apply(
     bin_dir: Option<PathBuf>,
     ready_timeout: f64,
 ) -> Result<()> {
-    let timeout =
-        Duration::try_from_secs_f64(ready_timeout).context("invalid readiness deadline")?;
-    if timeout.is_zero() {
-        anyhow::bail!("managed readiness cannot be disabled");
-    }
-    let mut plan = DeploymentPlan::load(path, false)?;
-    if let Some(dir) = bin_dir {
-        let dir = std::fs::canonicalize(&dir).context("resolving binary directory")?;
-        for node in &mut plan.nodes {
-            node.provider.bin_dir.clone_from(&dir);
-        }
-    }
-    let prepared = plan.prepare()?;
-    let client = match DeploymentClient::find(&prepared.root)? {
-        Some(client) => {
-            client.apply(&prepared)?;
-            client
-        }
-        None => start_owner(&prepared, timeout)?,
-    };
-    let state = match client.wait_ready(timeout) {
-        Ok(state) => state,
-        Err(error) => {
-            if let Err(cleanup) = client.stop() {
-                eprintln!("cleaning failed deployment start: {cleanup:#}");
-            }
-            return Err(error);
-        }
-    };
-    print_json(&state)?;
-    if detach {
-        return Ok(());
-    }
-    let termination = client.watch_terminal()?;
-    let client = Arc::new(client);
-    let stop_client = Arc::clone(&client);
-    ctrlc::set_handler(move || {
-        if let Err(error) = stop_client.stop() {
-            eprintln!("stopping deployment: {error:#}");
-        }
+    apply_args(crate::StartArgs {
+        path: Some(path.to_owned()),
+        prepared: None,
+        detach,
+        build: crate::preparecmd::BuildOptions {
+            bin_dir,
+            ..Default::default()
+        },
+        events: None,
+        control_stdin: false,
+        log_level: "info".into(),
+        ready_timeout,
     })
-    .context("installing deployment stop handler")?;
-    let stopped = termination.wait()?;
-    print_json(&stopped)
+}
+
+pub(crate) fn apply_args(args: crate::StartArgs) -> Result<()> {
+    let control = crate::control::Control::install(args.control_stdin)?;
+    let protocol = crate::preparecmd::Protocol::new(args.events);
+    let timeout = Duration::try_from_secs_f64(args.ready_timeout)
+        .context("invalid readiness deadline")
+        .and_then(|timeout| {
+            anyhow::ensure!(!timeout.is_zero(), "managed readiness cannot be disabled");
+            Ok(timeout)
+        });
+    let timeout = match timeout {
+        Ok(timeout) => timeout,
+        Err(error) => return crate::applycmd::failed(&protocol, error),
+    };
+    let prepared = (|| {
+        if let Some(path) = args.prepared {
+            PreparedDeployment::load_file(&path)
+        } else {
+            let path = args.path.as_deref().unwrap_or(Path::new("."));
+            let plan = crate::preparecmd::load(path, &args.build, &control)?;
+            crate::preparecmd::materialize(
+                &plan,
+                &args.build,
+                &control,
+                &crate::preparecmd::Protocol::new(None),
+            )
+        }
+    })();
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => return crate::applycmd::failed(&protocol, control.failure(error)),
+    };
+    crate::applycmd::apply(
+        &prepared,
+        args.detach,
+        args.control_stdin,
+        timeout,
+        &control,
+        &protocol,
+    )
 }
 
 pub(crate) fn status(path: &Path, json: bool) -> Result<()> {
@@ -270,6 +278,7 @@ pub(crate) fn stop(path: &Path, json: bool) -> Result<()> {
 pub(crate) fn supervise(path: &Path) -> Result<()> {
     let prepared: PreparedDeployment =
         serde_json::from_slice(&std::fs::read(path)?).context("reading prepared deployment")?;
+    prepared.verify()?;
     let observer = BusObserver::open(&prepared)?;
     let stop = Arc::new(AtomicBool::new(false));
     let signal = Arc::clone(&stop);
@@ -282,7 +291,9 @@ pub(crate) fn supervise(path: &Path) -> Result<()> {
         Err(std::env::VarError::NotPresent) => None,
         Err(error @ std::env::VarError::NotUnicode(_)) => return Err(error.into()),
     };
-    reiny_launch::serve(prepared, &observer, &stop, &|| {
+    let lease = std::sync::Mutex::new(None::<std::net::TcpStream>);
+    let lease_reader = std::sync::Mutex::new(None::<std::thread::JoinHandle<()>>);
+    let result = reiny_launch::serve(prepared, &observer, &stop, &|| {
         if let Some(rendezvous) = &rendezvous {
             let mut stream =
                 std::net::TcpStream::connect_timeout(&rendezvous.address, Duration::from_secs(5))?;
@@ -302,110 +313,59 @@ pub(crate) fn supervise(path: &Path) -> Result<()> {
                 &accepted == b"accepted\n",
                 "owner bootstrap was not accepted"
             );
-        }
-        Ok(())
-    })
-}
-
-#[derive(Serialize, Deserialize)]
-struct Rendezvous {
-    address: SocketAddr,
-    nonce: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct OwnerReady {
-    nonce: String,
-    pid: u32,
-}
-
-fn start_owner(prepared: &PreparedDeployment, timeout: Duration) -> Result<DeploymentClient> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))?;
-    let rendezvous = Rendezvous {
-        address: listener.local_addr()?,
-        nonce: nonce()?,
-    };
-    let directory = prepared.root.join(".reiny").join("prepared");
-    std::fs::create_dir_all(&directory)?;
-    let path = directory.join(format!("{}.json", rendezvous.nonce));
-    std::fs::write(&path, serde_json::to_vec(prepared)?)?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(prepared.root.join(".reiny").join("owner.log"))?;
-    let mut command = tokio::process::Command::new(std::env::current_exe()?);
-    command
-        .arg("__supervise")
-        .arg(&path)
-        .env(
-            "REINY_OWNER_RENDEZVOUS",
-            serde_json::to_string(&rendezvous)?,
-        )
-        .stdin(Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log);
-    let mut owner = runtime
-        .block_on(async { command.spawn() })
-        .context("starting deployment owner")?;
-    let owner_pid = owner.id().context("owner process has no PID")?;
-    let result = runtime.block_on(async {
-        tokio::select! {
-            ready = tokio::time::timeout(timeout, async {
-                let (stream, _) = listener.accept().await?;
-                let mut reader = BufReader::new(stream);
-                let mut line = String::new();
-                reader.read_line(&mut line).await?;
-                let ready: OwnerReady = serde_json::from_str(&line)?;
-                anyhow::ensure!(ready.nonce == rendezvous.nonce && ready.pid == owner_pid, "invalid owner rendezvous");
-                reader.get_mut().write_all(b"accepted\n").await?;
-                Ok::<(), anyhow::Error>(())
-            }) => ready.context("owner bootstrap timed out")?,
-            exited = owner.wait() => Err(anyhow::anyhow!("owner exited before bootstrap: {}", exited?)),
-        }
-    });
-    if let Err(error) = result {
-        runtime.block_on(terminate_bootstrap(&mut owner));
-        if let Err(cleanup) = std::fs::remove_file(&path) {
-            eprintln!("removing prepared bootstrap: {cleanup}");
-        }
-        return Err(error.context(format!(
-            "owner log: {}",
-            prepared.root.join(".reiny/owner.log").display()
-        )));
-    }
-    std::fs::remove_file(&path)?;
-    let client = DeploymentClient::find(&prepared.root)
-        .and_then(|client| client.context("owner rendezvous completed without a control endpoint"));
-    if client.is_err() {
-        runtime.block_on(terminate_bootstrap(&mut owner));
-    }
-    client
-}
-
-async fn terminate_bootstrap(owner: &mut tokio::process::Child) {
-    match owner.try_wait() {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            if let Err(error) = owner.kill().await {
-                eprintln!("terminating failed owner bootstrap: {error}");
+            if rendezvous.lease {
+                stream.set_read_timeout(None)?;
+                let mut reader = stream.try_clone()?;
+                let signal = Arc::clone(&stop);
+                let thread = std::thread::Builder::new()
+                    .name("reiny-parent-lease".into())
+                    .spawn(move || {
+                        let mut byte = [0u8; 1];
+                        // EOF, reset, or unexpected data all revoke the parent's lease.
+                        if let Err(error) = reader.read(&mut byte) {
+                            tracing::debug!(%error, "parent lease closed");
+                        }
+                        signal.store(true, Ordering::SeqCst);
+                    })?;
+                *lease
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(stream);
+                *lease_reader
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(thread);
             }
         }
-        Err(error) => eprintln!("checking failed owner bootstrap: {error}"),
+        Ok(())
+    });
+    if let Some(stream) = lease
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        && let Err(error) = stream.shutdown(std::net::Shutdown::Both)
+    {
+        tracing::debug!(%error, "closing parent lease");
     }
+    if let Some(thread) = lease_reader
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    {
+        thread
+            .join()
+            .map_err(|_| anyhow::anyhow!("parent lease reader panicked"))?;
+    }
+    result
 }
 
-fn nonce() -> Result<String> {
-    use std::fmt::Write as _;
-    let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).map_err(anyhow::Error::msg)?;
-    let mut token = String::with_capacity(64);
-    for byte in bytes {
-        write!(&mut token, "{byte:02x}")?;
-    }
-    Ok(token)
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Rendezvous {
+    pub(crate) address: SocketAddr,
+    pub(crate) nonce: String,
+    pub(crate) lease: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct OwnerReady {
+    pub(crate) nonce: String,
+    pub(crate) pid: u32,
 }
 
 fn root_dir(path: &Path) -> Result<PathBuf> {
