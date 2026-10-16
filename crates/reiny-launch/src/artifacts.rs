@@ -14,6 +14,9 @@ use crate::file_lock::FileLock;
 use crate::progress::{CancelToken, Events, GroupKind, PrepareEvent};
 use crate::runner::{self, Stream};
 
+#[path = "runtime_libraries.rs"]
+mod runtime_libraries;
+
 /// Supported module build engines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -471,10 +474,8 @@ impl BuildRequest {
         let mut files = BTreeMap::new();
         for (bin, (path, package)) in &executables {
             files.insert(executable_name(bin), path.clone());
-            collect_libraries(path, &mut files)?;
-            for linked in &linked_paths {
-                collect_linked_libraries(&package.join(linked), &mut files)?;
-            }
+            let linked: Vec<_> = linked_paths.iter().map(|dir| package.join(dir)).collect();
+            collect_libraries(path, &linked, &mut files)?;
         }
         let entry = executable_name(bins.first().context("empty Cargo group")?);
         let first = stage_files_with(&files, cache, &entry, cancel)?;
@@ -673,21 +674,35 @@ fn stage_bundle(
             name.to_string_lossy()
         );
     }
-    collect_libraries(executable, &mut files)?;
+    collect_libraries(executable, &[], &mut files)?;
     for companion in companions {
-        collect_libraries(companion, &mut files)?;
+        collect_libraries(companion, &[], &mut files)?;
     }
     stage_files_with(&files, cache, &PathBuf::from(name), cancel)
 }
 
-fn collect_libraries(executable: &Path, files: &mut BTreeMap<PathBuf, PathBuf>) -> Result<()> {
+fn collect_libraries(
+    executable: &Path,
+    linked: &[PathBuf],
+    files: &mut BTreeMap<PathBuf, PathBuf>,
+) -> Result<()> {
     let parent = executable
         .parent()
         .context("executable has no parent directory")?;
-    // Cargo puts native runtime libraries beside the binary or under deps.
-    // Bundle their exact bytes; never touch an already staged active executable.
-    for dir in [parent.to_owned(), parent.join("deps")] {
-        collect_library_directory(&dir, files)?;
+    // Siblings and explicit native search directories can contain libraries
+    // loaded dynamically, without an entry in an executable's import table.
+    collect_library_directory(parent, files)?;
+    for directory in linked {
+        collect_linked_libraries(directory, files)?;
+    }
+    if let Some(imports) = runtime_libraries::pe_imports(executable)? {
+        // Cargo deps also contains compiler proc macros. Only runtime imports
+        // may promote those candidates into the bundle.
+        runtime_libraries::collect_pe_dependencies(executable, imports, parent, files)?;
+    } else {
+        // Scripts, opaque command fixtures, ELF and Mach-O retain their existing
+        // discovery contract; PE-specific pruning is not safe for those formats.
+        collect_library_directory(&parent.join("deps"), files)?;
     }
     Ok(())
 }
@@ -740,7 +755,7 @@ fn collect_library_directory(
         let name = entry.file_name();
         let text = name.to_string_lossy();
         if path.is_file()
-            && (text.ends_with(".dll")
+            && (text.to_ascii_lowercase().ends_with(".dll")
                 || text.ends_with(".dylib")
                 || text.ends_with(".so")
                 || text.contains(".so."))

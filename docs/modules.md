@@ -194,6 +194,18 @@ libraries and declared files. That name is reserved at the binary directory
 root. Preparation rejects invalid versions, unsafe paths, missing executables
 or files, and does not copy unrelated neighbors from the binary directory.
 
+Without that inventory, PE executables (Windows) include their local import
+dependency closure, including delay-loaded imports. Sibling runtime libraries
+and Cargo build-script linked runtime libraries remain roots, including plugins
+loaded dynamically; their imports are followed too. Cargo `deps` is a lookup
+directory, not an inventory: unrelated compiler proc-macro DLLs are not bundled.
+Resolution uses these local files only, never the host's `PATH` or Windows system
+directories. Libraries supplied only by the target environment remain its
+responsibility. Dynamically loaded libraries kept only in `deps` must instead be
+placed beside the executable or declared through the bundle/command inventory.
+Malformed PE imports fail preparation. Non-PE inputs retain the existing sibling
+and `deps` runtime-library discovery.
+
 Preparation can expose progress, cancel owned builders, and create a
 source-independent verified snapshot:
 
