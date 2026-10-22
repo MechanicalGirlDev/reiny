@@ -3421,7 +3421,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "mcap",
  "process-wrap",
  "prost",
@@ -3484,7 +3484,7 @@ name = "reiny-launch"
 version = "0.11.0"
 dependencies = [
  "anyhow",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "object",
  "process-wrap",
  "reiny-core",
