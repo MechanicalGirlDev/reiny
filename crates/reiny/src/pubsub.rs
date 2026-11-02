@@ -1100,6 +1100,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn latched_drops_overtaken_reply_and_replays_after_publisher_rejoins() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let bus = Arc::new(crate::engine::Local::new());
+            let receiver = crate::engine::conformance::cloudy(bus.clone(), "receiver").await;
+            let key = Key::output(receiver.domain(), "sender", "state", State::TYPE_NAME);
+            let (queries, mut pending) = mpsc::channel(2);
+            let _responder = bus
+                .respond(
+                    &key,
+                    Box::new(move |query| {
+                        queries.try_send(query).expect("room for retained query");
+                    }),
+                )
+                .expect("responder");
+            let publisher = bus.publisher(&key, &Qos::DEFAULT).expect("publisher");
+            let token = bus.declare_alive(&key).expect("publisher presence");
+            let mut subscriber = Core::declare(
+                &receiver,
+                State::TYPE_NAME,
+                &[Some(crate::bindings::EndpointAddress {
+                    namespace: "sender".into(),
+                    port: "state".into(),
+                })],
+                true,
+                None,
+            )
+            .expect("latched subscriber");
+
+            // Hold the retained response until a live sample has actually been delivered.
+            let retained = tokio::select! {
+                biased;
+                sample = subscriber.recv() => panic!("unexpected sample: {sample:?}"),
+                query = pending.recv() => query.expect("initial retained query"),
+            };
+            publisher.put(vec![2], None).expect("live sample");
+            assert_eq!(subscriber.recv().await.expect("live delivery").payload, [2]);
+            retained.reply(&key, vec![1], None).expect("delayed reply");
+            publisher.put(vec![3], None).expect("live sentinel");
+            assert_eq!(
+                subscriber.recv().await.expect("next live delivery").payload,
+                [3],
+                "the delayed retained value must not follow a newer live value"
+            );
+
+            // Local orders the leave before the join. The same output must be queried again,
+            // and its retained value must not be suppressed by the previous publisher's live data.
+            drop(token);
+            let _rejoined = bus.declare_alive(&key).expect("publisher rejoins");
+            let retained = tokio::select! {
+                biased;
+                sample = subscriber.recv() => panic!("unexpected sample: {sample:?}"),
+                query = pending.recv() => query.expect("retained query after rejoin"),
+            };
+            retained.reply(&key, vec![4], None).expect("rejoined reply");
+            assert_eq!(
+                subscriber.recv().await.expect("rejoined delivery").payload,
+                [4]
+            );
+        })
+        .await
+        .expect("latched lifecycle completes within patience");
+    }
+
+    #[tokio::test]
     async fn send_is_deferred_until_its_future_is_polled() {
         let bus = Arc::new(crate::engine::Local::new());
         let sender = crate::engine::conformance::cloudy(bus.clone(), "sender").await;
