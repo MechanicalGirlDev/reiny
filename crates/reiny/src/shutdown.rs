@@ -3,7 +3,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
+
+use crate::managed::HostedEvent;
 
 /// A cloneable shared shutdown signal.
 #[derive(Clone, Default)]
@@ -15,6 +17,7 @@ pub(crate) struct Shutdown {
 struct Inner {
     flag: AtomicBool,
     notify: Notify,
+    hosted: Option<watch::Sender<Option<HostedEvent>>>,
 }
 
 impl Shutdown {
@@ -23,9 +26,38 @@ impl Shutdown {
         Self::default()
     }
 
+    pub(crate) fn hosted() -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                hosted: Some(watch::channel(None).0),
+                ..Inner::default()
+            }),
+        }
+    }
+
+    pub(crate) fn hosted_event(&self, event: HostedEvent) {
+        if let Some(sender) = &self.inner.hosted {
+            sender.send_if_modified(|current| {
+                if current.is_some() {
+                    return false;
+                }
+                *current = Some(event);
+                true
+            });
+        }
+    }
+
+    pub(crate) fn hosted_events(&self) -> watch::Receiver<Option<HostedEvent>> {
+        match &self.inner.hosted {
+            Some(sender) => sender.subscribe(),
+            None => watch::channel(None).1,
+        }
+    }
+
     /// Request shutdown (idempotent).
     pub(crate) fn trigger(&self) {
         self.inner.flag.store(true, Ordering::SeqCst);
+        self.hosted_event(HostedEvent::StopRequested);
         self.inner.notify.notify_waiters();
     }
 

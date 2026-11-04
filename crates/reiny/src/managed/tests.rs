@@ -24,6 +24,7 @@ use crate::{Descriptor, MessageType, ModuleContext, Qos, RuntimeOptions};
 mod bridge;
 mod delegation;
 mod dynamic;
+mod hosted_admission;
 mod lifecycle;
 mod policy;
 mod ports;

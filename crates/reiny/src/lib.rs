@@ -45,6 +45,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // Tests may express failure by panicking.
 pub mod bridge;
+pub mod component;
 #[cfg(all(test, feature = "zenoh"))]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod e2e;

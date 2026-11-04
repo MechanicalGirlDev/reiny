@@ -2,11 +2,46 @@
 
 use std::path::Path;
 
+use crate::managed::{AdmissionError, HostedOptions};
 use crate::managed::{MODULE_REPORT_ENV, config as managed_config};
 use crate::shutdown::Shutdown;
 use crate::{ModuleContext, Result, RuntimeOptions, validate_segment};
 
 impl ModuleContext {
+    pub(crate) async fn open_hosted(
+        options: HostedOptions,
+    ) -> std::result::Result<Self, AdmissionError> {
+        validate_segment("hosted domain", &options.domain)
+            .map_err(|error| AdmissionError::InvalidIdentity(error.to_string()))?;
+        managed_config::validate_namespace(&options.bindings.namespace)
+            .map_err(|error| AdmissionError::InvalidIdentity(error.to_string()))?;
+        options
+            .bindings
+            .validate()
+            .map_err(|error| AdmissionError::InvalidBindings(error.to_string()))?;
+        if !options.bindings.children.is_empty() || !options.bindings.executables.is_empty() {
+            return Err(AdmissionError::UnsupportedHostedBindings);
+        }
+        if !options.engine.caps().liveliness {
+            return Err(AdmissionError::NoLiveliness);
+        }
+        let mut context = Self::new(
+            options.engine,
+            options.bindings.namespace.clone(),
+            options.domain,
+            Shutdown::hosted(),
+            options.config,
+            Vec::new(),
+        )
+        .await
+        .map_err(|error| AdmissionError::Transport(error.to_string()))?;
+        context
+            .install_stop_handler()
+            .map_err(|error| AdmissionError::Transport(error.to_string()))?;
+        context.module.bindings = Some(options.bindings);
+        Ok(context)
+    }
+
     /// Open the engine from the options (or take `opts.engine`) and build a `ModuleContext`.
     ///
     /// Call it inside a tokio runtime. It watches no signals — it is the entry point for slotting

@@ -1,11 +1,16 @@
 //! Engine-neutral named-port contracts handed to a managed module at startup.
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
+
+mod report;
+
+pub use report::{validate_graph, validate_report};
 
 /// Version of reusable module definitions and invocation manifests.
 pub const MODULE_MANIFEST_VERSION: u32 = 3;
@@ -260,6 +265,122 @@ pub struct ResponseReport {
     /// Compiled response fingerprint.
     pub schema: u64,
 }
+
+/// A compiled module report paired with its resolved runtime authority.
+pub struct ReportEntry<'a> {
+    /// Resolved, app-owned endpoint bindings.
+    pub bindings: &'a ModuleBindings,
+    /// Actual compiled endpoints registered by the module.
+    pub report: &'a ModuleReport,
+}
+
+/// Machine-readable reason a compiled report or closed graph was rejected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReportErrorCode {
+    /// No modules were supplied.
+    EmptyGraph,
+    /// The resolved bindings are malformed.
+    InvalidBindings,
+    /// An owned child must be aggregated into its parent before graph validation.
+    UnsupportedGraphMember,
+    /// Multiple entries claim the same module namespace.
+    DuplicateNamespace,
+    /// Unsupported compiled report format.
+    ReportVersion,
+    /// Unsupported schema fingerprint algorithm.
+    FingerprintVersion,
+    /// Report module identity differs from its bindings.
+    Namespace,
+    /// Report publication identity differs from its bindings.
+    EndpointNamespace,
+    /// A declared port is missing or an undeclared port was reported.
+    PortSet,
+    /// The compiled endpoint direction, address, or exact sources differ.
+    Endpoint,
+    /// The effective contract differs from the declared contract.
+    Contract,
+    /// Compiled message or request names differ.
+    Type,
+    /// Compiled RPC response shape or names differ.
+    Response,
+    /// An exact source module is absent from the graph.
+    MissingSourceModule,
+    /// An exact source output is absent from its module.
+    MissingSourcePort,
+    /// Compiled message or response schema fingerprints differ.
+    Schema,
+    /// Endpoint kinds or replay and retention policies are incompatible.
+    Policy,
+}
+
+/// Side of a module port involved in report validation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReportPortSide {
+    /// A receiving or RPC client port.
+    Input,
+    /// A publishing or RPC server port.
+    Output,
+}
+
+/// Context for the first validation failure; diagnostic text is not a stable contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReportError {
+    /// Stable failure category.
+    pub code: ReportErrorCode,
+    /// Module being checked, absent for an empty graph.
+    pub module: Option<String>,
+    /// Port side, absent for module-level failures.
+    pub side: Option<ReportPortSide>,
+    /// Local port being checked, when applicable.
+    pub port: Option<String>,
+    /// Exact source responsible for an edge failure, allocated only on error.
+    pub source: Option<Box<EndpointAddress>>,
+    /// Human-readable explanation.
+    pub detail: String,
+}
+
+impl ReportError {
+    fn new(code: ReportErrorCode, module: Option<&str>, detail: String) -> Self {
+        Self {
+            code,
+            module: module.map(String::from),
+            side: None,
+            port: None,
+            source: None,
+            detail,
+        }
+    }
+
+    fn at(mut self, side: ReportPortSide, port: &str) -> Self {
+        self.side = Some(side);
+        self.port = Some(String::from(port));
+        self
+    }
+}
+
+impl core::fmt::Display for ReportError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self.code)?;
+        if let Some(module) = &self.module {
+            write!(f, " in {module}")?;
+        }
+        if let Some(port) = &self.port {
+            let direction = match self.side {
+                Some(ReportPortSide::Input) => "input",
+                Some(ReportPortSide::Output) => "output",
+                None => "port",
+            };
+            write!(f, " {direction} {port}")?;
+        }
+        if let Some(source) = &self.source {
+            write!(f, " from {}/{}", source.namespace, source.port)?;
+        }
+        write!(f, ": {}", self.detail)
+    }
+}
+
+impl core::error::Error for ReportError {}
 
 /// A malformed resolved runtime contract, rejected before opening transport ports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

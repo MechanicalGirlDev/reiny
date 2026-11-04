@@ -177,6 +177,69 @@ sample (`schema.services` in `schema.yaml`).
 [`examples/owned-child`](examples/owned-child) demonstrates an app-owned helper
 with delegated retained state and RPC endpoints, plus a wired verification task.
 
+## In-process components
+
+Deployments started by `reiny apply` or `reiny run` place every module in its
+own managed process. `reiny::component::ComponentHost` is a separate, newer
+option: it runs trusted Rust components as Tokio tasks inside one process,
+sharing one explicit engine (usually a single `engine::Local`).
+
+Try the two-component demo:
+
+```sh
+cargo run -p reiny --no-default-features --example component_host
+```
+
+The [example](crates/reiny/examples/component_host.rs) shows the whole contract:
+
+- **Registered factories.** A `ComponentRegistry` is an explicit allowlist of
+  `ComponentFactory` values keyed by id. Names never load code dynamically, and
+  registering the same id twice fails with `DuplicateFactory`.
+- **Distinct bindings.** Each `ComponentInstanceSpec` names a factory and
+  carries its own resolved `ModuleBindings` and optional TOML config. Namespaces
+  must be unique, and hosted instances must be top-level modules without
+  children or executables. Components open only their declared named ports
+  through `ComponentContext` (`input`, `output`, `rpc_client`, `rpc_server`).
+  Having a matching Rust type doesn't grant a port: authority comes from the
+  bindings alone.
+- **Shared delivery.** On a shared `Local`, `send_shared` and
+  `recv_shared_envelope` pass the same `Arc` between components, as described
+  under [shared delivery](#shared-delivery-inside-one-process).
+
+A `Component` has three hooks. `prepare` opens and keeps its endpoint handles;
+it must not publish or spawn detached work. The host then validates that the
+prepared reports form the declared closed graph and commits readiness before
+any `run` starts. `run` is a service: returning before shutdown counts as a
+failure (`UnexpectedExit`). `stop` receives a `StopReason` after the active
+hook's future has been dropped, including after a partial prepare.
+
+`ComponentHost::launch` checks static inputs synchronously and returns a
+`HostHandle`. Use `wait_running()` to wait for admission (or get the startup
+error), `status()` or `subscribe()` for per-group and per-component phases, and
+`stop()` for the shared terminal `HostOutcome`. Dropping the handle also
+requests shutdown. The first failure in any component cancels the whole group
+and is kept as `primary`, with cleanup errors listed separately.
+`startup_timeout` and `stop_timeout` each cover the whole group, not one
+component.
+
+Know the limits before relying on it:
+
+- Shutdown is cooperative. Hooks must yield and tolerate cancellation. Nothing
+  forcibly terminates a stuck task or blocking native code.
+- `HostOutcome::Unresponsive` lists the instances that didn't join before the
+  stop deadline. It means completion is unconfirmed, not that the code stopped.
+- There's no isolation between components: they share the process, memory,
+  and engine, and they're trusted code.
+- Stopping withdraws readiness. It doesn't revoke endpoint handles a component
+  leaked elsewhere.
+- Readiness lost before activation prevents every run. A loss after that final
+  check can race a peer's first poll; the host then fails and stops the group.
+  It isn't a distributed readiness transaction.
+
+Not implemented yet: mixing in-process and process placement in one
+deployment, placement through `main.yaml` or the CLI, a general step scheduler,
+a job protocol, and a cross-language host.
+
 ## Message type contract
 
 ### Shared delivery inside one process
