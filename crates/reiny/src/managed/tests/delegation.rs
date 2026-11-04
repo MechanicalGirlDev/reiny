@@ -5,6 +5,8 @@ use crate::engine::READY_CHUNK;
 use crate::managed::owned::delegated_bindings;
 use std::process::Stdio;
 
+mod report;
+
 fn host_bindings() -> ModuleBindings {
     let mut binding = bindings(SENDER);
     binding
@@ -33,8 +35,9 @@ fn host_bindings() -> ModuleBindings {
 async fn spawn_fixture(
     bus: Arc<Local>,
     directory: &Directory,
+    binding: ModuleBindings,
 ) -> (ModuleContext, OwnedChild, std::io::PipeWriter) {
-    let mut host = ModuleContext::open(options(bus, host_bindings()))
+    let mut host = ModuleContext::open(options(bus, binding))
         .await
         .expect("host");
     host.module.bundle_dir = Some(directory.0.clone());
@@ -153,7 +156,8 @@ async fn delegation_is_exclusive_and_child_runtime_identity_is_distinct() {
 async fn host_requires_child_report_and_live_readiness_then_withdraws_on_port_loss() {
     let directory = Directory::new();
     let bus = Arc::new(Local::new());
-    let (mut host, mut process, _stdin) = spawn_fixture(bus.clone(), &directory).await;
+    let (mut host, mut process, _stdin) =
+        spawn_fixture(bus.clone(), &directory, host_bindings()).await;
     host.module.report_path = Some(directory.0.join("host-report.json"));
     let child = open_child(bus.clone(), &directory).await;
     let incoming = child.input::<Probe>("incoming").expect("child input");
@@ -210,7 +214,7 @@ async fn host_requires_child_report_and_live_readiness_then_withdraws_on_port_lo
 async fn process_exit_with_a_stale_child_token_withdraws_host_readiness() {
     let directory = Directory::new();
     let bus = Arc::new(Local::new());
-    let (host, mut process, _stdin) = spawn_fixture(bus.clone(), &directory).await;
+    let (host, mut process, _stdin) = spawn_fixture(bus.clone(), &directory, host_bindings()).await;
     let child = open_child(bus.clone(), &directory).await;
     let _incoming = child.input::<Probe>("incoming").expect("input");
     let _outgoing = child.output::<Probe>("outgoing").expect("output");
@@ -251,7 +255,7 @@ async fn process_exit_with_a_stale_child_token_withdraws_host_readiness() {
 async fn a_ready_child_cannot_substitute_a_report_from_another_namespace() {
     let directory = Directory::new();
     let bus = Arc::new(Local::new());
-    let (host, mut process, _stdin) = spawn_fixture(bus.clone(), &directory).await;
+    let (host, mut process, _stdin) = spawn_fixture(bus.clone(), &directory, host_bindings()).await;
     let child = open_child(bus, &directory).await;
     let _incoming = child.input::<Probe>("incoming").expect("input");
     let _outgoing = child.output::<Probe>("outgoing").expect("output");
@@ -278,7 +282,7 @@ async fn a_ready_child_cannot_substitute_a_report_from_another_namespace() {
 async fn artifacts_require_a_staged_allowlisted_path_and_delegation_is_not_repeatable() {
     let directory = Directory::new();
     let bus = Arc::new(Local::new());
-    let (host, mut child, _stdin) = spawn_fixture(bus, &directory).await;
+    let (host, mut child, _stdin) = spawn_fixture(bus, &directory, host_bindings()).await;
     assert!(host.artifact("not-declared").is_err());
     assert!(host.artifact("../helper").is_err());
     let mut command = tokio::process::Command::new(host.artifact("helper").expect("helper"));
@@ -306,7 +310,7 @@ async fn host_shutdown_delivers_child_stop_before_enforcing_process_reaping() {
     // Given a real blocked process and its distinct managed control endpoint.
     let directory = Directory::new();
     let bus = Arc::new(Local::new());
-    let (host, mut process, _stdin) = spawn_fixture(bus.clone(), &directory).await;
+    let (host, mut process, _stdin) = spawn_fixture(bus.clone(), &directory, host_bindings()).await;
     let child = open_child(bus, &directory).await;
     // When the host receives cooperative shutdown.
     host.shutdown_now();

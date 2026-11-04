@@ -16,8 +16,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use process_wrap::tokio::{ChildWrapper, CommandWrap};
 use reiny_core::bindings::{
-    EndpointAddress, EndpointContract, MODULE_BINDINGS_VERSION, MODULE_REPORT_VERSION,
-    ModuleReport, PortEndpoint, PortKind, PortReport, Replay, Retention,
+    MODULE_BINDINGS_VERSION, ModuleReport, PortEndpoint, Replay, Retention,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1335,89 +1334,15 @@ impl Owner<'_> {
     }
 }
 
-fn type_matches(expected: &str, actual: &str) -> bool {
-    expected == actual
-}
-
 fn validate_report(node: &PreparedModule, report: &ModuleReport) -> Result<()> {
-    ensure!(
-        report.version == MODULE_REPORT_VERSION
-            && report.fingerprint_version == reiny_core::SCHEMA_FINGERPRINT_VERSION
-            && report.namespace == node.namespace
-            && report.endpoint_namespace == node.bindings.endpoint_namespace,
-        "readiness report identity mismatch"
-    );
-    ensure!(
-        report.inputs.len() == node.bindings.inputs.len()
-            && report.outputs.len() == node.bindings.outputs.len(),
-        "readiness report port count mismatch"
-    );
-    for (port, binding) in &node.bindings.inputs {
+    for binding in node.bindings.inputs.values() {
         crate::modules::validate_contract(&node.namespace, &binding.contract, true)?;
-        let actual = report
-            .inputs
-            .get(port)
-            .with_context(|| format!("missing input report {port}"))?;
-        validate_port_report(
-            &binding.contract,
-            &PortEndpoint::Input {
-                sources: binding.sources.clone(),
-            },
-            actual,
-        )
-        .with_context(|| format!("invalid input report {port}"))?;
     }
-    for (port, binding) in &node.bindings.outputs {
+    for binding in node.bindings.outputs.values() {
         crate::modules::validate_contract(&node.namespace, &binding.contract, false)?;
-        let actual = report
-            .outputs
-            .get(port)
-            .with_context(|| format!("missing output report {port}"))?;
-        validate_port_report(
-            &binding.contract,
-            &PortEndpoint::Output {
-                address: EndpointAddress {
-                    namespace: node.bindings.endpoint_namespace.clone(),
-                    port: port.clone(),
-                },
-            },
-            actual,
-        )
-        .with_context(|| format!("invalid output report {port}"))?;
     }
-    Ok(())
-}
-
-fn validate_port_report(
-    expected: &EndpointContract,
-    endpoint: &PortEndpoint,
-    actual: &PortReport,
-) -> Result<()> {
-    ensure!(
-        &actual.endpoint == endpoint,
-        "compiled endpoint address mismatch"
-    );
-    ensure!(
-        type_matches(&expected.type_name, &actual.type_name),
-        "invalid type"
-    );
-    ensure!(
-        &actual.contract == expected,
-        "effective endpoint contract mismatch"
-    );
-    match (expected.kind, &expected.response, &actual.response) {
-        (PortKind::Stream, None, None) => Ok(()),
-        (PortKind::Rpc, Some(expected), Some(response)) => {
-            ensure!(
-                type_matches(expected, &response.type_name),
-                "invalid RPC response type"
-            );
-            Ok(())
-        }
-        (PortKind::Stream | PortKind::Rpc, _, _) => {
-            bail!("endpoint operation and response report mismatch")
-        }
-    }
+    reiny_core::bindings::validate_report(&node.bindings, report)
+        .with_context(|| format!("invalid readiness report for {}", node.namespace))
 }
 
 fn private_directory(path: &Path) -> Result<()> {

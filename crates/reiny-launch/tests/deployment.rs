@@ -24,6 +24,9 @@ use reiny_launch::{
 
 const DEADLINE: Duration = Duration::from_secs(15);
 
+#[path = "deployment/report_contract.rs"]
+mod report_contract;
+
 // The fixture actually parses the supplied bindings path, writes its own report,
 // announces readiness over a separate observer transport, and obeys stop/exit.
 const FIXTURE: &str = r#"

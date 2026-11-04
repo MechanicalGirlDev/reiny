@@ -11,10 +11,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, watch};
 
 use super::{BUNDLE_DIR_ENV, CONFIG_DIR_ENV, MODULE_REPORT_ENV, Ports, config};
-use crate::bindings::{
-    EndpointContract, MODULE_BINDINGS_VERSION, MODULE_REPORT_VERSION, ModuleBindings, ModuleReport,
-    PortReport,
-};
+use crate::bindings::{MODULE_BINDINGS_VERSION, ModuleBindings, ModuleReport};
 use crate::engine::{Engine, Guard, Key, Presence, QueryParams, READY_CHUNK, STOP_CHUNK};
 use crate::{ModuleContext, Result};
 
@@ -99,7 +96,8 @@ impl OwnedChild {
                 &std::fs::read(&self.report_path).context("reading owned child report")?,
             )
             .context("parsing owned child report")?;
-            validate_report(&self.bindings, &report)?;
+            reiny_core::bindings::validate_report(&self.bindings, &report)
+                .context("invalid owned child report")?;
             let mut ports = self.ports.lock().unwrap_or_else(PoisonError::into_inner);
             let child = ports
                 .children
@@ -487,86 +485,4 @@ pub(super) fn delegated_bindings(bindings: &ModuleBindings, name: &str) -> Resul
     };
     config::validate_bindings(&child, &child.namespace)?;
     Ok(child)
-}
-
-fn validate_report(bindings: &ModuleBindings, report: &ModuleReport) -> Result<()> {
-    anyhow::ensure!(
-        report.version == MODULE_REPORT_VERSION
-            && report.namespace == bindings.namespace
-            && report.endpoint_namespace == bindings.endpoint_namespace
-            && report.fingerprint_version == reiny_core::SCHEMA_FINGERPRINT_VERSION,
-        "owned child report identity differs"
-    );
-    for (name, input) in &bindings.inputs {
-        anyhow::ensure!(
-            report.inputs.get(name).is_some_and(|port| port.endpoint
-                == crate::bindings::PortEndpoint::Input {
-                    sources: input.sources.clone()
-                }),
-            "owned child changed input endpoint sources"
-        );
-    }
-    for name in bindings.outputs.keys() {
-        anyhow::ensure!(
-            report.outputs.get(name).is_some_and(|port| port.endpoint
-                == crate::bindings::PortEndpoint::Output {
-                    address: crate::bindings::EndpointAddress {
-                        namespace: bindings.endpoint_namespace.clone(),
-                        port: name.clone(),
-                    }
-                }),
-            "owned child changed output endpoint address"
-        );
-    }
-    for (declared, actual) in [
-        (
-            bindings
-                .inputs
-                .iter()
-                .map(|(name, port)| (name, &port.contract))
-                .collect::<BTreeMap<_, _>>(),
-            &report.inputs,
-        ),
-        (
-            bindings
-                .outputs
-                .iter()
-                .map(|(name, port)| (name, &port.contract))
-                .collect(),
-            &report.outputs,
-        ),
-    ] {
-        anyhow::ensure!(
-            declared.len() == actual.len(),
-            "owned child reported a different endpoint set"
-        );
-        for (name, contract) in declared {
-            let port = actual
-                .get(name)
-                .ok_or_else(|| anyhow::anyhow!("owned child omitted endpoint '{name}'"))?;
-            validate_port_report(contract, port)?;
-        }
-    }
-    Ok(())
-}
-
-fn validate_port_report(contract: &EndpointContract, report: &PortReport) -> Result<()> {
-    anyhow::ensure!(
-        contract == &report.contract,
-        "owned child changed the endpoint contract"
-    );
-    let matches = |declared: &str, actual: &str| declared == actual;
-    anyhow::ensure!(
-        matches(&contract.type_name, &report.type_name),
-        "owned child compiled type differs"
-    );
-    match (&contract.response, &report.response) {
-        (None, None) => {}
-        (Some(declared), Some(actual)) => anyhow::ensure!(
-            matches(declared, &actual.type_name),
-            "owned child compiled response differs"
-        ),
-        _ => anyhow::bail!("owned child response contract differs"),
-    }
-    Ok(())
 }
