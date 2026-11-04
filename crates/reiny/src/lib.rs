@@ -59,6 +59,7 @@ mod rpc_e2e;
 mod runtime;
 mod service;
 mod shutdown;
+pub mod step;
 
 use engine::{Engine, Guard, Key, QueryParams, SCHEMA_CHUNK, SERVICE_CHUNK, SUB_CHUNK};
 use shutdown::Shutdown;
