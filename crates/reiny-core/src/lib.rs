@@ -21,6 +21,9 @@ extern crate alloc;
 #[cfg(feature = "bindings")]
 pub mod bindings;
 
+#[cfg(feature = "bindings")]
+pub mod host_protocol;
+
 mod qos;
 
 pub use qos::{CongestionControl, Durability, History, Priority, Qos};
