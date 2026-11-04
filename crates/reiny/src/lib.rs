@@ -49,6 +49,7 @@ pub mod component;
 #[cfg(all(test, feature = "zenoh"))]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod e2e;
+pub mod encoded;
 pub mod engine;
 mod managed;
 mod pubsub;
@@ -76,7 +77,9 @@ pub use reiny_core::bindings;
 pub use runtime::ZenohSource;
 pub use runtime::{DOMAIN_ENV, RuntimeOptions, run_with};
 use service::RpcClientBuilder;
-pub use service::{CallError, Request, RpcClient, RpcServer};
+pub use service::{
+    CallError, DeclaredRequest, DeclaredRpcClient, DeclaredRpcServer, Request, RpcClient, RpcServer,
+};
 
 /// The type vocabulary lives in `reiny-core` (`no_std`), so that places where zenoh does not run
 /// (`reiny-link`'s MCU side) share the same traits. The downstream path is still `reiny::MessageType`.

@@ -4,12 +4,14 @@ use std::sync::Arc;
 
 use reiny_core::bindings::{
     EndpointContract, PortEndpoint, PortKind, PortReport, QosProfile, ReceiveBuffer, Replay,
-    Retention,
+    ResponseReport, Retention,
 };
 
 use super::{ManagedPort, Registration};
+use crate::encoded::EncodedType;
 use crate::engine::{Key, SUB_CHUNK};
 use crate::pubsub::{Core, PublisherCore};
+use crate::service::{DeclaredRpcClient, DeclaredRpcServer};
 use crate::{Durability, ModuleContext, Qos, RawSubscriber, Result, validate_segment};
 
 /// An owned, declared publisher of encoded protobuf messages.
@@ -53,6 +55,60 @@ fn registration(
 }
 
 impl ModuleContext {
+    /// Open an encoded RPC client using its single exact declared target.
+    pub fn raw_rpc_client(
+        &self,
+        name: &str,
+        request: &EncodedType,
+        response: &EncodedType,
+    ) -> Result<DeclaredRpcClient> {
+        let contract = self.named_contract(name, true, PortKind::Rpc)?;
+        let mut ports = self.lock_ports(name, true)?;
+        let live = Arc::new(());
+        let registration = rpc_registration(
+            contract,
+            request,
+            response,
+            self.port_endpoint(name, true)?,
+            &live,
+        )?;
+        let sources = &self
+            .module
+            .bindings
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing module bindings"))?
+            .inputs[name]
+            .sources;
+        anyhow::ensure!(sources.len() == 1, "RPC requires exactly one target");
+        let mut client = DeclaredRpcClient::declare(self, &sources[0], request, response);
+        client.managed = Some(ManagedPort::new(self, live));
+        ports.inputs.insert(name.to_owned(), registration);
+        Ok(client)
+    }
+
+    /// Open an encoded RPC server at the exact declared output identity.
+    pub fn raw_rpc_server(
+        &self,
+        name: &str,
+        request: &EncodedType,
+        response: &EncodedType,
+    ) -> Result<DeclaredRpcServer> {
+        let contract = self.named_contract(name, false, PortKind::Rpc)?;
+        let mut ports = self.lock_ports(name, false)?;
+        let live = Arc::new(());
+        let registration = rpc_registration(
+            contract,
+            request,
+            response,
+            self.port_endpoint(name, false)?,
+            &live,
+        )?;
+        let mut server = DeclaredRpcServer::declare(self, name, request, response)?;
+        server.managed = Some(ManagedPort::new(self, live));
+        ports.outputs.insert(name.to_owned(), registration);
+        Ok(server)
+    }
+
     /// Subscribe to a named input's exact prepared sources and receive encoded protobuf.
     pub fn raw_input(&self, name: &str, type_name: &str, schema: u64) -> Result<RawSubscriber> {
         let contract = self.named_contract(name, true, PortKind::Stream)?;
@@ -146,4 +202,30 @@ impl ModuleContext {
         ports.outputs.insert(name.to_owned(), registration);
         Ok(publisher)
     }
+}
+
+fn rpc_registration(
+    contract: &EndpointContract,
+    request: &EncodedType,
+    response: &EncodedType,
+    endpoint: PortEndpoint,
+    live: &Arc<()>,
+) -> Result<Registration> {
+    let mut registration = registration(
+        contract,
+        request.type_name(),
+        request.fingerprint(),
+        endpoint,
+        live,
+    )?;
+    anyhow::ensure!(
+        contract.response.as_deref() == Some(response.type_name()),
+        "declared response type differs from actual type '{}'",
+        response.type_name(),
+    );
+    registration.contract.response = Some(ResponseReport {
+        type_name: response.type_name().to_owned(),
+        schema: response.fingerprint(),
+    });
+    Ok(registration)
 }

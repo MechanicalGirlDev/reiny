@@ -21,10 +21,13 @@ use std::time::Duration;
 
 use prost::Message;
 
-use crate::engine::{Engine, Guard, Key, QueryParams, RawQuery, SERVICE_CHUNK};
-use crate::pubsub::{attachment_fingerprint, declare_schema, fingerprint};
-use crate::shutdown::Shutdown;
+use crate::engine::{Guard, Key, RawQuery};
+use crate::pubsub::declare_schema;
 use crate::{MessageType, ModuleContext, Result, Service};
+
+mod raw;
+use raw::{ClientCore, ServerCore};
+pub use raw::{DeclaredRequest, DeclaredRpcClient, DeclaredRpcServer};
 
 /// The same as zenoh's `get` default.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -41,61 +44,34 @@ const QUERY_CAPACITY: usize = 256;
 ///
 /// Dropping it drops the liveliness token too, and [`ModuleContext::watch_servers`] reports a `Left`.
 pub struct RpcServer<S> {
-    rx: flume::Receiver<Box<dyn RawQuery>>,
-    /// The queryable handle (merely held).
-    _guard: Guard,
-    /// The presence token that lives and dies with the server (merely held).
-    _token: Guard,
+    core: ServerCore,
     /// The `@schema` queryable, declared only when the request / response have a `DESCRIPTOR` (merely held).
     _schema: Vec<Guard>,
-    /// Our own key. Replies go back on it (it intersects the query key `reiny/<domain>/*/<Req>`).
-    key: Key,
-    shutdown: Shutdown,
     _marker: PhantomData<S>,
     pub(crate) managed: Option<crate::managed::ManagedPort>,
 }
 
 impl<S: Service> RpcServer<S> {
     pub(crate) fn declare(cloudy: &ModuleContext, name: &str) -> Result<Self> {
-        let engine = &cloudy.engine;
-        let caps = engine.caps();
-        if !(caps.query && caps.liveliness) {
-            anyhow::bail!(
-                "server of {}: this engine has no query / liveliness, which services need",
-                S::TYPE_NAME
-            );
-        }
-        let key = Key::output(
-            cloudy.domain(),
-            cloudy.endpoint_namespace(),
+        let core = ServerCore::declare(
+            cloudy,
             name,
             S::TYPE_NAME,
-        );
-        let (tx, rx) = flume::bounded(QUERY_CAPACITY);
-        let guard = engine.respond(
-            &key,
-            Box::new(move |query| {
-                // When it is full, block the engine's thread (as zenoh's queryable channel does).
-                let _ = tx.send(query);
-            }),
+            S::SCHEMA_FINGERPRINT,
+            S::Response::SCHEMA_FINGERPRINT,
         )?;
-        let token = engine.declare_alive(&key.with_chunk(SERVICE_CHUNK))?;
         // `reiny service call` needs both descriptors to translate between JSON and proto.
         let mut schema = Vec::new();
         for descriptor in [S::DESCRIPTOR, S::Response::DESCRIPTOR]
             .into_iter()
             .flatten()
         {
-            schema.push(declare_schema(cloudy, &key, descriptor)?);
+            schema.push(declare_schema(cloudy, &core.key, descriptor)?);
         }
-        tracing::debug!(key = %key, "service declared");
+        tracing::debug!(key = %core.key, "service declared");
         Ok(Self {
-            rx,
-            _guard: guard,
-            _token: token,
+            core,
             _schema: schema,
-            key,
-            shutdown: cloudy.shutdown_handle(),
             _marker: PhantomData,
             managed: None,
         })
@@ -108,32 +84,20 @@ impl<S: Service> RpcServer<S> {
     /// would leave the caller misreading "no replies" as "no server". A payload-less query (a latched
     pub async fn recv(&mut self) -> Option<Request<S>> {
         loop {
-            let query = tokio::select! {
-                biased;
-                () = self.shutdown.wait() => return None,
-                query = self.rx.recv_async() => query.ok()?,
-            };
-            let Some(payload) = query.payload() else {
-                continue; // drop = finalize
-            };
-            if attachment_fingerprint(query.attachment()) != Some(S::SCHEMA_FINGERPRINT) {
-                reply_err(
-                    query,
-                    "missing or mismatching request schema fingerprint".to_string(),
-                );
-                continue;
-            }
-            match S::decode(payload) {
+            let request = self.core.recv().await?;
+            match S::decode(request.payload()) {
                 Ok(value) => {
                     return Some(Request {
                         value,
-                        query,
-                        key: self.key.clone(),
+                        raw: request,
                     });
                 }
                 Err(e) => {
                     tracing::warn!(ty = S::TYPE_NAME, error = %e, "skipping undecodable request");
-                    reply_err(query, format!("undecodable request: {e}"));
+                    if let Err(error) = request.reply_err(format!("undecodable request: {e}")).await
+                    {
+                        tracing::warn!(%error, "reply_err failed");
+                    }
                 }
             }
         }
@@ -154,25 +118,19 @@ fn reply_err(query: Box<dyn RawQuery>, message: String) {
 pub struct Request<S: Service> {
     /// The decoded request itself.
     pub value: S,
-    query: Box<dyn RawQuery>,
-    key: Key,
+    raw: DeclaredRequest,
 }
 
 // Replies stay lazy futures, even though no engine today has an await point in them.
 impl<S: Service> Request<S> {
     /// Send the reply. With an `S::Response::SCHEMA_FINGERPRINT`, the fingerprint rides in the attachment.
     pub async fn reply(self, response: S::Response) -> Result<()> {
-        std::future::ready(self.query.reply(
-            &self.key,
-            response.encode_to_vec(),
-            fingerprint(Some(S::Response::SCHEMA_FINGERPRINT)),
-        ))
-        .await
+        self.raw.reply(response.encode_to_vec()).await
     }
 
     /// Answer with an error. The caller receives this string as [`CallError::Remote`].
     pub async fn reply_err(self, message: impl Into<String>) -> Result<()> {
-        std::future::ready(self.query.reply_err(message.into().into_bytes())).await
+        self.raw.reply_err(message).await
     }
 }
 
@@ -240,15 +198,19 @@ impl<'a, S> RpcClientBuilder<'a, S> {
         S: Service,
     {
         RpcClient {
-            engine: Arc::clone(&self.cloudy.engine),
-            key: match self.to {
-                Some(target) => Key::output(
-                    self.cloudy.domain(),
-                    &target.namespace,
-                    &target.port,
-                    S::TYPE_NAME,
-                ),
-                None => self.cloudy.key_for(None, S::TYPE_NAME),
+            core: ClientCore {
+                engine: Arc::clone(&self.cloudy.engine),
+                key: match self.to {
+                    Some(target) => Key::output(
+                        self.cloudy.domain(),
+                        &target.namespace,
+                        &target.port,
+                        S::TYPE_NAME,
+                    ),
+                    None => self.cloudy.key_for(None, S::TYPE_NAME),
+                },
+                request_schema: S::SCHEMA_FINGERPRINT,
+                response_schema: S::Response::SCHEMA_FINGERPRINT,
             },
             timeout: self.timeout,
             _marker: PhantomData,
@@ -259,8 +221,7 @@ impl<'a, S> RpcClientBuilder<'a, S> {
 
 /// A typed client opened through [`ModuleContext::rpc_client`]. It borrows no `ModuleContext`, so it can live in a struct.
 pub struct RpcClient<S> {
-    engine: Arc<dyn Engine>,
-    key: Key,
+    core: ClientCore,
     timeout: Duration,
     _marker: PhantomData<S>,
     pub(crate) managed: Option<crate::managed::ManagedPort>,
@@ -269,44 +230,21 @@ pub struct RpcClient<S> {
 impl<S: Service> RpcClient<S> {
     /// Send the request and wait for the reply.
     pub async fn call(&self, request: S) -> std::result::Result<S::Response, CallError> {
-        // Our own timer decides the deadline (→ `Timeout`) and the engine's deadline sits outside it —
-        // zenoh shows its own expiry as nothing but "no replies", indistinguishable from `NoReply`.
-        let params = QueryParams {
-            payload: Some(request.encode_to_vec()),
-            attachment: fingerprint(Some(S::SCHEMA_FINGERPRINT)),
-            timeout: self.timeout + ENGINE_TIMEOUT_MARGIN,
-        };
-        let mut replies = self
-            .engine
-            .query(&self.key, params)
-            .map_err(CallError::Engine)?;
-        let Some(reply) = tokio::time::timeout(self.timeout, replies.next())
-            .await
-            .map_err(|_| CallError::Timeout)?
-        else {
-            // The stream closed = every matching responder finalized (no server, or dropped unanswered).
-            return Err(CallError::NoReply);
-        };
-        match reply {
-            Ok(sample) => {
-                if self.managed.is_some() && !self.key.matches(&sample.key) {
-                    return Err(CallError::Engine(anyhow::anyhow!(
-                        "response came from an undeclared target"
-                    )));
-                }
-                let expected = S::Response::SCHEMA_FINGERPRINT;
-                let Some(received) = attachment_fingerprint(sample.attachment.as_deref()) else {
-                    return Err(CallError::MissingSchema);
-                };
-                if expected != received {
-                    return Err(CallError::Schema { expected, received });
-                }
-                S::Response::decode(sample.payload.as_slice()).map_err(CallError::Decode)
-            }
-            Err(message) => Err(CallError::Remote(
-                String::from_utf8_lossy(&message).into_owned(),
-            )),
-        }
+        self.call_with_timeout(request, self.timeout).await
+    }
+
+    /// Call once with an explicit wait budget shared with declared encoded clients.
+    /// Dropping the future after dispatch abandons observation, not server execution.
+    pub async fn call_with_timeout(
+        &self,
+        request: S,
+        timeout: Duration,
+    ) -> std::result::Result<S::Response, CallError> {
+        let sample = self
+            .core
+            .call(request.encode_to_vec(), timeout, self.managed.is_some())
+            .await?;
+        S::Response::decode(sample.payload.as_slice()).map_err(CallError::Decode)
     }
 }
 
