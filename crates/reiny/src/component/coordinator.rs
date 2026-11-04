@@ -4,9 +4,10 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{Id, JoinError, JoinSet};
 
-use crate::bindings::{ModuleBindings, ReportEntry, validate_graph};
-use crate::managed::{HostedEvent, PreparedAdmission, ReadyAdmission};
+use crate::bindings::{ModuleBindings, ModuleReport};
+use crate::managed::{PreparedAdmission, ReadyAdmission};
 
+use super::staged::Request;
 use super::status::phase;
 use super::worker::{Command, Event};
 use super::{
@@ -14,6 +15,7 @@ use super::{
     HostPhase, HostStatus, StopReason,
 };
 
+mod admission;
 mod cleanup;
 
 pub(super) struct Coordinator {
@@ -29,6 +31,21 @@ pub(super) struct Coordinator {
     pub prepared: BTreeMap<String, PreparedAdmission>,
     pub ready: Vec<ReadyAdmission>,
     pub options: HostOptions,
+    pub control: mpsc::Receiver<Request>,
+    pub reports: watch::Sender<Option<Vec<ModuleReport>>>,
+    pub step_gate: Option<Arc<super::step::control::Gate>>,
+    pub step_driver: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for Coordinator {
+    fn drop(&mut self) {
+        if let Some(gate) = &self.step_gate {
+            gate.stop();
+        }
+        if let Some(driver) = &self.step_driver {
+            driver.abort();
+        }
+    }
 }
 
 impl Coordinator {
@@ -63,98 +80,8 @@ impl Coordinator {
         self.terminal.send_replace(Some(outcome));
     }
 
-    async fn start(&mut self) -> Result<bool, HostError> {
-        while self.prepared.len() < self.bindings.len() {
-            tokio::select! {
-                biased;
-                _ = async { self.stop.wait_for(|stop| *stop).await.map(drop) } => return Ok(false),
-                event = self.events.recv() => {
-                    if self.observe(event)? {
-                        return Ok(false);
-                    }
-                },
-                joined = self.tasks.join_next_with_id(), if !self.tasks.is_empty() => {
-                    if let Some(joined) = joined {
-                        return Err(self.early_exit(joined));
-                    }
-                }
-            }
-        }
-        let entries = self
-            .bindings
-            .iter()
-            .map(|bindings| {
-                self.prepared
-                    .get(&bindings.namespace)
-                    .map(|ticket| ReportEntry {
-                        bindings,
-                        report: ticket.report(),
-                    })
-                    .ok_or_else(|| {
-                        HostError::new(
-                            HostErrorCode::Admission,
-                            Some(&bindings.namespace),
-                            "missing prepared ticket",
-                        )
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        validate_graph(&entries).map_err(|report| HostError {
-            code: HostErrorCode::Graph,
-            instance: report.module.clone(),
-            message: report.to_string(),
-            report: Some(Box::new(report)),
-        })?;
-        self.status
-            .send_modify(|status| status.phase = HostPhase::Prepared);
-        for bindings in &self.bindings {
-            if *self.stop.borrow() {
-                return Ok(false);
-            }
-            let id = &bindings.namespace;
-            let context = self.contexts.get(id).ok_or_else(|| {
-                HostError::new(HostErrorCode::Admission, Some(id), "missing hosted context")
-            })?;
-            let ticket = self.prepared.remove(id).ok_or_else(|| {
-                HostError::new(
-                    HostErrorCode::Admission,
-                    Some(id),
-                    "missing prepared ticket",
-                )
-            })?;
-            let ready = context.inner.commit_admission(ticket).map_err(|error| {
-                HostError::new(HostErrorCode::Activate, Some(id), error.to_string())
-            })?;
-            self.ready.push(ready);
-            phase(&self.status, id, ComponentPhase::Ready);
-        }
-        if *self.stop.borrow() {
-            return Ok(false);
-        }
-        // A prior commit may have lost its port while a later commit ran. Check
-        // retained events, not just queued worker notifications, before activation.
-        for (id, context) in &self.contexts {
-            match context.inner.hosted_events().borrow().as_ref() {
-                Some(HostedEvent::ReadinessLost) => {
-                    return Err(HostError::new(
-                        HostErrorCode::ReadinessLost,
-                        Some(id),
-                        "readiness was lost before group activation",
-                    ));
-                }
-                Some(HostedEvent::StopRequested) => return Ok(false),
-                None => {}
-            }
-        }
-        // A loss after this check can race another worker's first run poll.
-        // Each worker monitors loss; serve() then stops the entire group.
-        self.status
-            .send_modify(|status| status.phase = HostPhase::Running);
-        self.commands.send_replace(Command::Run);
-        Ok(true)
-    }
-
     async fn serve(&mut self) -> Option<HostError> {
+        let mut controller_open = true;
         loop {
             tokio::select! {
                 biased;
@@ -169,6 +96,15 @@ impl Coordinator {
                         return Some(self.early_exit(joined));
                     }
                 }
+                request = self.control.recv(), if controller_open => match request {
+                    Some(Request::Abort(error)) => return Some(error),
+                    Some(Request::Advance(_, _)) => return Some(HostError::new(
+                        HostErrorCode::Admission, None, "host is already running",
+                    )),
+                    // Local admission drops its controller after release; the
+                    // independent public handle continues to own shutdown.
+                    None => controller_open = false,
+                },
             }
         }
     }

@@ -177,11 +177,13 @@ async fn main() -> reiny::Result<()> {
                 factory_id: "source".to_owned(),
                 bindings: source,
                 config: None,
+                config_origin: None,
             },
             ComponentInstanceSpec {
                 factory_id: "sink".to_owned(),
                 bindings: sink,
                 config: None,
+                config_origin: None,
             },
         ],
     )?;

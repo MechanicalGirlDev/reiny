@@ -7,6 +7,7 @@ use tokio::task::JoinSet;
 use crate::managed::HostedOptions;
 
 use super::coordinator::Coordinator;
+use super::staged::HostControl;
 use super::worker::{Command, Worker};
 use super::{
     ComponentInstanceSpec, ComponentPhase, ComponentRegistry, ComponentStatus, HostError,
@@ -26,7 +27,33 @@ impl ComponentHost {
         options: HostOptions,
         instances: Vec<ComponentInstanceSpec>,
     ) -> Result<HostHandle, HostError> {
+        let bindings = instances
+            .iter()
+            .map(|instance| instance.bindings.clone())
+            .collect();
+        let (handle, control) = Self::prepare(registry, options, instances)?;
+        tokio::spawn(control.admit_local(bindings));
+        Ok(handle)
+    }
+
+    /// Start the private staged protocol. The trusted controller, not application
+    /// components, owns graph validation and the deployment-wide commit barrier.
+    pub(super) fn prepare(
+        registry: Arc<ComponentRegistry>,
+        options: HostOptions,
+        instances: Vec<ComponentInstanceSpec>,
+    ) -> Result<(HostHandle, HostControl), HostError> {
+        Self::prepare_steps(registry, options, instances, None)
+    }
+
+    pub(super) fn prepare_steps(
+        registry: Arc<ComponentRegistry>,
+        options: HostOptions,
+        instances: Vec<ComponentInstanceSpec>,
+        driver: Option<super::step::driver::Driver>,
+    ) -> Result<(HostHandle, HostControl), HostError> {
         validate(&registry, &options, &instances)?;
+        let step_gate = driver.as_ref().map(|driver| driver.gate.clone());
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|error| HostError::new(HostErrorCode::NoRuntime, None, error.to_string()))?;
         let initial = HostStatus {
@@ -47,6 +74,8 @@ impl ComponentHost {
         let (status, status_rx) = watch::channel(initial);
         let (stop, stop_rx) = watch::channel(false);
         let (terminal, terminal_rx) = watch::channel(None);
+        let (control, control_rx) = mpsc::channel(1);
+        let (reports, reports_rx) = watch::channel(None);
         let (commands, command_rx) = watch::channel(Command::Prepare);
         // At most Opened, Prepared and Failure per component; bounded by graph size.
         let (events, event_rx) = mpsc::channel(instances.len().saturating_mul(3));
@@ -69,6 +98,7 @@ impl ComponentHost {
             let task = tasks.spawn_on(
                 Worker {
                     factory: factory.clone(),
+                    config_origin: instance.config_origin,
                     options: HostedOptions {
                         domain: options.domain.clone(),
                         bindings: instance.bindings,
@@ -78,6 +108,7 @@ impl ComponentHost {
                     commands: command_rx.clone(),
                     events: events.clone(),
                     status: status.clone(),
+                    step_gate: step_gate.clone(),
                 }
                 .run(),
                 &runtime,
@@ -86,6 +117,8 @@ impl ComponentHost {
         }
         drop(registry);
         drop(events);
+        let step_driver =
+            driver.map(|driver| runtime.spawn(driver.run(stop.clone(), control.clone())));
         let coordinator = Coordinator {
             status,
             stop: stop_rx,
@@ -99,13 +132,25 @@ impl ComponentHost {
             prepared: BTreeMap::new(),
             ready: Vec::new(),
             options,
+            control: control_rx,
+            reports,
+            step_gate: step_gate.clone(),
+            step_driver,
         };
         runtime.spawn(coordinator.run());
-        Ok(HostHandle {
-            status: status_rx,
-            stop,
-            terminal: terminal_rx,
-        })
+        Ok((
+            HostHandle {
+                status: status_rx,
+                stop,
+                terminal: terminal_rx.clone(),
+                step_gate,
+            },
+            HostControl {
+                requests: control,
+                reports: reports_rx,
+                terminal: terminal_rx,
+            },
+        ))
     }
 }
 
@@ -137,6 +182,17 @@ fn validate(
     }
     let mut ids = BTreeSet::new();
     for instance in instances {
+        if instance
+            .config_origin
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+        {
+            return Err(HostError::new(
+                HostErrorCode::InvalidOptions,
+                Some(&instance.bindings.namespace),
+                "config origin must be absolute",
+            ));
+        }
         let bindings = &instance.bindings;
         let id = &bindings.namespace;
         if !ids.insert(id) {

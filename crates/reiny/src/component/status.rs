@@ -32,6 +32,8 @@ pub enum HostErrorCode {
     Activate,
     /// A service run hook failed.
     Run,
+    /// A logical step faulted its epoch.
+    Step,
     /// A service returned successfully before shutdown.
     UnexpectedExit,
     /// Component code unwound.
@@ -96,8 +98,10 @@ impl std::error::Error for HostError {
 pub enum HostPhase {
     /// Contexts and component state are being prepared.
     Starting,
-    /// Every compiled report passed closed-graph validation.
+    /// Every local compiled report is available; graph validation may be pending.
     Prepared,
+    /// Every local ticket committed; run hooks are still gated.
+    Committed,
     /// Every admission committed; run hooks may execute.
     Running,
     /// Readiness is withdrawn and tasks are being joined.
@@ -161,6 +165,7 @@ pub(super) fn phase(
             HostPhase::Stopped | HostPhase::Failed | HostPhase::Unresponsive => return,
             HostPhase::Starting
             | HostPhase::Prepared
+            | HostPhase::Committed
             | HostPhase::Running
             | HostPhase::Stopping => {}
         }

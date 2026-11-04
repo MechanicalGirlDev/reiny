@@ -159,3 +159,52 @@ async fn loss_of_first_readiness_during_second_commit_prevents_every_run() {
         Vec::<Key>::new()
     );
 }
+
+#[tokio::test]
+async fn loss_after_commit_acknowledgement_prevents_later_activation() {
+    let engine = Arc::new(Local::new());
+    let output = Arc::new(Mutex::new(None));
+    let (records, mut observed) = mpsc::channel(16);
+    let mut registry = ComponentRegistry::new();
+    registry
+        .register(
+            "exposed".to_owned(),
+            Arc::new(ExposedFactory {
+                output: output.clone(),
+                records,
+            }),
+        )
+        .expect("source factory");
+    let mut source = instance("app/source", "exposed");
+    source.bindings.outputs.insert(
+        "out".to_owned(),
+        OutputBinding {
+            contract: EndpointContract {
+                type_name: Probe::TYPE_NAME.to_owned(),
+                ..EndpointContract::default()
+            },
+        },
+    );
+    let (handle, mut control) =
+        ComponentHost::prepare(Arc::new(registry), options(engine.clone()), vec![source])
+            .expect("prepare");
+    control.prepared().await.expect("reports");
+    control.commit().await.expect("commit");
+
+    drop(output.lock().unwrap_or_else(PoisonError::into_inner).take());
+    let error = control.activate().await.expect_err("lost live output");
+
+    assert_eq!(error.code, HostErrorCode::ReadinessLost);
+    assert_eq!(error.instance.as_deref(), Some("app/source"));
+    assert_eq!(failure(terminal(&handle).await).0, error);
+    while let Ok(record) = observed.try_recv() {
+        assert_ne!(record.stage, Stage::Run);
+    }
+    assert_eq!(
+        engine
+            .alive(&Key::module("components", None, READY_CHUNK), PATIENCE)
+            .await
+            .expect("readiness withdrawn"),
+        Vec::<Key>::new()
+    );
+}

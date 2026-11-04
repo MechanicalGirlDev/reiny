@@ -1,7 +1,7 @@
 //! Cooperative shutdown. A shared flag raised by Ctrl+C or by an explicit trigger.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::{Notify, watch};
 
@@ -18,6 +18,7 @@ struct Inner {
     flag: AtomicBool,
     notify: Notify,
     hosted: Option<watch::Sender<Option<HostedEvent>>>,
+    step_gate: OnceLock<Arc<crate::component::step::control::Gate>>,
 }
 
 impl Shutdown {
@@ -36,6 +37,9 @@ impl Shutdown {
     }
 
     pub(crate) fn hosted_event(&self, event: HostedEvent) {
+        if let Some(gate) = self.inner.step_gate.get() {
+            gate.mark_stop();
+        }
         if let Some(sender) = &self.inner.hosted {
             sender.send_if_modified(|current| {
                 if current.is_some() {
@@ -44,6 +48,22 @@ impl Shutdown {
                 *current = Some(event);
                 true
             });
+        }
+    }
+
+    pub(crate) fn attach_step_gate(&self, gate: Arc<crate::component::step::control::Gate>) {
+        let _ = self.inner.step_gate.set(gate);
+        // Context opening can already have received a transport stop. No step
+        // can be admitted until after this attachment and managed activation.
+        if (self.is_triggered()
+            || self
+                .inner
+                .hosted
+                .as_ref()
+                .is_some_and(|events| events.borrow().is_some()))
+            && let Some(gate) = self.inner.step_gate.get()
+        {
+            gate.mark_stop();
         }
     }
 

@@ -10,6 +10,7 @@ pub struct HostHandle {
     pub(super) status: watch::Receiver<HostStatus>,
     pub(super) stop: watch::Sender<bool>,
     pub(super) terminal: watch::Receiver<Option<HostOutcome>>,
+    pub(super) step_gate: Option<std::sync::Arc<super::step::control::Gate>>,
 }
 
 impl HostHandle {
@@ -32,7 +33,7 @@ impl HostHandle {
             let phase = status.borrow_and_update().phase;
             match phase {
                 HostPhase::Running => return Ok(()),
-                HostPhase::Starting | HostPhase::Prepared => {}
+                HostPhase::Starting | HostPhase::Prepared | HostPhase::Committed => {}
                 HostPhase::Stopping
                 | HostPhase::Stopped
                 | HostPhase::Failed
@@ -64,6 +65,9 @@ impl HostHandle {
 
     /// Request shutdown and await the group's shared terminal result.
     pub async fn stop(&self) -> HostOutcome {
+        if let Some(gate) = &self.step_gate {
+            gate.stop();
+        }
         self.stop.send_replace(true);
         self.wait_terminal().await
     }
@@ -92,6 +96,9 @@ impl HostHandle {
 
 impl Drop for HostHandle {
     fn drop(&mut self) {
+        if let Some(gate) = &self.step_gate {
+            gate.stop();
+        }
         self.stop.send_replace(true);
     }
 }

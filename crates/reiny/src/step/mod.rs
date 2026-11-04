@@ -12,6 +12,9 @@ mod scheduler;
 mod status;
 mod value;
 
+pub(crate) use execution::{Commit, catch_node};
+pub(crate) use plan::Plan;
+
 pub use graph::{StepGraph, StepInput, StepOutput, StepPlanError, StepSchema, StepSource};
 pub use request::{StepRequest, StepRequestError};
 pub use scheduler::StepScheduler;

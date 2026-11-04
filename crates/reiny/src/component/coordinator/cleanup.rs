@@ -9,6 +9,9 @@ impl Coordinator {
         primary: Option<HostError>,
         reason: StopReason,
     ) -> HostOutcome {
+        if let Some(gate) = &self.step_gate {
+            gate.stop();
+        }
         if let Some(error) = &primary {
             self.record(error);
         }
@@ -69,6 +72,20 @@ impl Coordinator {
                 }
             }
         }
+        if !self
+            .join_step_driver(deadline.deadline(), &mut cleanup)
+            .await
+        {
+            return HostOutcome::Unresponsive {
+                primary,
+                cleanup,
+                instances: self
+                    .bindings
+                    .iter()
+                    .map(|bindings| bindings.namespace.clone())
+                    .collect(),
+            };
+        }
         if !self.pending.is_empty() {
             let mut instances = self.pending.values().cloned().collect::<Vec<_>>();
             instances.sort();
@@ -90,5 +107,26 @@ impl Coordinator {
                 HostOutcome::Failed { primary, cleanup }
             }
         }
+    }
+
+    async fn join_step_driver(
+        &mut self,
+        deadline: tokio::time::Instant,
+        cleanup: &mut Vec<HostError>,
+    ) -> bool {
+        let Some(mut driver) = self.step_driver.take() else {
+            return true;
+        };
+        match tokio::time::timeout_at(deadline, &mut driver).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                cleanup.push(HostError::new(HostErrorCode::Step, None, error.to_string()));
+            }
+            Err(_) => {
+                driver.abort();
+                return false;
+            }
+        }
+        true
     }
 }

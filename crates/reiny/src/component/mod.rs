@@ -20,13 +20,20 @@ use crate::{MessageType, Publisher, RawPresence, RpcClient, RpcServer, Service, 
 mod coordinator;
 mod handle;
 mod host;
+pub mod process;
+mod staged;
 mod status;
+pub mod step;
 mod worker;
 
 pub use handle::HostHandle;
 pub use host::ComponentHost;
 pub use status::{
     ComponentPhase, ComponentStatus, HostError, HostErrorCode, HostOutcome, HostPhase, HostStatus,
+};
+pub use step::{
+    CancelStatus, StepComponent, StepComponentFactory, StepHandle, StepLaunchError, StepRun,
+    StepRunError, StepRunId, StepStartError,
 };
 
 #[cfg(test)]
@@ -68,8 +75,16 @@ pub enum StopReason {
 }
 
 /// A component's restricted communication and cooperative shutdown capability.
+///
+/// Clones share admission and shutdown state, without retaining the component
+/// instance. They retain the engine, launch presence and stop responder until the
+/// last clone drops. The host still withdraws readiness when it stops; `Stopped`
+/// does not mean physical destruction of all retained communication resources.
+/// Already-open endpoint handles are not revoked by shutdown.
+#[derive(Clone)]
 pub struct ComponentContext {
-    inner: crate::ModuleContext,
+    inner: Arc<crate::ModuleContext>,
+    config_origin: Option<std::path::PathBuf>,
 }
 
 impl ComponentContext {
@@ -89,6 +104,12 @@ impl ComponentContext {
     #[must_use]
     pub fn config_table(&self) -> Option<&toml::Table> {
         self.inner.config_table()
+    }
+
+    /// Captured per-instance asset directory, never a process environment default.
+    #[must_use]
+    pub fn config_dir(&self) -> Option<&std::path::Path> {
+        self.config_origin.as_deref()
     }
 
     /// Open a declared input with its exact sources and policies.
@@ -117,12 +138,63 @@ impl ComponentContext {
         self.inner.rpc_server(name)
     }
 
+    /// Receive encoded protobuf from this input's exact sources and prepared policy.
+    pub fn raw_input(
+        &self,
+        name: &str,
+        ty: &crate::encoded::EncodedType,
+    ) -> crate::Result<crate::RawSubscriber> {
+        self.inner.raw_input(name, ty.type_name(), ty.fingerprint())
+    }
+
+    /// Publish encoded protobuf with this output's exact identity and prepared policy.
+    pub fn raw_output(
+        &self,
+        name: &str,
+        ty: &crate::encoded::EncodedType,
+    ) -> crate::Result<crate::DeclaredPublisher> {
+        self.inner
+            .raw_output(name, ty.type_name(), ty.fingerprint())
+    }
+
+    /// Call the one configured server with independent request and response schemas.
+    pub fn raw_rpc_client(
+        &self,
+        name: &str,
+        request: &crate::encoded::EncodedType,
+        response: &crate::encoded::EncodedType,
+    ) -> crate::Result<crate::DeclaredRpcClient> {
+        self.inner.raw_rpc_client(name, request, response)
+    }
+
+    /// Serve encoded protobuf at this declared output's exact identity.
+    pub fn raw_rpc_server(
+        &self,
+        name: &str,
+        request: &crate::encoded::EncodedType,
+        response: &crate::encoded::EncodedType,
+    ) -> crate::Result<crate::DeclaredRpcServer> {
+        self.inner.raw_rpc_server(name, request, response)
+    }
+
     /// Observe readiness of this input's declared source modules.
     pub fn watch_input_ready(&self, name: &str) -> crate::Result<RawPresence> {
         self.inner.watch_input_ready(name)
     }
 
-    /// Wait for the host's cooperative shutdown signal.
+    /// Whether cooperative shutdown has been requested.
+    ///
+    /// This is a snapshot, not an atomic check-and-dispatch gate. Shutdown can
+    /// race an operation after it observes `false`; an already-admitted operation
+    /// may still have effects. Fresh port opens also check the shared shutdown
+    /// state under the port registry lock.
+    #[must_use]
+    pub fn is_shutdown(&self) -> bool {
+        self.inner.shutdown.is_triggered()
+    }
+
+    /// Wait for the host's retained cooperative shutdown signal.
+    /// Completes immediately if shutdown was already requested.
     pub async fn shutdown(&self) {
         self.inner.shutdown().await;
     }
@@ -132,6 +204,8 @@ impl ComponentContext {
 #[derive(Default)]
 pub struct ComponentRegistry {
     factories: BTreeMap<String, Arc<dyn ComponentFactory>>,
+    step_factories:
+        BTreeMap<String, (crate::step::StepSchema, Arc<dyn step::StepComponentFactory>)>,
 }
 
 impl ComponentRegistry {
@@ -147,6 +221,13 @@ impl ComponentRegistry {
         factory_id: String,
         factory: Arc<dyn ComponentFactory>,
     ) -> Result<(), HostError> {
+        if self.step_factories.contains_key(&factory_id) {
+            return Err(HostError::new(
+                HostErrorCode::DuplicateFactory,
+                None,
+                "factory is already registered",
+            ));
+        }
         match self.factories.entry(factory_id) {
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(factory);
@@ -159,6 +240,25 @@ impl ComponentRegistry {
             )),
         }
     }
+
+    /// Register an immutable step schema and factory in the shared allowlist.
+    pub fn register_step(
+        &mut self,
+        factory_id: String,
+        schema: crate::step::StepSchema,
+        factory: Arc<dyn step::StepComponentFactory>,
+    ) -> Result<(), HostError> {
+        if self.factories.contains_key(&factory_id) || self.step_factories.contains_key(&factory_id)
+        {
+            return Err(HostError::new(
+                HostErrorCode::DuplicateFactory,
+                None,
+                "factory is already registered",
+            ));
+        }
+        self.step_factories.insert(factory_id, (schema, factory));
+        Ok(())
+    }
 }
 
 /// One component instance with resolved, authoritative named bindings.
@@ -169,6 +269,8 @@ pub struct ComponentInstanceSpec {
     pub bindings: ModuleBindings,
     /// Per-instance settings, without process environment defaults.
     pub config: Option<toml::Table>,
+    /// Explicit per-instance asset directory; relative paths are rejected.
+    pub config_origin: Option<std::path::PathBuf>,
 }
 
 /// Explicit host resources and lifecycle deadlines.

@@ -29,10 +29,12 @@ pub(super) enum Event {
 
 pub(super) struct Worker {
     pub factory: Arc<dyn ComponentFactory>,
+    pub config_origin: Option<std::path::PathBuf>,
     pub options: HostedOptions,
     pub commands: watch::Receiver<Command>,
     pub events: mpsc::Sender<Event>,
     pub status: watch::Sender<HostStatus>,
+    pub step_gate: Option<Arc<super::step::control::Gate>>,
 }
 
 impl Worker {
@@ -46,7 +48,10 @@ impl Worker {
             }, &id, HostErrorCode::ContextOpen) => result,
         };
         let context = match context {
-            Ok(inner) => Arc::new(ComponentContext { inner }),
+            Ok(inner) => Arc::new(ComponentContext {
+                inner: Arc::new(inner),
+                config_origin: self.config_origin,
+            }),
             Err(error) => {
                 if self.events.send(Event::Failure(error)).await.is_ok() {
                     stop_reason(&mut self.commands).await;
@@ -54,9 +59,13 @@ impl Worker {
                 return None;
             }
         };
+        if let Some(gate) = &self.step_gate {
+            context.inner.attach_step_gate(gate.clone());
+        }
         let mut monitor = Monitor {
             commands: self.commands,
             hosted: context.inner.hosted_events(),
+            step_gate: self.step_gate,
         };
         if self
             .events

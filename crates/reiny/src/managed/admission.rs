@@ -99,6 +99,10 @@ pub(crate) struct ReadyAdmission {
 }
 
 impl ModuleContext {
+    pub(crate) fn attach_step_gate(&self, gate: Arc<crate::component::step::control::Gate>) {
+        self.shutdown.attach_step_gate(gate);
+    }
+
     pub(crate) fn hosted_events(&self) -> watch::Receiver<Option<HostedEvent>> {
         self.shutdown.hosted_events()
     }

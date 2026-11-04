@@ -190,6 +190,17 @@ impl StepScheduler {
         }
         Ok(receipt)
     }
+
+    pub(crate) fn interrupted(&mut self, kind: StepFailureKind) -> Option<StepFailure> {
+        self.fault.as_mut().map(|failure| {
+            if failure.kind == StepFailureKind::AdvanceDropped {
+                failure.detail =
+                    "host interrupted advancement; component effects may persist".into();
+            }
+            failure.kind = kind;
+            failure.clone()
+        })
+    }
 }
 
 #[cfg(test)]

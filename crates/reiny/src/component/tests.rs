@@ -18,9 +18,11 @@ use crate::engine::{Engine, Local};
 use super::*;
 
 mod admission;
+mod context;
 mod graph;
 mod lifecycle;
 mod rejection;
+mod staged;
 mod support;
 mod unresponsive;
 
@@ -86,6 +88,7 @@ fn instance(id: &str, factory: &str) -> ComponentInstanceSpec {
         factory_id: factory.to_owned(),
         bindings: bindings(id),
         config: None,
+        config_origin: None,
     }
 }
 

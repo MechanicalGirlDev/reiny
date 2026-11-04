@@ -225,3 +225,4 @@ fn graph(source: Role) -> Graph {
 }
 
 mod cases;
+mod staged;

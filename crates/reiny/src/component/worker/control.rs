@@ -17,6 +17,7 @@ pub(super) enum Interrupted {
 pub(super) struct Monitor {
     pub(super) commands: watch::Receiver<Command>,
     pub(super) hosted: watch::Receiver<Option<HostedEvent>>,
+    pub(super) step_gate: Option<std::sync::Arc<super::super::step::control::Gate>>,
 }
 
 impl Monitor {
@@ -24,7 +25,7 @@ impl Monitor {
         &mut self,
         future: impl Future<Output = Result<T, HostError>>,
     ) -> Result<T, Interrupted> {
-        tokio::select! {
+        let result = tokio::select! {
             biased;
             reason = stop_reason(&mut self.commands) => Err(Interrupted::Stop(reason)),
             event = self.hosted.wait_for(Option::is_some) => {
@@ -32,7 +33,13 @@ impl Monitor {
                 Err(Interrupted::Hosted(event.unwrap_or(HostedEvent::StopRequested)))
             }
             result = future => result.map_err(Interrupted::Failure),
+        };
+        if result.is_err()
+            && let Some(gate) = &self.step_gate
+        {
+            gate.stop();
         }
+        result
     }
 
     pub(super) async fn activation(&mut self) -> Result<(), Interrupted> {
