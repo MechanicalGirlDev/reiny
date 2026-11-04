@@ -51,6 +51,7 @@ pub mod component;
 mod e2e;
 pub mod encoded;
 pub mod engine;
+pub mod job;
 mod managed;
 mod pubsub;
 #[cfg(all(test, feature = "zenoh"))]
