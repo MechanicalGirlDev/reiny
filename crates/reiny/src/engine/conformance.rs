@@ -161,6 +161,17 @@ pub async fn exercise(a: ModuleContext, b: ModuleContext) {
     assert_eq!(envelope.value.seq, 1);
     assert_eq!(envelope.source, "a");
 
+    // The established route must also accept shared sends on byte-only engines.
+    probe
+        .send_shared(Arc::new(Probe { seq: 3 }))
+        .await
+        .expect("shared send");
+    let shared = timeout(PATIENCE, plain.recv_shared_envelope())
+        .await
+        .expect("shared sample within patience")
+        .expect("stream open");
+    assert_eq!((shared.value.seq, shared.source.as_str()), (3, "a"));
+
     // --- cancel-safety: a recv dropped half-way loses no later sample ---
     assert!(
         timeout(Duration::from_millis(200), plain.recv())
@@ -338,6 +349,22 @@ pub async fn exercise(a: ModuleContext, b: ModuleContext) {
         ),
         (42, "a")
     );
+
+    // Shared retained sends are additional coverage, after both legacy replay assertions.
+    state
+        .send_shared(Arc::new(Probe { seq: 43 }))
+        .await
+        .expect("shared retained send");
+    let mut shared_late = b
+        .subscriber::<Probe>()
+        .latched()
+        .build()
+        .expect("shared latched subscriber");
+    let shared = timeout(PATIENCE, shared_late.recv_shared_envelope())
+        .await
+        .expect("shared replay within patience")
+        .expect("stream open");
+    assert_eq!((shared.value.seq, shared.source.as_str()), (43, "a"));
 
     // Every publisher of every type, whole keys: the live ones first, then a leave.
     let mut everyone = b.watch_keys(&Key::all(DOMAIN)).expect("watch keys");

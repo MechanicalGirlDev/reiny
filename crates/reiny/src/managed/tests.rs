@@ -28,6 +28,7 @@ mod lifecycle;
 mod policy;
 mod ports;
 mod rpc;
+mod shared;
 mod startup;
 
 const PATIENCE: Duration = Duration::from_secs(5);

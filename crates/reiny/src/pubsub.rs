@@ -19,13 +19,15 @@ use prost::Message;
 use tokio::sync::{Notify, mpsc};
 
 use crate::engine::{
-    self, Callback, Engine, Guard, Key, QueryParams, RawPublisher, RawQuery, RawReplies,
-    ReplyResult, SCHEMA_CHUNK, SUB_CHUNK, Sample,
+    self, Callback, Delivery, DeliveryResult, Engine, Guard, Key, Payload, QueryParams,
+    RawPublisher, RawQuery, RawReplies, SCHEMA_CHUNK, SUB_CHUNK,
 };
 use crate::shutdown::Shutdown;
 #[cfg(any(test, feature = "conformance"))]
 use crate::validate_segment;
 use crate::{Descriptor, Durability, History, MessageType, ModuleContext, Qos, Result};
+
+mod shared;
 
 /// The depth of the default receive buffer (Fifo). The same as zenoh's `API_DATA_RECEPTION_CHANNEL_SIZE`.
 const FIFO_CAPACITY: usize = 256;
@@ -218,7 +220,7 @@ pub struct RawDescriptor {
 pub(crate) fn declare_latch(
     cloudy: &ModuleContext,
     key: &Key,
-    last: Arc<Mutex<Option<Vec<u8>>>>,
+    last: Arc<Mutex<Option<Payload>>>,
     schema: Option<u64>,
 ) -> Result<Guard> {
     let reply_key = key.clone();
@@ -230,11 +232,11 @@ pub(crate) fn declare_latch(
             if query.payload().is_some() {
                 return;
             }
-            let Some(bytes) = lock(&last).clone() else {
+            let Some(payload) = lock(&last).clone() else {
                 return;
             };
             // Carry the same fingerprint the live path does. Without it, only latched replies would slip past the check.
-            if let Err(e) = query.reply(&reply_key, bytes, fingerprint(schema)) {
+            if let Err(e) = query.reply_payload(&reply_key, payload, fingerprint(schema)) {
                 tracing::warn!(key = %reply_key, error = %e, "latched reply failed");
             }
         }),
@@ -260,7 +262,7 @@ pub(crate) struct PublisherCore {
     _token: Guard,
     /// The queryable answering with the most recent value, declared only when latched (merely held).
     queryable: Option<Guard>,
-    last: Arc<Mutex<Option<Vec<u8>>>>,
+    last: Arc<Mutex<Option<Payload>>>,
     schema: u64,
 }
 
@@ -295,10 +297,15 @@ impl PublisherCore {
     }
 
     pub(crate) fn send(&self, payload: Vec<u8>) -> Result<()> {
+        self.send_payload(payload.into())
+    }
+
+    fn send_payload(&self, payload: Payload) -> Result<()> {
         if self.queryable.is_some() {
             *lock(&self.last) = Some(payload.clone());
         }
-        self.raw.put(payload, fingerprint(Some(self.schema)))
+        self.raw
+            .put_payload(payload, fingerprint(Some(self.schema)))
     }
 }
 
@@ -543,13 +550,13 @@ impl Counters {
 /// Ring (drops the oldest when full). It is an enum rather than making `Subscriber<T>` generic over the
 /// buffer — the shape of a public type shows up in downstream struct fields.
 enum Chan {
-    Fifo(flume::Receiver<Sample>),
+    Fifo(flume::Receiver<Delivery>),
     Ring(Arc<Ring>),
 }
 
 impl Chan {
     /// The next sample. Both are cancel-safe (no value already taken out is held across an await point).
-    async fn recv(&self) -> Option<Sample> {
+    async fn recv(&self) -> Option<Delivery> {
         match self {
             Self::Fifo(rx) => rx.recv_async().await.ok(),
             Self::Ring(ring) => Some(ring.pop().await),
@@ -559,7 +566,7 @@ impl Chan {
 
 /// A ring of the most recent n samples. Drops the oldest when full.
 struct Ring {
-    queue: Mutex<VecDeque<Sample>>,
+    queue: Mutex<VecDeque<Delivery>>,
     capacity: usize,
     notify: Notify,
 }
@@ -574,7 +581,7 @@ impl Ring {
     }
 
     /// Push one sample, returning whether the oldest had to be thrown away to make room.
-    fn push(&self, sample: Sample) -> bool {
+    fn push(&self, sample: Delivery) -> bool {
         let mut queue = lock(&self.queue);
         let evicted = queue.len() == self.capacity;
         if evicted {
@@ -586,7 +593,7 @@ impl Ring {
         evicted
     }
 
-    async fn pop(&self) -> Sample {
+    async fn pop(&self) -> Delivery {
         loop {
             // Register the waiter before looking at the queue — a push arriving in between is not missed.
             let notified = self.notify.notified();
@@ -692,7 +699,7 @@ impl RawSubscriber {
                 schema,
                 source_port: sample.key.port()?.to_owned(),
                 source: sample.key.source.unwrap_or_default(),
-                payload: sample.payload,
+                payload: sample.payload.into_bytes(),
                 timestamp: sample.timestamp,
             });
         }
@@ -768,7 +775,7 @@ impl Core {
         // reiny owns the receive buffer. The engine's callback only pushes onto it (and counts).
         let counters = Arc::new(Counters::default());
         let label = ty.to_string();
-        let (chan, on_sample): (Chan, Callback<Sample>) = if let Some(n) = latest {
+        let (chan, on_sample): (Chan, Callback<Delivery>) = if let Some(n) = latest {
             let ring = Arc::new(Ring::new(n));
             let sink = Arc::clone(&ring);
             let counters = Arc::clone(&counters);
@@ -797,11 +804,11 @@ impl Core {
                 }),
             )
         };
-        let on_sample: Arc<dyn Fn(Sample) + Send + Sync> = Arc::from(on_sample);
+        let on_sample: Arc<dyn Fn(Delivery) + Send + Sync> = Arc::from(on_sample);
         let mut guards = Vec::new();
         for key in &keys {
             let callback = Arc::clone(&on_sample);
-            guards.push(engine.subscribe(key, Box::new(move |sample| callback(sample)))?);
+            guards.push(engine.subscribe_delivery(key, Box::new(move |sample| callback(sample)))?);
         }
 
         // The latched query waits for presence before firing (see the comment on `latched()`).
@@ -831,7 +838,7 @@ impl Core {
 
     /// The next sample — live, or a latched reply that no live sample from its source has overtaken.
     /// Cancel-safe: no sample taken off a channel is held across an await point.
-    async fn recv(&mut self) -> Option<Sample> {
+    async fn recv(&mut self) -> Option<Delivery> {
         let Self {
             chan,
             engine,
@@ -903,7 +910,7 @@ impl Core {
 
 /// Check the fingerprint and decode. `None` for a sample that should be dropped.
 fn unwrap_sample<T: Message + Default + MessageType>(
-    sample: &Sample,
+    sample: &Delivery,
     source: String,
     warned: &mut HashSet<String>,
 ) -> Option<Envelope<T>> {
@@ -921,9 +928,9 @@ fn unwrap_sample<T: Message + Default + MessageType>(
 
 /// Turn `Option<&mut replies>` into a future. It sits in a select! branch with a precondition, so `None`
 /// is treated as "never arrives" = `pending` (which avoids an unwrap).
-async fn recv_reply(replies: Option<&mut Box<dyn RawReplies>>) -> Option<ReplyResult> {
+async fn recv_reply(replies: Option<&mut Box<dyn RawReplies>>) -> Option<DeliveryResult> {
     match replies {
-        Some(r) => r.next().await,
+        Some(r) => r.next_delivery().await,
         None => std::future::pending().await,
     }
 }
@@ -941,7 +948,7 @@ async fn recv_presence(presence: Option<&mut RawPresence>) -> Option<engine::Pre
 /// Missing, malformed, and mismatched fingerprints are rejected. Each source is
 /// warned about once.
 fn schema_matches<T: MessageType>(
-    sample: &Sample,
+    sample: &Delivery,
     source: &str,
     warned: &mut HashSet<String>,
 ) -> bool {
@@ -968,8 +975,8 @@ pub(crate) fn attachment_fingerprint(attachment: Option<&[u8]>) -> Option<u64> {
     Some(u64::from_le_bytes(raw))
 }
 
-fn decode<T: Message + Default + MessageType>(sample: &Sample) -> Option<T> {
-    match T::decode(sample.payload.as_slice()) {
+fn decode<T: Message + Default + MessageType>(sample: &Delivery) -> Option<T> {
+    match T::decode(sample.payload.bytes()) {
         Ok(msg) => Some(msg),
         Err(e) => {
             tracing::warn!(ty = T::TYPE_NAME, error = %e, "skipping undecodable sample");
@@ -1090,10 +1097,10 @@ mod tests {
         const SCHEMA_FINGERPRINT: u64 = 0xaaaa_bbbb_cccc_dddd;
     }
 
-    fn sample(payload: Vec<u8>, attachment: Option<Vec<u8>>) -> Sample {
-        Sample {
+    fn sample(payload: Vec<u8>, attachment: Option<Vec<u8>>) -> Delivery {
+        Delivery {
             key: Key::output("lab", "src", "test", State::TYPE_NAME),
-            payload,
+            payload: payload.into(),
             attachment,
             timestamp: None,
         }
@@ -1135,11 +1142,24 @@ mod tests {
                 query = pending.recv() => query.expect("initial retained query"),
             };
             publisher.put(vec![2], None).expect("live sample");
-            assert_eq!(subscriber.recv().await.expect("live delivery").payload, [2]);
+            assert_eq!(
+                subscriber
+                    .recv()
+                    .await
+                    .expect("live delivery")
+                    .payload
+                    .bytes(),
+                [2]
+            );
             retained.reply(&key, vec![1], None).expect("delayed reply");
             publisher.put(vec![3], None).expect("live sentinel");
             assert_eq!(
-                subscriber.recv().await.expect("next live delivery").payload,
+                subscriber
+                    .recv()
+                    .await
+                    .expect("next live delivery")
+                    .payload
+                    .bytes(),
                 [3],
                 "the delayed retained value must not follow a newer live value"
             );
@@ -1155,7 +1175,12 @@ mod tests {
             };
             retained.reply(&key, vec![4], None).expect("rejoined reply");
             assert_eq!(
-                subscriber.recv().await.expect("rejoined delivery").payload,
+                subscriber
+                    .recv()
+                    .await
+                    .expect("rejoined delivery")
+                    .payload
+                    .bytes(),
                 [4]
             );
         })
@@ -1185,7 +1210,9 @@ mod tests {
             .expect("subscription open");
         assert_eq!(message.x, 2);
         assert_eq!(
-            *lock(&publisher.core.last),
+            lock(&publisher.core.last)
+                .as_ref()
+                .map(|payload| payload.bytes().to_vec()),
             Some(State { x: 2 }.encode_to_vec())
         );
         drop(unpolled);
@@ -1273,7 +1300,7 @@ mod tests {
         let mut got = Vec::new();
         for _ in 0..2 {
             let s = ring.pop().await;
-            got.push(State::decode(s.payload.as_slice()).unwrap().x);
+            got.push(State::decode(s.payload.bytes()).unwrap().x);
         }
         assert_eq!(got, [3, 4], "the two newest, in order");
     }
@@ -1291,7 +1318,7 @@ mod tests {
             })
         };
         let s = ring.pop().await;
-        assert_eq!(State::decode(s.payload.as_slice()).unwrap().x, 9);
+        assert_eq!(State::decode(s.payload.bytes()).unwrap().x, 9);
         pusher.await.unwrap();
     }
 }

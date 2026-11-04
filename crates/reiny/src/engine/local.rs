@@ -14,8 +14,9 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    BoxFuture, Callback, Caps, Engine, Guard, Key, Presence, QueryCallback, QueryParams,
-    RawPublisher, RawQuery, RawReplies, ReplyResult, Sample, now_unix_ns,
+    BoxFuture, Callback, Caps, Delivery, DeliveryResult, Engine, Guard, Key, Payload, Presence,
+    QueryCallback, QueryParams, RawPublisher, RawQuery, RawReplies, ReplyResult, Sample,
+    now_unix_ns,
 };
 use crate::{CongestionControl, Qos, Result};
 
@@ -84,6 +85,10 @@ impl Engine for Local {
     }
 
     fn subscribe(&self, key: &Key, on_sample: Callback<Sample>) -> Result<Guard> {
+        self.subscribe_delivery(key, Box::new(move |sample| on_sample(sample.into())))
+    }
+
+    fn subscribe_delivery(&self, key: &Key, on_sample: Callback<Delivery>) -> Result<Guard> {
         key.validate()?;
         let id = next_id();
         self.register(Op::Subscribe(id, key.clone(), on_sample));
@@ -149,8 +154,8 @@ enum Slot {
 }
 
 enum Op {
-    Subscribe(u64, Key, Callback<Sample>),
-    Publish(Sample),
+    Subscribe(u64, Key, Callback<Delivery>),
+    Publish(Delivery),
     Token(u64, Key),
     Watch(u64, Key, Callback<Presence>),
     Respond(u64, Key, QueryCallback),
@@ -158,7 +163,7 @@ enum Op {
         key: Key,
         payload: Option<Vec<u8>>,
         attachment: Option<Vec<u8>>,
-        reply: mpsc::UnboundedSender<ReplyResult>,
+        reply: mpsc::UnboundedSender<DeliveryResult>,
     },
     Alive(Key, oneshot::Sender<Vec<Key>>),
     Remove(Slot, u64),
@@ -167,7 +172,7 @@ enum Op {
 /// The state only the delivery thread touches.
 #[derive(Default)]
 struct Bus {
-    subscribers: Vec<(u64, Key, Callback<Sample>)>,
+    subscribers: Vec<(u64, Key, Callback<Delivery>)>,
     tokens: Vec<(u64, Key)>,
     watchers: Vec<(u64, Key, Callback<Presence>)>,
     responders: Vec<(u64, Key, QueryCallback)>,
@@ -276,8 +281,12 @@ struct LocalPublisher {
 
 impl RawPublisher for LocalPublisher {
     fn put(&self, payload: Vec<u8>, attachment: Option<Vec<u8>>) -> Result<()> {
+        self.put_payload(payload.into(), attachment)
+    }
+
+    fn put_payload(&self, payload: Payload, attachment: Option<Vec<u8>>) -> Result<()> {
         self.tx
-            .send(Op::Publish(Sample {
+            .send(Op::Publish(Delivery {
                 key: self.key.clone(),
                 payload,
                 attachment,
@@ -291,7 +300,7 @@ struct LocalQuery {
     key: Key,
     payload: Option<Vec<u8>>,
     attachment: Option<Vec<u8>>,
-    reply: mpsc::UnboundedSender<ReplyResult>,
+    reply: mpsc::UnboundedSender<DeliveryResult>,
 }
 
 impl RawQuery for LocalQuery {
@@ -313,8 +322,17 @@ impl RawQuery for LocalQuery {
         payload: Vec<u8>,
         attachment: Option<Vec<u8>>,
     ) -> Result<()> {
+        self.reply_payload(key, payload.into(), attachment)
+    }
+
+    fn reply_payload(
+        self: Box<Self>,
+        key: &Key,
+        payload: Payload,
+        attachment: Option<Vec<u8>>,
+    ) -> Result<()> {
         // If the caller is already gone, just drop it (zenoh does the same).
-        let _ = self.reply.send(Ok(Sample {
+        let _ = self.reply.send(Ok(Delivery {
             key: key.clone(),
             payload,
             attachment,
@@ -330,12 +348,20 @@ impl RawQuery for LocalQuery {
 }
 
 struct LocalReplies {
-    rx: mpsc::UnboundedReceiver<ReplyResult>,
+    rx: mpsc::UnboundedReceiver<DeliveryResult>,
     deadline: tokio::time::Instant,
 }
 
 impl RawReplies for LocalReplies {
     fn next(&mut self) -> BoxFuture<'_, Option<ReplyResult>> {
+        Box::pin(async move {
+            self.next_delivery()
+                .await
+                .map(|reply| reply.map(Sample::from))
+        })
+    }
+
+    fn next_delivery(&mut self) -> BoxFuture<'_, Option<DeliveryResult>> {
         Box::pin(async move {
             // mpsc's `recv` is cancel-safe. Past the deadline, treat it as closed (how zenoh looks too).
             tokio::time::timeout_at(self.deadline, self.rx.recv())

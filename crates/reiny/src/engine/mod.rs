@@ -31,6 +31,7 @@ use crate::{Qos, Result};
 #[cfg(any(test, feature = "conformance"))]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 pub mod conformance;
+mod delivery;
 mod local;
 #[cfg(any(test, feature = "conformance"))]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -38,6 +39,7 @@ pub mod namespace_conformance;
 #[cfg(feature = "zenoh")]
 mod zenoh;
 
+pub use delivery::{Delivery, Payload};
 pub use local::Local;
 #[cfg(feature = "zenoh")]
 pub use zenoh::Zenoh;
@@ -50,6 +52,8 @@ pub type Callback<T> = Box<dyn Fn(T) + Send + Sync>;
 pub type Guard = Box<dyn Any + Send + Sync>;
 /// One reply to a query. `Err` carries what the other side passed to `reply_err`.
 pub type ReplyResult = std::result::Result<Sample, Vec<u8>>;
+/// A query reply that may retain native payload ownership.
+pub type DeliveryResult = std::result::Result<Delivery, Vec<u8>>;
 /// The callback handed to [`Engine::respond`].
 pub type QueryCallback = Callback<Box<dyn RawQuery>>;
 
@@ -451,6 +455,12 @@ pub trait Engine: Send + Sync + 'static {
     /// Call `on_sample` for every sample matching `key` (a pattern).
     fn subscribe(&self, key: &Key, on_sample: Callback<Sample>) -> Result<Guard>;
 
+    /// Subscribe on the same ordered path, optionally preserving native payloads.
+    /// Byte-only engines need no override.
+    fn subscribe_delivery(&self, key: &Key, on_sample: Callback<Delivery>) -> Result<Guard> {
+        self.subscribe(key, Box::new(move |sample| on_sample(sample.into())))
+    }
+
     /// Raise a presence token on `key` (a concrete key). It falls with the handle, or with the process.
     fn declare_alive(&self, key: &Key) -> Result<Guard>;
 
@@ -476,6 +486,12 @@ pub trait RawPublisher: Send + Sync {
     /// Send one item. Under `Block` it may block until the send path clears.
     /// Success does not promise delivery or retransmission.
     fn put(&self, payload: Vec<u8>, attachment: Option<Vec<u8>>) -> Result<()>;
+
+    /// Publish once, preserving native ownership when supported.
+    /// The default encodes and delegates to the existing byte path.
+    fn put_payload(&self, payload: Payload, attachment: Option<Vec<u8>>) -> Result<()> {
+        self.put(payload.into_bytes(), attachment)
+    }
 }
 
 /// A received query. Consume it with [`RawQuery::reply`] / [`RawQuery::reply_err`], or drop it to finalize.
@@ -493,6 +509,15 @@ pub trait RawQuery: Send {
         payload: Vec<u8>,
         attachment: Option<Vec<u8>>,
     ) -> Result<()>;
+    /// Reply once with an optional shared payload; byte-only engines encode it.
+    fn reply_payload(
+        self: Box<Self>,
+        key: &Key,
+        payload: Payload,
+        attachment: Option<Vec<u8>>,
+    ) -> Result<()> {
+        self.reply(key, payload.into_bytes(), attachment)
+    }
     /// Answer with an error. The caller receives `Err(message)`.
     fn reply_err(self: Box<Self>, message: Vec<u8>) -> Result<()>;
 }
@@ -501,6 +526,11 @@ pub trait RawQuery: Send {
 pub trait RawReplies: Send {
     /// The next reply. `None` once every responder finalized or `timeout` passed. **Cancel-safe**.
     fn next(&mut self) -> BoxFuture<'_, Option<ReplyResult>>;
+
+    /// The next reply with native ownership when supported. **Cancel-safe**.
+    fn next_delivery(&mut self) -> BoxFuture<'_, Option<DeliveryResult>> {
+        Box::pin(async move { self.next().await.map(|reply| reply.map(Delivery::from)) })
+    }
 }
 
 /// The current time (unix ns). For engines whose samples carry no time of their own.

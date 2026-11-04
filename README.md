@@ -179,6 +179,42 @@ with delegated retained state and RPC endpoints, plus a wired verification task.
 
 ## Message type contract
 
+### Shared delivery inside one process
+
+Named typed ports on the same `engine::Local` can opt into shared ownership:
+
+```rust,ignore
+let value = std::sync::Arc::new(state);
+output.send_shared(std::sync::Arc::clone(&value)).await?;
+let envelope = input.recv_shared_envelope().await;
+```
+
+`recv_shared()` returns `Option<Arc<T>>`; `recv_shared_envelope()` returns
+`Option<Envelope<Arc<T>>>`. For the exact same Rust type, live delivery and
+retained replay share the published allocation without protobuf encoding or
+decoding. Exact named bindings and schema fingerprints are still checked first.
+Sharing a protobuf name or fingerprint alone does not imply Rust type identity.
+
+This API requires an immutable protobuf value: the publisher, receivers, and
+any other aliases must not modify it through interior mutability while a queued
+or retained delivery can exist. `Arc<T>` does not enforce that condition.
+Existing `send(T)` keeps its send-time serialized snapshot, including for types
+with mutable aliases; existing `recv()` and `recv_envelope()` still return owned
+decoded values without requiring `Clone`.
+
+Raw receivers, bridges, owned receives, different Rust types, and byte-only
+engines continue to use protobuf bytes. A shared publication encodes lazily at
+most once, with the cache also used for replay. Byte copies, `Arc` bookkeeping,
+metadata allocation, and the existing Local dispatcher queue remain: this is
+not an unconditional zero-copy or bounded-memory transport claim. FIFO,
+latest-ring, replay/rejoin, readiness, cancellation, and QoS behavior are
+unchanged. Non-Local engines need no implementation changes.
+
+Instrumented tests check actual protobuf encode/decode calls and allocation
+identity. No throughput or latency benchmark has been run for this increment.
+
+### Schema metadata
+
 Generated message types declare their complete protobuf `TYPE_NAME`, a mandatory `SCHEMA_FINGERPRINT: u64` and explicitly provide
 `DESCRIPTOR: Option<Descriptor>`. Type-only implementations are unsupported.
 Typed pub/sub and RPC reject missing, malformed, or mismatched fingerprints.

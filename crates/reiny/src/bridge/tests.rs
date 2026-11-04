@@ -4,6 +4,8 @@ use crate::engine::Local;
 use crate::{Descriptor, MessageType, RuntimeOptions, Service};
 use tokio::time::timeout;
 
+mod shared;
+
 #[derive(Clone, PartialEq, prost::Message)]
 struct Probe {
     #[prost(uint32, tag = "1")]
