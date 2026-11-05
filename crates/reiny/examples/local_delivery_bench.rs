@@ -20,7 +20,7 @@ const SOURCE: &str = "local-delivery-bench/producer";
 const PORT: &str = "payload";
 const WARMUP: u32 = 128;
 const ITERATIONS: u32 = 2_000;
-const DEADLINE: Duration = Duration::from_secs(120);
+const DEADLINE: Duration = Duration::from_mins(2);
 
 #[derive(Clone, PartialEq, Message)]
 struct Payload {
