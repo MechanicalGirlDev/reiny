@@ -1,13 +1,12 @@
 use super::{codec, protocol};
 
-#[cfg(feature = "zenoh")]
 mod component;
-#[cfg(feature = "zenoh")]
 mod fixture;
-#[cfg(feature = "zenoh")]
+mod local;
 mod loopback;
-#[cfg(feature = "zenoh")]
 mod rejection;
+#[cfg(feature = "zenoh")]
+mod routing;
 
 #[test]
 fn strict_json_rejects_duplicate_keys_before_maps_collapse() {

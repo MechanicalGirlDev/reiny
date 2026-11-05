@@ -1,4 +1,4 @@
-use alloc::{string::String, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use serde::{Deserialize, Serialize};
 
 use crate::bindings::{MODULE_BINDINGS_VERSION, MODULE_REPORT_VERSION, ModuleBindings};
@@ -77,7 +77,17 @@ pub struct Milliseconds(pub u64);
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields, rename_all = "snake_case")]
 pub enum TransportSettings {
-    /// First process-host slice uses Zenoh for every application edge.
+    /// Explicit isolated host bus, with no network visibility or Zenoh session.
+    /// The owner rejects all graph edges crossing this host before spawning.
+    /// Older peers reject this unknown variant; never substitute another transport.
+    Local {
+        /// Exact application communication domain.
+        domain: String,
+        /// Complete owner-verified placement, not endpoint authority.
+        /// The host validates its exact assigned set and all its input sources.
+        placement: BTreeMap<String, String>,
+    },
+    /// Legacy manual callers use Zenoh for every application edge.
     Zenoh {
         /// Exact application communication domain.
         domain: String,
@@ -87,6 +97,26 @@ pub enum TransportSettings {
         listen: Vec<String>,
         /// Whether multicast discovery is enabled.
         multicast_scouting: bool,
+    },
+    /// Placement-aware Local reads and Zenoh remote reads.
+    ///
+    /// Owned publications remain mirrored non-atomically to both transports.
+    /// This is not a no-serialization guarantee. Protocol v1 peers predating
+    /// this variant reject `routed_zenoh` during Prepare decoding, before
+    /// construction or commit; owners must abort, never retry with Zenoh.
+    RoutedZenoh {
+        /// Exact application communication domain.
+        domain: String,
+        /// Explicit connection locators.
+        connect: Vec<String>,
+        /// Explicit listening locators.
+        listen: Vec<String>,
+        /// Whether multicast discovery is enabled.
+        multicast_scouting: bool,
+        /// Complete immutable namespace-to-host map from the verified graph.
+        /// Selects transport, never grants endpoint authority. The host checks
+        /// its exact assignment set against its authenticated session host ID.
+        placement: BTreeMap<String, String>,
     },
 }
 

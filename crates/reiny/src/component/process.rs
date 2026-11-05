@@ -33,6 +33,7 @@ pub use reiny_core::host_protocol as protocol;
 mod codec;
 mod connection;
 mod error;
+mod placement;
 mod preparation;
 mod session;
 mod terminal;
@@ -79,7 +80,7 @@ pub struct ProcessLimits {
     pub shutdown: Duration,
     /// Deadline for a partial frame or one outbound frame, not an idle session.
     pub frame: Duration,
-    /// Maximum assigned instances and registered factories.
+    /// Maximum assigned instances, placement-map entries and registered factories.
     pub instances: usize,
 }
 

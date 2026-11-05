@@ -41,6 +41,7 @@ pub(super) struct Fixture {
     pub nonce: Nonce,
     pub sequence: u64,
     pub events: mpsc::Receiver<Event>,
+    pub constructed: Arc<std::sync::atomic::AtomicUsize>,
     peer_sequence: Option<Sequence>,
     close: std::net::TcpStream,
     host: Option<std::thread::JoinHandle<Result<HostOutcome, ProcessError>>>,
@@ -66,7 +67,15 @@ impl Fixture {
         };
         let (events, receiver) = mpsc::channel(16);
         let mut registry = ProcessRegistry::new();
-        registry.register(registration(), Arc::new(Factory { events, behavior }))?;
+        let constructed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        registry.register(
+            registration(),
+            Arc::new(Factory {
+                events,
+                behavior,
+                constructed: Arc::clone(&constructed),
+            }),
+        )?;
         let host = std::thread::spawn(move || {
             ProcessHost::run(
                 bootstrap,
@@ -88,6 +97,7 @@ impl Fixture {
             nonce,
             sequence: 0,
             events: receiver,
+            constructed,
             peer_sequence: None,
             close,
             host: Some(host),
@@ -146,7 +156,7 @@ impl Fixture {
         &mut self,
         origins: Vec<Option<ConfigOrigin>>,
     ) -> crate::Result<()> {
-        let assignments = origins
+        let assignments: Vec<_> = origins
             .into_iter()
             .enumerate()
             .map(|(index, config_origin)| {
@@ -162,14 +172,29 @@ impl Fixture {
                 }
             })
             .collect();
+        #[cfg(feature = "zenoh")]
+        let transport = TransportSettings::Zenoh {
+            domain: "process-tests".into(),
+            connect: Vec::new(),
+            listen: Vec::new(),
+            multicast_scouting: false,
+        };
+        #[cfg(not(feature = "zenoh"))]
+        let transport = TransportSettings::Local {
+            domain: "process-tests".into(),
+            placement: assignments
+                .iter()
+                .map(|assignment| {
+                    (
+                        assignment.bindings.namespace.clone(),
+                        self.identity.host_id.0.clone(),
+                    )
+                })
+                .collect(),
+        };
         self.send(OwnerMessage::Prepare(Prepare {
             assignments,
-            transport: TransportSettings::Zenoh {
-                domain: "process-tests".into(),
-                connect: Vec::new(),
-                listen: Vec::new(),
-                multicast_scouting: false,
-            },
+            transport,
             remaining_budget: Milliseconds(5000),
         }))
         .await

@@ -21,13 +21,17 @@ pub(super) enum Behavior {
 pub(super) struct Factory {
     pub events: mpsc::Sender<Event>,
     pub behavior: Behavior,
+    pub constructed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ComponentFactory for Factory {
     fn create(&self, _: Option<&toml::Table>) -> crate::Result<Box<dyn Component>> {
+        self.constructed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Box::new(Self {
             events: self.events.clone(),
             behavior: self.behavior,
+            constructed: std::sync::Arc::clone(&self.constructed),
         }))
     }
 }

@@ -37,10 +37,14 @@ mod local;
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 pub mod namespace_conformance;
 #[cfg(feature = "zenoh")]
+mod routed;
+#[cfg(feature = "zenoh")]
 mod zenoh;
 
 pub use delivery::{Delivery, Payload};
 pub use local::Local;
+#[cfg(feature = "zenoh")]
+pub use routed::Routed;
 #[cfg(feature = "zenoh")]
 pub use zenoh::Zenoh;
 

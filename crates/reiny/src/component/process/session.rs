@@ -78,7 +78,12 @@ pub(super) async fn serve(
         io.phase = HostPhase::Preparing;
         let (mut options, instances) = io
             .guard
-            .during(preparation::prepare(request, &required, resources.limits))
+            .during(preparation::prepare(
+                request,
+                &required,
+                resources.limits,
+                &io.writer.identity.host_id.0,
+            ))
             .await?;
         options.startup_timeout = io.guard.deadline.map_or(Duration::ZERO, |deadline| {
             deadline.saturating_duration_since(Instant::now())

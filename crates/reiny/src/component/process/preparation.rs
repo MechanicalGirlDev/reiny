@@ -12,6 +12,7 @@ pub(super) async fn prepare(
     request: Prepare,
     required: &[FactoryRegistration],
     limits: ProcessLimits,
+    host: &str,
 ) -> Result<(HostOptions, Vec<ComponentInstanceSpec>), ProcessError> {
     if request.assignments.is_empty() || request.assignments.len() > limits.instances {
         return Err(ProcessError::new(FailureCode::Assignment));
@@ -24,17 +25,12 @@ pub(super) async fn prepare(
     if factories != required.iter().collect() {
         return Err(ProcessError::new(FailureCode::Factory));
     }
-    let mut namespaces = BTreeSet::new();
-    for assignment in &request.assignments {
-        if !namespaces.insert(&assignment.bindings.namespace) {
-            return Err(ProcessError::new(FailureCode::Assignment));
-        }
-    }
+    super::placement::validate(&request, limits.instances, host)?;
     let mut instances = Vec::with_capacity(request.assignments.len());
     for assignment in request.assignments {
         instances.push(instance(assignment).await?);
     }
-    let (domain, engine) = engine(request.transport).await?;
+    let (domain, engine) = engine(request.transport, host).await?;
     Ok((
         HostOptions {
             domain,
@@ -119,15 +115,31 @@ async fn instance(assignment: ComponentAssignment) -> Result<ComponentInstanceSp
 
 async fn engine(
     transport: super::protocol::TransportSettings,
+    host: &str,
 ) -> Result<(String, Arc<dyn crate::engine::Engine>), ProcessError> {
-    #[cfg(feature = "zenoh")]
-    {
-        let super::protocol::TransportSettings::Zenoh {
+    use super::protocol::TransportSettings;
+    let (domain, connect, listen, multicast_scouting, placement) = match transport {
+        TransportSettings::Local { domain, .. } => {
+            crate::validate_segment("domain", &domain)
+                .map_err(|_| ProcessError::new(FailureCode::Assignment))?;
+            return Ok((domain, Arc::new(crate::engine::Local::new())));
+        }
+        TransportSettings::Zenoh {
             domain,
             connect,
             listen,
             multicast_scouting,
-        } = transport;
+        } => (domain, connect, listen, multicast_scouting, None),
+        TransportSettings::RoutedZenoh {
+            domain,
+            connect,
+            listen,
+            multicast_scouting,
+            placement,
+        } => (domain, connect, listen, multicast_scouting, Some(placement)),
+    };
+    #[cfg(feature = "zenoh")]
+    {
         crate::validate_segment("domain", &domain)
             .map_err(|_| ProcessError::new(FailureCode::Assignment))?;
         let mut config = zenoh::Config::default();
@@ -146,11 +158,18 @@ async fn engine(
         let engine = crate::engine::Zenoh::open(config)
             .await
             .map_err(|_| ProcessError::new(FailureCode::ContextOpen))?;
-        Ok((domain, Arc::new(engine)))
+        let engine: Arc<dyn crate::engine::Engine> = match placement {
+            Some(placement) => Arc::new(
+                crate::engine::Routed::new(host, placement, engine)
+                    .map_err(|_| ProcessError::new(FailureCode::Assignment))?,
+            ),
+            None => Arc::new(engine),
+        };
+        Ok((domain, engine))
     }
     #[cfg(not(feature = "zenoh"))]
     {
-        let super::protocol::TransportSettings::Zenoh { .. } = transport;
+        let _ = (domain, connect, listen, multicast_scouting, placement, host);
         std::future::ready(Err(ProcessError::new(FailureCode::ContextOpen))).await
     }
 }
