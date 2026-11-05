@@ -3458,11 +3458,15 @@ dependencies = [
 name = "reiny-ffi"
 version = "0.11.0"
 dependencies = [
+ "anyhow",
  "prost",
  "reiny",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "toml 1.1.6+spec-1.1.0",
  "tracing",
  "uniffi",
  "zenoh",

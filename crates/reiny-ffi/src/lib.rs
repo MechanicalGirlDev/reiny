@@ -9,6 +9,7 @@ use tokio::runtime::{Builder, Handle, Runtime};
 
 /// Ergonomic C ABI shared by C, C++, JavaScript, and C#.
 pub mod c_api;
+mod component;
 #[cfg(test)]
 mod tests;
 uniffi::setup_scaffolding!();

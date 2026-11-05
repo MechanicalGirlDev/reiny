@@ -1,57 +1,13 @@
 //! Handle-based C bridge. Pointer contracts are documented in `include/reiny.h`.
 use crate::{LocalBus, Message, Publisher, Session, Subscription};
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    ffi::{CStr, CString, c_char},
-    panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Mutex, OnceLock},
-};
+use std::{ffi::c_char, sync::Arc};
 
-#[derive(Clone)]
-enum Object {
-    Bus(Arc<LocalBus>),
-    Session(Arc<Session>),
-    Publisher(Arc<Publisher>),
-    Subscription(Arc<Subscription>),
-    Message(Arc<Message>),
-    Buffer(Arc<Vec<u8>>),
-}
-
-struct Registry {
-    next: u64,
-    objects: HashMap<u64, Object>,
-}
-
-fn registry() -> &'static Mutex<Registry> {
-    static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
-    REGISTRY.get_or_init(|| {
-        Mutex::new(Registry {
-            next: 1,
-            objects: HashMap::new(),
-        })
-    })
-}
+mod arguments;
+mod objects;
+use arguments::{ERROR, boundary, bytes, optional_text, output, text};
+pub(crate) use objects::{Object, get, insert, remove, replace_reserved};
 
 type Result<T> = std::result::Result<T, String>;
-
-fn insert(object: Object) -> Result<u64> {
-    let mut registry = registry().lock().map_err(|_| "handle registry poisoned")?;
-    let id = registry.next;
-    registry.next = id.checked_add(1).ok_or("handle space exhausted")?;
-    registry.objects.insert(id, object);
-    Ok(id)
-}
-
-fn get(id: u64) -> Result<Object> {
-    registry()
-        .lock()
-        .map_err(|_| "handle registry poisoned")?
-        .objects
-        .get(&id)
-        .cloned()
-        .ok_or_else(|| "invalid or released handle".into())
-}
 
 macro_rules! typed {
     ($name:ident, $variant:ident, $ty:ty) => {
@@ -70,71 +26,6 @@ typed!(subscription, Subscription, Subscription);
 typed!(message, Message, Message);
 typed!(buffer, Buffer, Vec<u8>);
 
-thread_local! {
-    static ERROR: RefCell<CString> = RefCell::new(CString::default());
-}
-
-fn boundary(f: impl FnOnce() -> Result<()>) -> i32 {
-    let result = catch_unwind(AssertUnwindSafe(f));
-    let error = match result {
-        Ok(Ok(())) => None,
-        Ok(Err(error)) => Some(error),
-        Err(_) => Some("Rust panic caught at C boundary".into()),
-    };
-    ERROR.with(|slot| {
-        #[expect(
-            clippy::expect_used,
-            reason = "embedded NULs were replaced before CString construction"
-        )]
-        let message = CString::new(error.as_deref().unwrap_or("").replace('\0', "\\0"))
-            .expect("embedded NUL removed");
-        *slot.borrow_mut() = message;
-    });
-    if error.is_some() { -1 } else { 0 }
-}
-
-fn output<T>(ptr: *mut T) -> Result<()> {
-    if ptr.is_null() {
-        Err("NULL output pointer".into())
-    } else {
-        Ok(())
-    }
-}
-
-unsafe fn text(ptr: *const c_char) -> Result<String> {
-    if ptr.is_null() {
-        return Err("NULL required string".into());
-    }
-    // SAFETY: caller supplies a readable NUL-terminated string.
-    unsafe { CStr::from_ptr(ptr) }
-        .to_str()
-        .map(str::to_owned)
-        .map_err(|e| e.to_string())
-}
-
-unsafe fn optional_text(ptr: *const c_char) -> Result<Option<String>> {
-    if ptr.is_null() {
-        Ok(None)
-    } else {
-        // SAFETY: same caller contract as text.
-        unsafe { text(ptr) }.map(Some)
-    }
-}
-
-unsafe fn bytes(ptr: *const u8, len: usize) -> Result<Vec<u8>> {
-    if len == 0 {
-        return Ok(Vec::new());
-    }
-    if ptr.is_null() {
-        return Err("NULL nonempty byte input".into());
-    }
-    if isize::try_from(len).is_err() {
-        return Err("byte input exceeds isize::MAX".into());
-    }
-    // SAFETY: caller supplies len readable bytes in one allocation.
-    Ok(unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec())
-}
-
 /// Read the thread-local UTF-8 error until the next bridge call on this thread.
 #[unsafe(no_mangle)]
 pub extern "C" fn reiny_last_error() -> *const c_char {
@@ -146,12 +37,7 @@ pub extern "C" fn reiny_last_error() -> *const c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn reiny_release(handle: u64) -> i32 {
     boundary(|| {
-        let object = registry()
-            .lock()
-            .map_err(|_| "handle registry poisoned")?
-            .objects
-            .remove(&handle)
-            .ok_or("invalid or released handle")?;
+        let object = remove(handle, false)?;
         // Drop outside the registry lock: destructors may block or panic.
         drop(object);
         Ok(())
@@ -271,110 +157,4 @@ export!(reiny_buffer_data(handle: u64, out: *mut *const u8) {
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn registry_ownership_and_pointer_errors() {
-        // SAFETY: all non-NULL pointers below reference live aligned test values;
-        // dangling input is rejected by its length before dereferencing.
-        unsafe {
-            let mut bus = 0;
-            assert_eq!(reiny_local_bus_new(&raw mut bus), 0);
-            let mut session = 99;
-            let id = CString::new("sender").unwrap();
-            let domain = CString::new("test").unwrap();
-            assert_eq!(
-                reiny_local_bus_connect(
-                    bus,
-                    id.as_ptr(),
-                    domain.as_ptr(),
-                    std::ptr::null(),
-                    &raw mut session,
-                ),
-                -1
-            );
-            assert_eq!(session, 99);
-            let mut len = 99;
-            assert_eq!(reiny_buffer_len(bus, &raw mut len), -1);
-            assert_eq!(len, 99);
-            assert_eq!(reiny_release(bus), 0);
-            assert_eq!(reiny_release(bus), -1);
-            assert_eq!(reiny_release(0), -1);
-            assert_eq!(reiny_local_bus_new(std::ptr::null_mut()), -1);
-            assert!(text(std::ptr::null()).is_err());
-            assert!(bytes(std::ptr::null(), 1).is_err());
-            assert!(bytes(std::ptr::dangling(), isize::MAX.unsigned_abs() + 1).is_err());
-            assert!(text([255u8, 0].as_ptr().cast()).is_err());
-            assert_eq!(bytes(std::ptr::null(), 0).unwrap(), Vec::<u8>::new());
-            let id = insert(Object::Buffer(Arc::new(vec![0, 255, 0]))).unwrap();
-            let mut data = std::ptr::null();
-            assert_eq!(reiny_buffer_len(id, &raw mut len), 0);
-            assert_eq!(reiny_buffer_data(id, &raw mut data), 0);
-            assert_eq!(std::slice::from_raw_parts(data, len), &[0, 255, 0]);
-            assert_eq!(reiny_release(id), 0);
-            let next = insert(Object::Buffer(Arc::new(vec![]))).unwrap();
-            assert!(next > id);
-            assert_eq!(reiny_release(next), 0);
-        }
-    }
-
-    #[test]
-    fn getters_return_independent_owned_buffers() {
-        // SAFETY: output pointers refer to distinct live aligned local values.
-        unsafe {
-            let message = insert(Object::Message(Arc::new(Message {
-                payload: vec![0, 255, 0],
-                source: "sender".into(),
-                source_port: "out".into(),
-                schema: Some(42),
-                timestamp: None,
-            })))
-            .unwrap();
-            let mut payload = 0;
-            let mut source = 0;
-            let mut source_port = 0;
-            let mut has = 99;
-            let mut value = 99;
-            assert_eq!(
-                reiny_message_schema(message, &raw mut has, &raw mut value),
-                0
-            );
-            assert_eq!((has, value), (1, 42));
-            assert_eq!(
-                reiny_message_timestamp(message, &raw mut has, &raw mut value),
-                0
-            );
-            assert_eq!((has, value), (0, 0));
-            assert_eq!(reiny_message_payload(message, &raw mut payload), 0);
-            assert_eq!(reiny_message_source(message, &raw mut source), 0);
-            assert_eq!(reiny_message_source_port(message, &raw mut source_port), 0);
-            assert_eq!(reiny_release(message), 0);
-            assert_eq!(*buffer(payload).unwrap(), [0, 255, 0]);
-            assert_eq!(*buffer(source).unwrap(), b"sender");
-            assert_eq!(*buffer(source_port).unwrap(), b"out");
-            assert_eq!(reiny_release(payload), 0);
-            assert_eq!(reiny_release(source), 0);
-            assert_eq!(reiny_release(source_port), 0);
-        }
-    }
-
-    #[test]
-    fn panic_is_an_error() {
-        assert_eq!(boundary(|| panic!("test panic")), -1);
-        // SAFETY: the thread-local error remains valid until the next bridge call.
-        unsafe {
-            assert!(
-                CStr::from_ptr(reiny_last_error())
-                    .to_str()
-                    .unwrap()
-                    .contains("panic")
-            );
-        }
-        assert_eq!(boundary(|| Ok(())), 0);
-        // SAFETY: the error pointer is consumed before any further bridge call.
-        unsafe {
-            assert_eq!(CStr::from_ptr(reiny_last_error()).to_bytes(), b"");
-        }
-    }
-}
+mod tests;
