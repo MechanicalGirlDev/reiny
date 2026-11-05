@@ -23,8 +23,9 @@ pub use acquire::GitSource;
 pub use apply_progress::{ApplyEvent, ApplyStatus};
 pub use artifacts::{BuildKind, BuildSpec, CargoBuild, CommandBuild};
 pub use deployment::{
-    DeploymentClient, DeploymentPhase, DeploymentStatus, ModuleObserver, ModuleStatus,
-    StopSubscription, TerminalSubscription, last_status, serve,
+    ComponentHostStatus, ComponentStatus, DeploymentClient, DeploymentPhase, DeploymentStatus,
+    ModuleObserver, ModuleStatus, RemoteOwnership, RemoteTreeCleanup, SshTarget, StopSubscription,
+    TerminalSubscription, last_status, reconcile_remote, remote_ownership, serve, serve_remote,
 };
 pub use modules::{
     ArtifactResource, DeploymentPlan, ExecutableModule, FailurePolicy, ModuleCall, ModuleError,
@@ -32,7 +33,17 @@ pub use modules::{
     ProviderSpec, ResolvedConnection, ResourceSpec, RestartPolicy, RunKind, RunSpec,
     check_manifest,
 };
-pub use prepared::{PreparedDeployment, PreparedModule};
+pub use prepared::{PreparedComponent, PreparedComponentHost, PreparedDeployment, PreparedModule};
+/// A registered component declaration with factory identity and configuration.
+pub type ComponentSpec = modules::ComponentSpec;
+/// A root-owned native component-host declaration.
+pub type ComponentHostSpec = modules::ComponentHostSpec;
+/// Explicit hosted data transport and visibility.
+pub type ComponentTransport = modules::ComponentTransport;
+/// A resolved host provider and executable build declaration.
+pub type ComponentHost = modules::ComponentHost;
+/// A resolved component instance with exact placement and endpoint bindings.
+pub type ComponentModule = modules::ComponentModule;
 pub use progress::{
     CancelToken, GroupKind, GroupState, PrepareError, PrepareEvent, PrepareObserver,
     PrepareOptions, PreparePhase, PrepareStatus,
@@ -43,6 +54,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Preparation event/control protocol version.
 pub const PREPARE_PROTOCOL_VERSION: u32 = 1;
 /// Public prepared deployment envelope version.
-pub const PREPARED_FILE_VERSION: u32 = 1;
+pub const PREPARED_FILE_VERSION: u32 = 2;
 /// Controlled apply event/control protocol version.
 pub const APPLY_PROTOCOL_VERSION: u32 = 1;

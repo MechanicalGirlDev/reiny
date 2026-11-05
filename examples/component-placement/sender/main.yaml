@@ -1,0 +1,8 @@
+version: 4
+component:
+  factory: sender
+  factory_revision: "1"
+in:
+  acknowledgement: {type: placement.Tick, replay: last}
+out:
+  data: {type: placement.Tick, retention: last}

@@ -8,7 +8,8 @@ format covers three roles:
 
 - a **root**, which names the deployment and configures providers,
 - a **composite module**, which calls child modules and wires their ports,
-- a **leaf module**, which declares one native executable with `run`.
+- a **leaf module**, which declares one native executable with `run`, or a
+  registered hosted component with `component` in version 4.
 
 A machine-readable description of the fields lives in
 [`main.schema.yaml`](main.schema.yaml) (JSON Schema written as YAML). The Rust
@@ -18,6 +19,61 @@ structs in `crates/reiny-launch/src/modules.rs`, `acquire.rs` and
 Older design records under [`design/`](design) describe `Reiny.toml` and
 `launch.yaml` launch configs. Those formats are gone; read those files as
 history only.
+
+## Application-owned endpoint semantics
+
+Executable definitions may add `semantics` to an input or output. It is a map
+of nonblank strings to nonblank strings, not discovery metadata:
+
+```yaml
+out:
+  observation:
+    type: example.Observation
+    semantics:
+      example.units: example.si.v1
+      example.identity: example.target-a.v1
+      example.ordering: example.xy.v1
+      example.time: example.monotonic-observation.v1
+      example.update: example.every-step.v1
+```
+
+The application owns the meaning and immutable revision of every assertion.
+These keys are examples, not core vocabulary. A value may identify an
+application specification covering per-field units, a concrete target, ordered
+elements, clock/epoch/timestamp meaning, or freshness and update requirements.
+Change the value when that meaning changes. RPC assertions describe the complete
+request/response interaction; applications can use distinct request/response keys.
+No implicit unit conversion, clock conversion, reordering or compatibility
+negotiation occurs. An explicit application component must implement conversions
+and declare the respective input and output contracts.
+
+The resolver compares assertions on declared typed boundaries. Compiled graph
+admission compares the entire map on every exact input-source edge, including
+each fan-in member. A same-type, same-semantics alternative endpoint is never
+selected instead. Caller connections and composite output aliases cannot
+replace assertions. Composite input declarations must agree with their source;
+output aliases preserve the original executable contract.
+
+Opened-port reports retain these declarations alongside independently compiled
+protobuf names and fingerprints. Admission rejects a report that erases or
+changes its binding's assertions. This proves agreement of declarations, not
+application correctness: the SDK does not inspect payload units, target IDs,
+array order, timestamps, freshness or actual update frequency. Authors remain
+responsible for those behaviors, and for choosing truthful contract revisions.
+Existing transport policies and step execution rules remain independent.
+
+This is an additive field in manifest versions 3/4 and bindings/report version 3,
+not a change to protobuf fingerprints or wire keys. An absent or empty map means
+unspecified and is compatible only with another empty map; one-sided semantics
+are rejected. Empty maps are omitted when serialized, preserving legacy files.
+Older binaries' strict endpoint parsers reject nonempty `semantics` as an unknown
+field. Upgrade every owner and endpoint consuming such contracts together; do
+not strip the field for mixed-version operation. Rust callers constructing a
+complete struct literal must add the field or use the existing default.
+
+The static `compile_ports`/Link port-table format does not support this field and
+rejects it rather than claiming semantic admission. This contract applies to
+resolved module bindings and their compiled-report graph admission.
 
 ## Root
 
@@ -43,7 +99,9 @@ modules:
       ping: { from: "ping.ping" }
 ```
 
-`version` is always `3`. Only the root sets `deployment`, `domain` and
+Legacy manifests use `version: 3`; `version: 4` also supports explicit hosted
+component planning and execution. A version 4 root may reuse version 3 modules. Version 3
+rejects `component`, `component_hosts` and `placement`. Only the root sets `deployment`, `domain` and
 `providers`. The logical domain is a Reiny key-space segment, independent of
 `ROS_DOMAIN_ID`; it is not an ACL or an authorization boundary.
 
@@ -139,10 +197,145 @@ build:
   env: { RUSTFLAGS: "-C debuginfo=1" }
 ```
 
-Every runtime manifest must declare `run` or a nonempty `modules` mapping.
-`run` and `modules` are mutually exclusive in one file. `build` is only
+Every runtime manifest must declare exactly one of `run`, `component` (version 4),
+or a nonempty `modules` mapping. `build` at the module top level is only
 allowed next to `run`. Without `build`, the executable must already exist in
 the provider's `bin_dir`.
+
+### Hosted component plans (version 4)
+
+A component leaf names a factory registration and its application-defined revision:
+
+```yaml
+version: 4
+component:
+  factory: sensor
+  factory_revision: "1"
+  config: sensor.yaml
+  config_assets: [calibration.bin]
+out:
+  state: {type: robot.State, retention: last}
+```
+
+The root supplies process hosts and assigns every full instance namespace:
+
+```yaml
+version: 4
+deployment: robot
+providers:
+  local:
+    type: process
+    bin_dir: target/debug
+    connect: ["tcp/127.0.0.1:7447"]
+component_hosts:
+  sensors: {provider: local, bin: robot-component-host, on_failure: report}
+placement:
+  robot/sensor: sensors
+modules:
+  sensor: {source: sensor}
+```
+
+`component_hosts` and `placement` belong only to the deployment root. Each host
+uses a root `process` provider, a binary name, optional `build` (with the same
+builder schema, paths relative to the root), `restart: manual`, and
+`on_failure: report` or `suspend_deployment`. Planning neither runs a builder
+nor requires its executable outputs to exist.
+
+Placement must contain exactly the instantiated component namespaces, not
+definition paths or composite namespaces. Missing, duplicate, unknown and empty
+assignments fail, as do unused hosts and unknown or non-process providers.
+Factory identifiers must be valid names and factory revisions must be nonempty.
+The staged owner checks registration availability and revision agreement against
+each host's authenticated compiled report before Run. Planning does not execute
+factories.
+
+Components cannot declare `run`, a module-level `build`, `owned_children`,
+executable companions or argv. Calls may replace `config` and `config_assets`
+using the existing caller-relative and selected-config-origin rules, but may
+not supply `args`, even `[]`. Endpoint policies remain definition-owned.
+Resolved bindings retain their independent version and their original exact
+source namespace/port pairs; placement grants no executable or child authority.
+
+`reiny plan --json` exposes separate `components` and
+`component_hosts` collections. Legacy processes remain in `nodes`.
+The human-readable CLI renderer lists hosts, factory revisions and placements.
+Mixing hosted components with legacy `run` processes,
+automatic hosted restart, rolling replacement, and in-process hosts is unsupported.
+
+Hosted preparation freezes host executables, component settings, declared config
+assets and exact placements in prepared-file version 2. Execution starts actual
+SDK ProcessHosts through private inherited bootstrap channels. The owner validates
+every compiled report and completes the Prepare/Commit barrier before sending
+Run. Identical re-apply retains live host PIDs and generations; changes require
+manual whole-graph recovery. Status retains host exits and component failures.
+Cooperative stop waits for owned hosts to exit and be reaped; a dead owner's
+retained status is not a postmortem cleanup receipt.
+
+Legacy-only v3/v4 preparation and prepared-file version 1 remain supported.
+Hosted bundles are unsupported and fail explicitly. Hosted execution sends the
+protocol's `routed_zenoh` transport variant with the complete verified
+namespace-to-host placement map and explicit Zenoh settings. Each ProcessHost
+checks that the map assigns exactly its received instances to its authenticated
+bootstrap host ID before constructing components. Placement selects Local for
+same-host reads and Zenoh for remote reads; the original named bindings still
+grant all endpoint authority. Unknown namespaces fail rather than falling back.
+Map size is bounded by the host's instance limit and the protocol frame limit.
+
+Owned publications remain mirrored non-atomically to Local and Zenoh, including
+when all declared consumers are local. Shared native values retain their Arc
+identity on local delivery, but the mirrored network publication still encodes.
+RoutedZenoh does **not** provide zero-serialization hosted publication. A failed publish
+may already have reached one transport and must not be retried as a transaction.
+Control presence, retained queries and RPC responders remain visible on both
+transports; current liveliness is never used to infer absence of remote readers.
+
+Manual ProcessHost owners may still use the original `zenoh` variant. The
+control envelope remains version 1: this is not capability negotiation.
+Older host binaries reject the unknown `routed_zenoh` variant while decoding
+Prepare, before construction or commit. The owner aborts admission and cleans
+up the graph; it never falls back to pure Zenoh. Rebuild old host binaries to
+use public hosted execution. Unsupported transport configuration fields fail
+rather than being silently discarded. This path does not provide remote-machine
+supervision or distributed synchronous step execution.
+
+Applications that already own authenticated process connections can use the
+separate [native process-step API](process-steps.md). That explicit owner does
+not add step execution to manifests or provide remote process supervision.
+
+### Explicit Local-only hosts
+
+Set `component_hosts.<name>.transport: local` to opt into one isolated Local
+data bus. Omitting `transport` retains `routed_zenoh` and its mirrored network
+publication behavior. This is a host setting, not a new provider:
+
+```yaml
+providers:
+  native: {type: process, bin_dir: target/debug}
+component_hosts:
+  control: {provider: native, bin: control-host, transport: local}
+```
+
+Every input edge touching a Local-only host must have its source and destination
+on that same host, including stream fan-in and RPC. Planning and prepared-file
+verification reject crossing edges before any host is spawned. Local hosts also
+reject provider `connect` endpoints or `zenoh_config`; network intent is never
+silently ignored. The host independently validates the bounded placement map,
+its exact assigned namespaces against its bootstrap identity, and that its own
+input sources are local before constructing components.
+
+Local-only data, presence and RPC endpoints are deliberately **not visible to
+network bus tools or other hosts**. Owner control uses its existing private
+channel. This explicit isolation is not automatic route thinning. Local-only
+ProcessHosts work without the SDK's `zenoh` feature and never open a Zenoh
+session. Older host binaries reject the protocol's `local` variant; no fallback
+or capability negotiation is attempted.
+
+Within such a host, matching native SDK `send_shared` / `recv_shared` types can
+retain the same immutable Arc without protobuf serialization. Owned sends,
+byte readers, or incompatible Rust representations still require encoding.
+The public process fixture proves the shared two-component path with both Arc
+identity and an instrumented zero encoding count; the identical default-routed
+fixture encodes its two publications as a positive control.
 
 Cargo builds accept `manifest`, `package`, `profile`, `features`,
 `default_features`, `locked`, `cwd`, `target`, and string-valued `env`.

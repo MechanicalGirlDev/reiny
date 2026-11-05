@@ -1,0 +1,26 @@
+[workspace]
+
+[package]
+name = "component-placement"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+reiny = { path = "../../crates/reiny" }
+prost = "0.14"
+toml = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+
+[[bin]]
+name = "placement-sender"
+path = "src/bin/sender.rs"
+
+[[bin]]
+name = "placement-receiver"
+path = "src/bin/receiver.rs"
+
+[[bin]]
+name = "placement-local"
+path = "src/bin/local.rs"

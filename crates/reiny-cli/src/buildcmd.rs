@@ -27,9 +27,11 @@ pub(crate) fn build(release: bool, events: Option<Events>, extra: &[String]) -> 
     )?;
     if !protocol.enabled() {
         println!(
-            "prepared deployment '{}' ({} executable modules, {} resources)",
+            "prepared deployment '{}' ({} executable modules, {} component hosts, {} components, {} resources)",
             prepared.deployment,
             prepared.nodes.len(),
+            prepared.component_hosts.len(),
+            prepared.components.len(),
             prepared.resources.len(),
         );
     }

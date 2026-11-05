@@ -1,0 +1,5 @@
+{
+  "connect": {"endpoints": []},
+  "listen": {"endpoints": ["tcp/127.0.0.1:37458"]},
+  "scouting": {"multicast": {"enabled": false}}
+}

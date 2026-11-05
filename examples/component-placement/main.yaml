@@ -1,0 +1,33 @@
+version: 4
+deployment: placement
+domain: placement
+providers:
+  producer:
+    type: process
+    bin_dir: target/debug
+    zenoh_config: sender-zenoh.json
+  consumer:
+    type: process
+    bin_dir: target/debug
+    zenoh_config: zenoh.json
+component_hosts:
+  producer:
+    provider: producer
+    bin: placement-sender
+    on_failure: report
+  consumer:
+    provider: consumer
+    bin: placement-receiver
+    on_failure: report
+placement:
+  placement/sender: producer
+  placement/receiver: consumer
+modules:
+  sender:
+    source: sender
+    in:
+      acknowledgement: {from: receiver.acknowledgement}
+  receiver:
+    source: receiver
+    in:
+      data: {from: sender.data}

@@ -18,6 +18,106 @@ const CONSUMER: &str =
     "version: 3\nrun: {provider: process, bin: consumer}\nin:\n  state: {type: test.State}\n";
 
 #[test]
+fn semantic_assertions_parse_resolve_and_reject_mismatch_or_caller_override() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = format!(
+        "{PROVIDER}modules:\n  a: {{source: a}}\n  c:\n    source: c\n    in:\n      state: {{from: a.state}}\n"
+    );
+    write(fixture.path(), "main.yaml", &root);
+    let assertions = "{units: 'app.si.v1', identity: 'app.target.v1', ordering: 'app.xy.v1', time: 'app.clock.v1', update: 'app.step.v1'}";
+    let producer = PRODUCER.replace(
+        "{type: test.State}",
+        &format!("{{type: test.State, semantics: {assertions}}}"),
+    );
+    let consumer = CONSUMER.replace(
+        "{type: test.State}",
+        &format!("{{type: test.State, semantics: {assertions}}}"),
+    );
+    write(fixture.path(), "a/main.yaml", &producer);
+    write(fixture.path(), "c/main.yaml", &consumer);
+    let plan = DeploymentPlan::load(fixture.path(), false).expect("matching assertions");
+    let output = &plan.nodes[0].bindings.outputs["state"].contract;
+    let input = &plan.nodes[1].bindings.inputs["state"].contract;
+    assert_eq!(input.semantics, output.semantics);
+    assert_eq!(input.semantics.len(), 5);
+    let json = serde_json::to_string(&plan.nodes[1].bindings).expect("serialize");
+    let decoded: reiny_core::bindings::ModuleBindings =
+        serde_json::from_str(&json).expect("bindings roundtrip");
+    assert_eq!(decoded, plan.nodes[1].bindings);
+    for key in ["si", "target", "xy", "clock", "step"] {
+        write(
+            fixture.path(),
+            "c/main.yaml",
+            &consumer.replace(&format!("app.{key}.v1"), &format!("app.{key}.v2")),
+        );
+        assert!(DeploymentPlan::load(fixture.path(), false).is_err());
+    }
+    write(fixture.path(), "c/main.yaml", CONSUMER);
+    assert!(DeploymentPlan::load(fixture.path(), false).is_err());
+    write(fixture.path(), "a/main.yaml", PRODUCER);
+    let legacy = DeploymentPlan::load(fixture.path(), false).expect("legacy absent");
+    assert!(serde_json::to_value(&legacy.nodes[0].bindings).expect("json")
+        ["outputs"]["state"]["contract"].get("semantics").is_none());
+    write(
+        fixture.path(),
+        "main.yaml",
+        &root.replace(
+            "{from: a.state}",
+            &format!("{{from: a.state, semantics: {assertions}}}"),
+        ),
+    );
+    assert!(DeploymentPlan::load(fixture.path(), false).is_err());
+}
+
+#[test]
+fn blank_semantic_assertions_fail_contract_validation() {
+    for assertions in ["{'': v1}", "{units: ''}", "{' ': v1}", "{units: ' '}"] {
+        let fixture = tempfile::tempdir().expect("fixture");
+        write(
+            fixture.path(),
+            "main.yaml",
+            &format!(
+                "{PROVIDER}run: {{provider: process, bin: app}}\nout:\n  state: {{type: test.State, semantics: {assertions}}}\n"
+            ),
+        );
+        assert!(DeploymentPlan::load(fixture.path(), false).is_err());
+    }
+}
+
+#[test]
+fn semantic_contracts_survive_typed_composite_output_aliases() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    write(
+        fixture.path(),
+        "main.yaml",
+        &format!(
+            "{PROVIDER}modules:\n  branch: {{source: branch}}\n  c:\n    source: c\n    in: {{state: {{from: branch.state}}}}\n"
+        ),
+    );
+    write(
+        fixture.path(),
+        "branch/main.yaml",
+        "version: 3\nmodules:\n  a: {source: a}\nout:\n  state: {type: test.State, from: a.state}\n",
+    );
+    for (path, definition) in [("branch/a/main.yaml", PRODUCER), ("c/main.yaml", CONSUMER)] {
+        write(
+            fixture.path(),
+            path,
+            &definition.replace(
+                "{type: test.State}",
+                "{type: test.State, semantics: {units: app.si.v1}}",
+            ),
+        );
+    }
+    let plan = DeploymentPlan::load(fixture.path(), false).expect("forwarded semantics");
+    assert_eq!(
+        plan.nodes[1].bindings.inputs["state"].sources,
+        vec![endpoint("test/branch/a", "state")]
+    );
+    assert_eq!(plan.connections[0].contract.semantics["units"], "app.si.v1");
+}
+
+#[test]
 fn manifest_qos_profiles_are_explicit_and_legacy_reliable_is_rejected() {
     for (tag, expected) in [
         ("default", QosProfile::Default),

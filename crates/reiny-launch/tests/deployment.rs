@@ -362,6 +362,8 @@ impl Harness {
             deployment,
             domain: "deployment-tests".into(),
             nodes,
+            components: Vec::new(),
+            component_hosts: BTreeMap::new(),
             resources: BTreeMap::new(),
         })
     }

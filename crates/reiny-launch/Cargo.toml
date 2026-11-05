@@ -31,3 +31,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [lints]
 workspace = true
+
+[[test]]
+name = "hosted_owner"
+harness = false

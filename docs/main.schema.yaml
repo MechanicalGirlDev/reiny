@@ -1,6 +1,6 @@
 # JSON Schema (draft 2020-12) for reiny `main.yaml`, written as YAML.
 # Mirrors ModuleManifest in crates/reiny-launch/src/modules.rs; the Rust
-# structs win on any disagreement. Cross-field rules (run vs modules, build
+# structs win on any disagreement. Cross-field rules (leaf kind, build
 # only with run, root-only keys, port wiring) are checked by reiny, not here.
 $schema: "https://json-schema.org/draft/2020-12/schema"
 title: reiny main.yaml
@@ -11,12 +11,34 @@ oneOf:
   - required: [run]
     properties:
       modules: { maxProperties: 0 }
+    not: { required: [component] }
+  - required: [component]
+    properties:
+      modules: { maxProperties: 0 }
+      owned_children: { maxProperties: 0 }
+    not: { anyOf: [{required: [run]}, {required: [build]}] }
   - required: [modules]
     properties:
       modules: { minProperties: 1 }
-    not: { required: [run] }
+    not: { anyOf: [{required: [run]}, {required: [component]}] }
+allOf:
+  - if:
+      properties:
+        version: {const: 3}
+    then:
+      not:
+        anyOf:
+          - required: [component]
+          - required: [component_hosts]
+          - required: [placement]
+  - if:
+      anyOf:
+        - required: [component_hosts]
+        - required: [placement]
+    then:
+      required: [deployment]
 properties:
-  version: { const: 3 }
+  version: { enum: [3, 4] }
   deployment: { type: string, description: "Root only. Deployment identity." }
   domain: { type: string, description: "Root only. Defaults to the deployment name." }
   providers:
@@ -26,6 +48,14 @@ properties:
     type: object
     additionalProperties: { $ref: "#/$defs/moduleCall" }
   run: { $ref: "#/$defs/run" }
+  component: { $ref: "#/$defs/component" }
+  component_hosts:
+    type: object
+    additionalProperties: { $ref: "#/$defs/componentHost" }
+  placement:
+    type: object
+    description: "Root only. Exact full component instance namespaces to named process hosts."
+    additionalProperties: {type: string, minLength: 1}
   build: { $ref: "#/$defs/build" }
   in: { $ref: "#/$defs/ports" }
   out: { $ref: "#/$defs/ports" }
@@ -41,10 +71,38 @@ properties:
     type: object
     additionalProperties: { $ref: "#/$defs/resource" }
 $defs:
+  component:
+    type: object
+    additionalProperties: false
+    required: [factory, factory_revision]
+    properties:
+      factory: {type: string, minLength: 1, pattern: "^(?!in$)[A-Za-z0-9_-]+$"}
+      factory_revision: {type: string, minLength: 1, pattern: "\\S"}
+      config: {type: string}
+      config_assets: {type: array, items: {type: string}, default: []}
+  componentHost:
+    type: object
+    additionalProperties: false
+    required: [provider, bin]
+    properties:
+      provider: {type: string, minLength: 1}
+      bin: {type: string, minLength: 1, pattern: "^(?!in$)[A-Za-z0-9_-]+$"}
+      transport:
+        enum: [routed_zenoh, local]
+        default: routed_zenoh
+        description: "Local explicitly disables network data visibility and forbids all edges crossing this host boundary."
+      build: {$ref: "#/$defs/build"}
+      restart: {const: manual, default: manual}
+      on_failure: {enum: [report, suspend_deployment], default: report}
   port:
     type: object
     additionalProperties: false
     properties:
+      semantics:
+        type: object
+        description: "Application-owned immutable assertions; exact map equality is required on connected endpoints."
+        propertyNames: { type: string, pattern: '\S' }
+        additionalProperties: { type: string, pattern: '\S' }
       type: { type: string }
       kind: { enum: [stream, rpc], default: stream }
       response: { type: string, description: "Required response type for RPC definitions." }
@@ -74,6 +132,7 @@ $defs:
     additionalProperties: false
     description: "Invocation wiring and optional type assertions; policies stay app-owned."
     properties:
+      semantics: { type: object, maxProperties: 0 }
       type: { type: string }
       from: { $ref: "#/$defs/sources" }
       kind: { const: stream }
@@ -116,7 +175,7 @@ $defs:
         additionalProperties: { type: string }
       in: { $ref: "#/$defs/connections" }
       out: { $ref: "#/$defs/assertions" }
-      config: { type: string, description: "Caller-relative replacement for a leaf's run.config." }
+      config: { type: string, description: "Caller-relative replacement for an executable or component leaf's config." }
       config_assets: { type: array, items: { type: string }, description: "Replace a leaf's assets, including with an empty list. Relative to the selected config's parent, not the caller. Omission retains app assets; nonempty assets require a selected config. Absolute paths are rejected." }
       args: { type: array, items: { type: string }, description: "Replace a leaf's args, including with an empty list." }
   provider:

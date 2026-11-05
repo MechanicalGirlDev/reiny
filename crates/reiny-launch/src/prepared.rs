@@ -49,6 +49,16 @@ pub struct PreparedDeployment {
     pub domain: String,
     /// All prepared executable modules.
     pub nodes: Vec<PreparedModule>,
+    /// Immutable hosted instances; never executed by the legacy process owner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<PreparedComponent>,
+    /// Immutable process hosts keyed by their placement identity.
+    #[serde(
+        default,
+        deserialize_with = "hosted::deserialize_hosts",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub component_hosts: BTreeMap<String, PreparedComponentHost>,
     /// Managed file artifacts keyed by stable address.
     pub resources: std::collections::BTreeMap<String, PathBuf>,
 }
@@ -75,7 +85,11 @@ impl PreparedDeployment {
         );
         self.verify()?;
         let envelope = Envelope {
-            version: crate::PREPARED_FILE_VERSION,
+            version: if self.components.is_empty() {
+                1
+            } else {
+                crate::PREPARED_FILE_VERSION
+            },
             reiny_version: crate::VERSION.to_owned(),
             prepare_protocol: crate::PREPARE_PROTOCOL_VERSION,
             payload_sha256: digest(&serde_json::to_vec(self)?),
@@ -100,13 +114,33 @@ impl PreparedDeployment {
     /// Load a supported envelope and verify its payload and all frozen bytes.
     /// This does not resolve a plan, invoke a builder, or repair artifacts.
     pub fn load_file(path: &Path) -> Result<Self> {
-        let envelope: Envelope = serde_json::from_slice(&std::fs::read(path)?)
+        let bytes = std::fs::read(path)?;
+        let envelope: Envelope = serde_json::from_slice(&bytes)
             .with_context(|| format!("parse prepared file {}", path.display()))?;
         ensure!(
-            envelope.version == crate::PREPARED_FILE_VERSION,
+            matches!(envelope.version, 1 | crate::PREPARED_FILE_VERSION),
             "unsupported prepared file version {}",
             envelope.version
         );
+        ensure!(
+            envelope.version != 1
+                || (envelope.deployment.components.is_empty()
+                    && envelope.deployment.component_hosts.is_empty()),
+            "version 1 prepared files cannot contain hosted components"
+        );
+        ensure!(
+            envelope.version != 2 || !envelope.deployment.components.is_empty(),
+            "version 2 prepared files require hosted components"
+        );
+        if envelope.version == 1 {
+            // New optional fields must not widen the original strict v1 shape.
+            let raw: serde_json::Value = serde_json::from_slice(&bytes)?;
+            ensure!(
+                raw["deployment"].get("components").is_none()
+                    && raw["deployment"].get("component_hosts").is_none(),
+                "version 1 prepared files cannot declare hosted fields"
+            );
+        }
         ensure!(
             envelope.prepare_protocol == crate::PREPARE_PROTOCOL_VERSION,
             "unsupported prepare protocol {}",
@@ -125,129 +159,15 @@ impl PreparedDeployment {
         envelope.deployment.verify()?;
         Ok(envelope.deployment)
     }
-
-    /// Validate metadata, runtime contracts, paths, fingerprints and frozen bytes.
-    ///
-    /// Original build outputs/config sources are not consulted. Application
-    /// working directories must still exist. Integrity hashes are not signatures.
-    pub fn verify(&self) -> Result<()> {
-        self.verify_with(&crate::CancelToken::default())
-    }
-
-    pub(crate) fn verify_with(&self, cancel: &crate::CancelToken) -> Result<()> {
-        cancel.check()?;
-        crate::deployment::validate_prepared(self)?;
-        ensure!(
-            self.root.is_absolute() && self.root.is_dir(),
-            "invalid prepared root"
-        );
-        reiny_core::bindings::validate_namespace(&self.deployment)
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-        reiny_core::bindings::validate_namespace(&self.domain)
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-        let mut directories = std::collections::BTreeSet::new();
-        for node in &self.nodes {
-            cancel.check()?;
-            node.bindings
-                .validate()
-                .map_err(|error| anyhow::anyhow!("{}: {error}", node.namespace))?;
-            ensure!(
-                node.provider.kind == crate::ProviderKind::Process,
-                "executable requires process provider"
-            );
-            ensure!(
-                node.provider.bin_dir.is_absolute(),
-                "provider bin directory is not absolute"
-            );
-            let requested: std::collections::BTreeSet<_> = std::iter::once(&node.run.bin)
-                .chain(&node.run.companions)
-                .collect();
-            let bound: std::collections::BTreeSet<_> = node.bindings.executables.iter().collect();
-            ensure!(
-                requested == bound,
-                "prepared executable declarations do not match bindings"
-            );
-            for bin in requested {
-                artifacts::validate_executable_name(bin)?;
-                contained_file(
-                    &node.bundle_dir,
-                    &node.bundle_dir.join(artifacts::executable_name(bin)),
-                )?;
-            }
-            ensure!(
-                node.executable
-                    == node
-                        .bundle_dir
-                        .join(artifacts::executable_name(&node.run.bin)),
-                "prepared executable does not match run.bin"
-            );
-            directories.insert(node.bundle_dir.clone());
-            match (&node.run.config, &node.config_bundle_dir, &node.config_dir) {
-                (Some(config), Some(bundle), Some(origin)) => {
-                    contained_file(bundle, config)?;
-                    for asset in &node.run.config_assets {
-                        ensure!(
-                            !asset.is_absolute() && !asset.has_root(),
-                            "config asset is not relative"
-                        );
-                        contained_file(bundle, &lexical_absolute(&origin.join(asset))?)?;
-                    }
-                    directories.insert(bundle.clone());
-                }
-                (None, None, None) => ensure!(
-                    node.run.config_assets.is_empty(),
-                    "config assets require a config"
-                ),
-                _ => anyhow::bail!("prepared config bundle metadata is inconsistent"),
-            }
-            if let Some(config) = &node.provider.zenoh_config {
-                let bundle = config
-                    .parent()
-                    .context("Zenoh config has no bundle directory")?;
-                contained_file(bundle, config)?;
-                directories.insert(bundle.to_owned());
-            }
-            ensure!(
-                fingerprint(node, &self.domain)? == node.fingerprint,
-                "prepared module {} fingerprint mismatch",
-                node.namespace
-            );
-        }
-        for (address, resource) in &self.resources {
-            reiny_core::bindings::validate_namespace(address)
-                .map_err(|error| anyhow::anyhow!("{error}"))?;
-            ensure!(
-                address.starts_with(&format!("{}/", self.deployment)),
-                "resource outside deployment"
-            );
-            let bundle = resource
-                .parent()
-                .context("resource has no bundle directory")?;
-            contained_file(bundle, resource)?;
-            directories.insert(bundle.to_owned());
-        }
-        for directory in directories {
-            artifacts::verify_directory(&directory, cancel)?;
-        }
-        Ok(())
-    }
 }
 
-fn contained_file(directory: &Path, path: &Path) -> Result<()> {
-    ensure!(
-        directory.is_absolute() && path.is_absolute() && path.is_file(),
-        "missing absolute prepared file: {}",
-        path.display()
-    );
-    let canonical_directory = directory.canonicalize()?;
-    let canonical_path = path.canonicalize()?;
-    ensure!(
-        path.starts_with(directory) && canonical_path.starts_with(&canonical_directory),
-        "prepared file escapes bundle: {}",
-        path.display()
-    );
-    Ok(())
-}
+mod config;
+mod hosted;
+mod hosted_verify;
+mod verify;
+pub(crate) use config::{config_files, freeze_config, lexical_absolute};
+pub use hosted::{PreparedComponent, PreparedComponentHost};
+pub(crate) use hosted::{component_fingerprint, host_fingerprint};
 
 pub(crate) fn fingerprint(node: &PreparedModule, domain: &str) -> Result<String> {
     let mut hash = Sha256::new();
@@ -284,87 +204,6 @@ impl DeploymentPlan {
     ) -> Result<PreparedDeployment, crate::PrepareError> {
         crate::materialize::prepare(self, options)
     }
-}
-
-pub(crate) fn config_files(
-    config: &Path,
-    assets: &[PathBuf],
-) -> Result<(BTreeMap<PathBuf, PathBuf>, PathBuf)> {
-    let config = lexical_absolute(config)?;
-    let parent = config.parent().context("config has no parent directory")?;
-    let mut sources = vec![config.clone()];
-    let mut root = parent.to_owned();
-    for asset in assets {
-        ensure!(
-            !asset.as_os_str().is_empty()
-                && !asset.has_root()
-                && asset
-                    .components()
-                    .all(|part| !matches!(part, Component::Prefix(_))),
-            "config asset must be relative to the selected config: {}",
-            asset.display()
-        );
-        let source = lexical_absolute(&parent.join(asset))?;
-        ensure!(
-            !sources.contains(&source),
-            "conflicting config bundle path {}",
-            asset.display()
-        );
-        while !source.starts_with(&root) {
-            ensure!(root.pop(), "config files have no common filesystem root");
-        }
-        sources.push(source);
-    }
-    let entry = config.strip_prefix(&root)?.to_owned();
-    let mut files = BTreeMap::new();
-    for source in sources {
-        ensure!(
-            source.is_file(),
-            "config file not found: {}",
-            source.display()
-        );
-        files.insert(source.strip_prefix(&root)?.to_owned(), source);
-    }
-    Ok((files, entry))
-}
-
-pub(crate) fn freeze_config(
-    files: &BTreeMap<PathBuf, PathBuf>,
-    entry: &Path,
-    cache: &Path,
-    cancel: &crate::CancelToken,
-) -> Result<(PathBuf, PathBuf)> {
-    let staged = artifacts::stage_files_with(files, cache, entry, cancel)?;
-    let bundle = staged
-        .ancestors()
-        .nth(entry.components().count())
-        .context("staged config has no bundle directory")?
-        .to_owned();
-    Ok((staged, bundle))
-}
-
-pub(crate) fn lexical_absolute(path: &Path) -> Result<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-            Component::CurDir => {}
-            Component::ParentDir => ensure!(
-                normalized.pop(),
-                "config path traverses beyond filesystem root: {}",
-                path.display()
-            ),
-        }
-    }
-    ensure!(normalized.is_absolute(), "config source is not absolute");
-    Ok(normalized)
 }
 
 pub(crate) fn digest(bytes: &[u8]) -> String {
