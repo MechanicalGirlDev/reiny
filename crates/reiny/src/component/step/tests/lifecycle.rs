@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "unbounded.rs"]
+mod unbounded;
+
 #[tokio::test]
 async fn cancellation_after_dispatch_faults_and_cleanup_is_separate() -> crate::Result<()> {
     let mut fixture = fixture(Behavior::StopWait)?;

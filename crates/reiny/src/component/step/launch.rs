@@ -11,6 +11,7 @@ use super::{
     driver::Driver,
     worker::{Executor, Factory},
 };
+use crate::component::{LocalHostOptions, options::HostConfiguration};
 use crate::{
     component::{ComponentHost, ComponentInstanceSpec, ComponentRegistry, HostHandle, HostOptions},
     step::{StepGraph, StepScheduler},
@@ -23,6 +24,31 @@ impl ComponentHost {
     pub fn launch_with_steps(
         registry: Arc<ComponentRegistry>,
         options: HostOptions,
+        instances: Vec<ComponentInstanceSpec>,
+        graph: StepGraph,
+        initial_time: Duration,
+    ) -> Result<(HostHandle, StepHandle), StepLaunchError> {
+        Self::launch_steps(registry, options.into(), instances, graph, initial_time)
+    }
+
+    /// Launch Local managed steps with optional startup and joined-stop budgets.
+    ///
+    /// Step budgets are chosen separately with `StepHandle::try_step_with_timeout`.
+    pub fn launch_local_with_steps(
+        registry: Arc<ComponentRegistry>,
+        options: LocalHostOptions,
+        instances: Vec<ComponentInstanceSpec>,
+        graph: StepGraph,
+        initial_time: Duration,
+    ) -> Result<(HostHandle, StepHandle), StepLaunchError> {
+        Self::launch_steps(registry, options.into(), instances, graph, initial_time)
+    }
+
+    // These are the existing launch inputs: registry, lifecycle resources,
+    // instances, immutable step routing and initial logical time.
+    fn launch_steps(
+        registry: Arc<ComponentRegistry>,
+        options: HostConfiguration,
         mut instances: Vec<ComponentInstanceSpec>,
         graph: StepGraph,
         initial_time: Duration,
@@ -65,6 +91,7 @@ impl ComponentHost {
             gate: gate.clone(),
             requests,
             plan: scheduler.plan.clone(),
+            local: true,
         };
         let mut adapted = ComponentRegistry::new();
         let mut calls = BTreeMap::new();

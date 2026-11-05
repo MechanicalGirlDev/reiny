@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "unbounded.rs"]
+mod unbounded;
+
 #[tokio::test]
 async fn failures_stop_peers_and_skip_panicked_components_cleanup() {
     for (behavior, code, panicked, startup) in [

@@ -1,3 +1,4 @@
+use super::super::deadline::Deadline;
 use super::{
     Command, ComponentPhase, Coordinator, Event, HostError, HostErrorCode, HostOutcome, HostPhase,
     StopReason, phase,
@@ -24,13 +25,14 @@ impl Coordinator {
             context.inner.shutdown_now();
         }
         let mut cleanup = Vec::new();
-        let deadline = tokio::time::sleep(self.options.stop_timeout);
-        tokio::pin!(deadline);
+        let deadline = Deadline::after(self.options.stop_timeout);
+        let elapsed = deadline.elapsed();
+        tokio::pin!(elapsed);
         let mut events_open = true;
         while !self.tasks.is_empty() {
             tokio::select! {
                 biased;
-                () = &mut deadline => break,
+                () = &mut elapsed => break,
                 event = self.events.recv(), if events_open => match event {
                     Some(Event::Opened(context)) => context.inner.shutdown_now(),
                     Some(Event::Prepared(_, ticket)) => drop(ticket),
@@ -72,10 +74,7 @@ impl Coordinator {
                 }
             }
         }
-        if !self
-            .join_step_driver(deadline.deadline(), &mut cleanup)
-            .await
-        {
+        if !self.join_step_driver(deadline, &mut cleanup).await {
             return HostOutcome::Unresponsive {
                 primary,
                 cleanup,
@@ -109,20 +108,16 @@ impl Coordinator {
         }
     }
 
-    async fn join_step_driver(
-        &mut self,
-        deadline: tokio::time::Instant,
-        cleanup: &mut Vec<HostError>,
-    ) -> bool {
+    async fn join_step_driver(&mut self, deadline: Deadline, cleanup: &mut Vec<HostError>) -> bool {
         let Some(mut driver) = self.step_driver.take() else {
             return true;
         };
-        match tokio::time::timeout_at(deadline, &mut driver).await {
+        match deadline.scope(&mut driver).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 cleanup.push(HostError::new(HostErrorCode::Step, None, error.to_string()));
             }
-            Err(_) => {
+            Err(()) => {
                 driver.abort();
                 return false;
             }

@@ -11,9 +11,10 @@ use super::staged::Request;
 use super::status::phase;
 use super::worker::{Command, Event};
 use super::{
-    ComponentContext, ComponentPhase, HostError, HostErrorCode, HostOptions, HostOutcome,
-    HostPhase, HostStatus, StopReason,
+    ComponentContext, ComponentPhase, HostError, HostErrorCode, HostOutcome, HostPhase, HostStatus,
+    StopReason,
 };
+use super::{deadline::Deadline, options::HostConfiguration};
 
 mod admission;
 mod cleanup;
@@ -30,7 +31,7 @@ pub(super) struct Coordinator {
     pub contexts: BTreeMap<String, Arc<ComponentContext>>,
     pub prepared: BTreeMap<String, PreparedAdmission>,
     pub ready: Vec<ReadyAdmission>,
-    pub options: HostOptions,
+    pub options: HostConfiguration,
     pub control: mpsc::Receiver<Request>,
     pub reports: watch::Sender<Option<Vec<ModuleReport>>>,
     pub step_gate: Option<Arc<super::step::control::Gate>>,
@@ -50,12 +51,14 @@ impl Drop for Coordinator {
 
 impl Coordinator {
     pub(super) async fn run(mut self) {
-        let startup = tokio::time::timeout(self.options.startup_timeout, self.start()).await;
+        let startup = Deadline::after(self.options.startup_timeout)
+            .scope(self.start())
+            .await;
         let (primary, reason) = match startup {
             Ok(Ok(true)) => (self.serve().await, StopReason::ComponentFailure),
             Ok(Ok(false)) => (None, StopReason::Requested),
             Ok(Err(error)) => (Some(error), StopReason::StartupFailure),
-            Err(_) => (
+            Err(()) => (
                 Some(HostError::new(
                     HostErrorCode::Timeout,
                     None,

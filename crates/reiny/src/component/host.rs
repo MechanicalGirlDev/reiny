@@ -7,6 +7,7 @@ use tokio::task::JoinSet;
 use crate::managed::HostedOptions;
 
 use super::coordinator::Coordinator;
+use super::options::HostConfiguration;
 use super::staged::HostControl;
 use super::worker::{Command, Worker};
 use super::{
@@ -18,6 +19,23 @@ use super::{
 pub struct ComponentHost;
 
 impl ComponentHost {
+    /// Launch an actual Local graph with optional startup and joined-stop budgets.
+    ///
+    /// `None` has no deadline; dropping a waiter does not cancel host ownership.
+    pub fn launch_local(
+        registry: Arc<ComponentRegistry>,
+        options: super::LocalHostOptions,
+        instances: Vec<ComponentInstanceSpec>,
+    ) -> Result<HostHandle, HostError> {
+        let bindings = instances
+            .iter()
+            .map(|instance| instance.bindings.clone())
+            .collect();
+        let (handle, control) = Self::prepare_steps(registry, options.into(), instances, None)?;
+        tokio::spawn(control.admit_local(bindings));
+        Ok(handle)
+    }
+
     /// Validate static inputs, then immediately return a supervised group handle.
     ///
     /// No component is constructed for a synchronously rejected launch. Startup
@@ -43,12 +61,12 @@ impl ComponentHost {
         options: HostOptions,
         instances: Vec<ComponentInstanceSpec>,
     ) -> Result<(HostHandle, HostControl), HostError> {
-        Self::prepare_steps(registry, options, instances, None)
+        Self::prepare_steps(registry, options.into(), instances, None)
     }
 
     pub(super) fn prepare_steps(
         registry: Arc<ComponentRegistry>,
-        options: HostOptions,
+        options: HostConfiguration,
         instances: Vec<ComponentInstanceSpec>,
         driver: Option<super::step::driver::Driver>,
     ) -> Result<(HostHandle, HostControl), HostError> {
@@ -156,7 +174,7 @@ impl ComponentHost {
 
 fn validate(
     registry: &ComponentRegistry,
-    options: &HostOptions,
+    options: &HostConfiguration,
     instances: &[ComponentInstanceSpec],
 ) -> Result<(), HostError> {
     if instances.is_empty() {
@@ -169,10 +187,10 @@ fn validate(
     crate::validate_segment("domain", &options.domain)
         .map_err(|error| HostError::new(HostErrorCode::InvalidOptions, None, error.to_string()))?;
     let now = std::time::Instant::now();
-    if options.startup_timeout.is_zero()
-        || options.stop_timeout.is_zero()
-        || now.checked_add(options.startup_timeout).is_none()
-        || now.checked_add(options.stop_timeout).is_none()
+    if [options.startup_timeout, options.stop_timeout]
+        .into_iter()
+        .flatten()
+        .any(|timeout| timeout.is_zero() || now.checked_add(timeout).is_none())
     {
         return Err(HostError::new(
             HostErrorCode::InvalidOptions,

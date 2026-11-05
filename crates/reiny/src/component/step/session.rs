@@ -66,7 +66,8 @@ impl DriverExecutor for Adapter {
         self.executor.shutdown()
     }
     fn begin(&mut self, run: &super::control::Run) {
-        self.run = Some((run.id, run.deadline));
+        // Session handles admit only bounded attempts; Local uses its own executor.
+        self.run = run.deadline.0.map(|deadline| (run.id, deadline));
         self.ordinal = 0;
         self.failure = None;
     }
@@ -145,6 +146,7 @@ impl ManagedStepSession {
             gate: gate.clone(),
             requests,
             plan: scheduler.plan.clone(),
+            local: false,
         };
         let driver = Driver {
             scheduler,

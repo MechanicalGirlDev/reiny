@@ -105,7 +105,7 @@ pub enum StepStartError {
     },
     /// Input names, schemas, duration or logical arithmetic are invalid.
     InvalidRequest(StepRequestError),
-    /// Wall-clock budget is zero or unrepresentable.
+    /// Wall-clock budget is zero, unrepresentable, or absent on a session handle.
     InvalidTimeout,
     /// Per-epoch attempt numbers are exhausted.
     RunIdExhausted,
@@ -170,6 +170,7 @@ pub struct StepHandle {
     gate: Arc<control::Gate>,
     requests: mpsc::UnboundedSender<driver::Request>,
     plan: Arc<crate::step::Plan>,
+    local: bool,
 }
 
 impl StepHandle {
@@ -191,6 +192,22 @@ impl StepHandle {
         request: StepRequest,
         timeout: Duration,
     ) -> Result<StepRun, StepStartError> {
+        self.try_step_with_timeout(request, Some(timeout))
+    }
+
+    /// Reserve a local attempt with an optional wall-clock budget.
+    ///
+    /// `None` installs no deadline at admission, dispatch or commit. Cancellation
+    /// and host stop still use the same gate. Handles from `ManagedStepSession`
+    /// require a finite budget and reject `None` with `InvalidTimeout`.
+    pub fn try_step_with_timeout(
+        &self,
+        request: StepRequest,
+        timeout: Option<Duration>,
+    ) -> Result<StepRun, StepStartError> {
+        if timeout.is_none() && !self.local {
+            return Err(StepStartError::InvalidTimeout);
+        }
         let run = self.gate.start(&request, timeout, &self.plan)?;
         if self
             .requests

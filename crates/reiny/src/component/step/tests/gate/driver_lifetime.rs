@@ -13,6 +13,7 @@ async fn aborted_driver_reports_unknown_effects_and_requests_host_shutdown() -> 
         gate: gate.clone(),
         requests,
         plan: scheduler.plan.clone(),
+        local: true,
     };
     let (calls, mut called) = tokio::sync::mpsc::unbounded_channel();
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
@@ -59,6 +60,7 @@ async fn dropping_unpolled_driver_also_terminates_accepted_observers() -> crate:
         gate: gate.clone(),
         requests,
         plan: scheduler.plan.clone(),
+        local: true,
     };
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let (control, _controlled) = tokio::sync::mpsc::channel(1);

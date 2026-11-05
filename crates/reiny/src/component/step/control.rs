@@ -1,20 +1,20 @@
-use std::{
-    sync::{
-        Arc, Mutex, MutexGuard, OnceLock,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc, Mutex, MutexGuard, OnceLock,
+    atomic::{AtomicBool, Ordering},
 };
 
-use tokio::{
-    sync::{Notify, watch},
-    time::Instant,
-};
+use tokio::sync::{Notify, watch};
 
-use super::{CancelStatus, StepRunError, StepRunId, StepStartError};
-use crate::step::{
-    ClockPhase, ClockSnapshot, Commit, Plan, StepFailureKind, StepId, StepReceipt, StepRequest,
-};
+use super::{CancelStatus, StepRunError, StepRunId};
+use crate::component::deadline::Deadline;
+use crate::step::{ClockPhase, ClockSnapshot, Commit, StepFailureKind, StepId, StepReceipt};
+
+mod admission;
+
+#[cfg(test)]
+use super::StepStartError;
+#[cfg(test)]
+use std::time::Duration;
 
 #[cfg(test)]
 #[path = "tests/gate.rs"]
@@ -25,7 +25,7 @@ pub(super) type RunResult = Result<Arc<StepReceipt>, StepRunError>;
 pub(super) struct Run {
     pub id: StepRunId,
     pub tick: StepId,
-    pub deadline: Instant,
+    pub deadline: Deadline,
     cancelled: AtomicBool,
     pub result: OnceLock<RunResult>,
 }
@@ -169,96 +169,6 @@ impl Gate {
         }
     }
 
-    pub(super) fn start(
-        &self,
-        request: &StepRequest,
-        timeout: Duration,
-        plan: &Plan,
-    ) -> Result<Arc<Run>, StepStartError> {
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .filter(|_| !timeout.is_zero())
-            .ok_or(StepStartError::InvalidTimeout)?;
-        loop {
-            let (clock, ready, stopped, active, sequence) = {
-                let state = self.lock().map_err(|_| StepStartError::SupervisorGone)?;
-                (
-                    state.clock.clone(),
-                    state.ready,
-                    state.stopped,
-                    state.active.as_ref().map(|run| run.id),
-                    state.sequence,
-                )
-            };
-            if let ClockPhase::Faulted(failure) = &clock.phase {
-                return Err(StepStartError::Faulted(Box::new(failure.clone())));
-            }
-            if stopped {
-                return Err(StepStartError::Stopped);
-            }
-            if !ready {
-                return Err(StepStartError::NotRunning);
-            }
-            if let Some(in_flight) = active {
-                return Err(StepStartError::Busy { in_flight });
-            }
-            request
-                .clone()
-                .validate(plan, &clock)
-                .map_err(StepStartError::InvalidRequest)?;
-            let next_sequence = sequence
-                .checked_add(1)
-                .ok_or(StepStartError::RunIdExhausted)?;
-            let tick = StepId {
-                epoch: clock.epoch,
-                index: clock.next_index,
-            };
-            let mut run = Arc::new(Run {
-                id: StepRunId {
-                    epoch: tick.epoch,
-                    sequence,
-                },
-                tick,
-                deadline,
-                cancelled: AtomicBool::new(false),
-                result: OnceLock::new(),
-            });
-            let running = Arc::new(ClockSnapshot {
-                phase: ClockPhase::Running(tick),
-                ..(*clock).clone()
-            });
-            let mut state = self.lock().map_err(|_| StepStartError::SupervisorGone)?;
-            if state.stopped {
-                return Err(StepStartError::Stopped);
-            }
-            if let Some(active) = &state.active {
-                return Err(StepStartError::Busy {
-                    in_flight: active.id,
-                });
-            }
-            if state.sequence != sequence || !Arc::ptr_eq(&state.clock, &clock) {
-                // A complete intervening tick requires revalidating arithmetic,
-                // not waiting for an occupied slot.
-                drop(state);
-                continue;
-            }
-            // The Arc is still private. Only its primitive deadline changes at
-            // acceptance; allocation and logical validation happened outside.
-            Arc::get_mut(&mut run)
-                .ok_or(StepStartError::SupervisorGone)?
-                .deadline = Instant::now()
-                .checked_add(timeout)
-                .ok_or(StepStartError::InvalidTimeout)?;
-            let retired = std::mem::replace(&mut state.clock, running);
-            state.sequence = next_sequence;
-            state.active = Some(run.clone());
-            drop(state);
-            drop(retired);
-            self.publish();
-            return Ok(run);
-        }
-    }
-
     pub(super) fn cancel(&self, run: &Run) -> CancelStatus {
         let state = match self.lock() {
             Ok(state) => state,
@@ -282,7 +192,7 @@ impl Gate {
             Some(StepFailureKind::HostStopped)
         } else if run.cancelled.load(Ordering::Relaxed) {
             Some(StepFailureKind::Cancelled)
-        } else if Instant::now() >= run.deadline {
+        } else if run.deadline.expired() {
             Some(StepFailureKind::TimedOut)
         } else {
             None
@@ -306,7 +216,7 @@ impl Gate {
             }
             tokio::select! {
                 () = notified => {}
-                () = tokio::time::sleep_until(run.deadline) => {}
+                () = run.deadline.elapsed() => {}
             }
         }
     }

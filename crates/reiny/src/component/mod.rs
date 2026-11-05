@@ -12,14 +12,15 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::bindings::ModuleBindings;
 use crate::{MessageType, Publisher, RawPresence, RpcClient, RpcServer, Service, Subscriber};
 
 mod coordinator;
+mod deadline;
 mod handle;
 mod host;
+mod options;
 pub mod process;
 mod staged;
 mod status;
@@ -28,6 +29,7 @@ mod worker;
 
 pub use handle::HostHandle;
 pub use host::ComponentHost;
+pub use options::{HostOptions, LocalHostOptions};
 pub use status::{
     ComponentPhase, ComponentStatus, HostError, HostErrorCode, HostOutcome, HostPhase, HostStatus,
 };
@@ -271,16 +273,4 @@ pub struct ComponentInstanceSpec {
     pub config: Option<toml::Table>,
     /// Explicit per-instance asset directory; relative paths are rejected.
     pub config_origin: Option<std::path::PathBuf>,
-}
-
-/// Explicit host resources and lifecycle deadlines.
-pub struct HostOptions {
-    /// The transport domain shared by this group.
-    pub domain: String,
-    /// A shared engine, commonly one `Local`.
-    pub engine: Arc<dyn crate::engine::Engine>,
-    /// Deadline for the whole startup, not per component.
-    pub startup_timeout: Duration,
-    /// Deadline for all cleanup and joins after shutdown begins.
-    pub stop_timeout: Duration,
 }
