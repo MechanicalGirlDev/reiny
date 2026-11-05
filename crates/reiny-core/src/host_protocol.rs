@@ -30,6 +30,7 @@ mod framing;
 mod identity;
 mod message;
 mod status;
+pub mod step;
 
 pub use assignment::{
     Compatibility, ComponentAssignment, ConfigOrigin, FactoryRegistration, Milliseconds, Prepare,

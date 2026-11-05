@@ -9,6 +9,9 @@ use super::{StepOutput, StepRequestError, StepValue};
 pub struct EpochId(pub(super) u64);
 
 impl EpochId {
+    pub(crate) const fn from_owner(value: u64) -> Self {
+        Self(value)
+    }
     /// Numeric process-local identity.
     #[must_use]
     pub const fn get(self) -> u64 {

@@ -49,6 +49,11 @@ pub(super) async fn serve(
         phase: HostPhase::Authenticating,
     };
     let mut local = None;
+    if !registry.steps.is_empty() {
+        let result =
+            super::steps::serve(bootstrap.nonce, registry, &resources, &mut io, &mut local).await;
+        return terminal::finish(local, result.err(), &mut io).await;
+    }
     let result = async {
         io.guard
             .during(io.writer.send(HostMessage::Authenticate(Authenticate {
@@ -60,7 +65,8 @@ pub(super) async fn serve(
         let required = authenticate(&mut io.guard, &registry).await?;
         let request = match io.guard.next().await? {
             OwnerMessage::Prepare(request) => request,
-            OwnerMessage::Authenticated { .. }
+            OwnerMessage::Steps(_)
+            | OwnerMessage::Authenticated { .. }
             | OwnerMessage::Commit {}
             | OwnerMessage::Run {}
             | OwnerMessage::Stop { .. } => {
@@ -131,7 +137,8 @@ async fn authenticate(
             }
             Ok(required_factories)
         }
-        OwnerMessage::Prepare(_)
+        OwnerMessage::Steps(_)
+        | OwnerMessage::Prepare(_)
         | OwnerMessage::Commit {}
         | OwnerMessage::Run {}
         | OwnerMessage::Stop { .. } => Err(ProcessError::new(FailureCode::Transition)),
@@ -167,7 +174,8 @@ async fn lifecycle(
         .await?;
     match command(handle, guard).await? {
         OwnerMessage::Commit {} => {}
-        OwnerMessage::Authenticated { .. }
+        OwnerMessage::Steps(_)
+        | OwnerMessage::Authenticated { .. }
         | OwnerMessage::Prepare(_)
         | OwnerMessage::Run {}
         | OwnerMessage::Stop { .. } => return Err(ProcessError::new(FailureCode::Transition)),
@@ -184,7 +192,8 @@ async fn lifecycle(
     guard.during(writer.send(HostMessage::Committed {})).await?;
     match command(handle, guard).await? {
         OwnerMessage::Run {} => {}
-        OwnerMessage::Authenticated { .. }
+        OwnerMessage::Steps(_)
+        | OwnerMessage::Authenticated { .. }
         | OwnerMessage::Prepare(_)
         | OwnerMessage::Commit {}
         | OwnerMessage::Stop { .. } => return Err(ProcessError::new(FailureCode::Transition)),

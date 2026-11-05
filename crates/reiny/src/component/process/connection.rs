@@ -173,7 +173,8 @@ impl Guard {
                     .min(Duration::from_millis(remaining_budget.0));
                 Err(ProcessError::new(FailureCode::Cancelled))
             }
-            OwnerMessage::Authenticated { .. }
+            OwnerMessage::Steps(_)
+            | OwnerMessage::Authenticated { .. }
             | OwnerMessage::Prepare(_)
             | OwnerMessage::Commit {}
             | OwnerMessage::Run {} => Ok(message),

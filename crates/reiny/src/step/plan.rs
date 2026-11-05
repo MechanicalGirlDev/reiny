@@ -2,20 +2,58 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bindings::{validate_namespace, validate_port_name};
 
-use super::{StepGraph, StepInput, StepPlanError, StepSource};
+use super::{StepGraph, StepInput, StepOutput, StepPlanError, StepSchema, StepSource, StepType};
+
+pub(crate) struct PlanRoute {
+    pub output: Option<StepOutput>,
+    pub initial: Option<StepType>,
+    pub same_tick: bool,
+}
 
 pub(crate) struct Plan {
     pub(super) graph: StepGraph,
-    pub(super) order: Vec<String>,
+    pub(crate) order: Vec<String>,
 }
 
 impl Plan {
-    pub(super) fn compile(graph: StepGraph) -> Result<Self, StepPlanError> {
-        if graph.nodes.is_empty() {
+    pub(crate) fn compile(graph: StepGraph) -> Result<Self, StepPlanError> {
+        let inputs = graph
+            .inputs
+            .iter()
+            .map(|(input, source)| {
+                let route = match source {
+                    StepSource::External => PlanRoute {
+                        output: None,
+                        initial: None,
+                        same_tick: false,
+                    },
+                    StepSource::SameTick(output) => PlanRoute {
+                        output: Some(output.clone()),
+                        initial: None,
+                        same_tick: true,
+                    },
+                    StepSource::PreviousTick { source, initial } => PlanRoute {
+                        output: Some(source.clone()),
+                        initial: Some(initial.step_type().clone()),
+                        same_tick: false,
+                    },
+                };
+                (input.clone(), route)
+            })
+            .collect();
+        let order = Self::validate_routes(&graph.nodes, &inputs)?;
+        Ok(Self { graph, order })
+    }
+
+    pub(crate) fn validate_routes(
+        nodes: &BTreeMap<String, StepSchema>,
+        inputs: &BTreeMap<StepInput, PlanRoute>,
+    ) -> Result<Vec<String>, StepPlanError> {
+        if nodes.is_empty() {
             return Err(StepPlanError::EmptyGraph);
         }
         let mut dependencies = BTreeMap::<String, BTreeSet<String>>::new();
-        for (instance, schema) in &graph.nodes {
+        for (instance, schema) in nodes {
             validate_namespace(instance).map_err(|_| StepPlanError::InvalidInstance {
                 instance: instance.clone(),
             })?;
@@ -30,36 +68,32 @@ impl Plan {
                     instance: instance.clone(),
                     port: port.clone(),
                 };
-                if !graph.inputs.contains_key(&input) {
+                if !inputs.contains_key(&input) {
                     return Err(StepPlanError::MissingInput { input });
                 }
             }
             dependencies.insert(instance.clone(), BTreeSet::new());
         }
-        for (input, source) in &graph.inputs {
-            let expected = graph
-                .nodes
+        for (input, route) in inputs {
+            let expected = nodes
                 .get(&input.instance)
                 .and_then(|schema| schema.inputs.get(&input.port))
                 .ok_or_else(|| StepPlanError::UnknownInput {
                     input: input.clone(),
                 })?;
-            let output = match source {
-                StepSource::External => continue,
-                StepSource::SameTick(output) => output,
-                StepSource::PreviousTick { source, initial } => {
-                    if initial.step_type() != expected {
-                        return Err(StepPlanError::InitialTypeMismatch {
-                            input: input.clone(),
-                            expected: expected.clone(),
-                            actual: initial.step_type().clone(),
-                        });
-                    }
-                    source
-                }
+            if let Some(initial) = &route.initial
+                && initial != expected
+            {
+                return Err(StepPlanError::InitialTypeMismatch {
+                    input: input.clone(),
+                    expected: expected.clone(),
+                    actual: initial.clone(),
+                });
+            }
+            let Some(output) = &route.output else {
+                continue;
             };
-            let actual = graph
-                .nodes
+            let actual = nodes
                 .get(&output.instance)
                 .and_then(|schema| schema.outputs.get(&output.port))
                 .ok_or_else(|| StepPlanError::UnknownSource {
@@ -72,19 +106,16 @@ impl Plan {
                     actual: actual.clone(),
                 });
             }
-            match source {
-                StepSource::SameTick(_) => {
-                    dependencies
-                        .entry(input.instance.clone())
-                        .or_default()
-                        .insert(output.instance.clone());
-                }
-                StepSource::External | StepSource::PreviousTick { .. } => {}
+            if route.same_tick {
+                dependencies
+                    .entry(input.instance.clone())
+                    .or_default()
+                    .insert(output.instance.clone());
             }
         }
         // Removing one ready node at a time preserves lexical tie-breaking even
         // when that removal makes an earlier lexical node ready.
-        let mut order = Vec::with_capacity(graph.nodes.len());
+        let mut order = Vec::with_capacity(nodes.len());
         while !dependencies.is_empty() {
             let next = dependencies
                 .iter()
@@ -101,6 +132,6 @@ impl Plan {
             }
             order.push(next);
         }
-        Ok(Self { graph, order })
+        Ok(order)
     }
 }

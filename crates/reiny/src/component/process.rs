@@ -36,8 +36,20 @@ mod error;
 mod placement;
 mod preparation;
 mod session;
+mod step_budget;
+mod step_client;
+mod step_owner;
+mod step_plan;
+mod step_replay;
+pub use step_client::{ProcessStepClient, ProcessStepStartError};
+pub use step_plan::{ProcessStepPlan, ProcessStepSeed, ProcessStepSource};
+mod step_wire;
+mod steps;
 mod terminal;
+pub use step_owner::{ProcessStepOwner, ProcessStepPeer};
 
+#[cfg(test)]
+mod step_tests;
 #[cfg(test)]
 mod tests;
 
@@ -100,9 +112,55 @@ impl Default for ProcessLimits {
 pub struct ProcessRegistry {
     local: ComponentRegistry,
     revisions: BTreeMap<String, String>,
+    steps: BTreeMap<
+        String,
+        (
+            crate::step::StepSchema,
+            Arc<dyn super::step::StepComponentFactory>,
+        ),
+    >,
+    seed_outputs: BTreeMap<String, std::collections::BTreeSet<String>>,
 }
 
 impl ProcessRegistry {
+    /// Register explicit prepared snapshot authority as well as the step schema.
+    pub fn register_step_prepared(
+        &mut self,
+        implementation: FactoryRegistration,
+        schema: crate::step::StepSchema,
+        seed_outputs: std::collections::BTreeSet<String>,
+        factory: Arc<dyn super::step::StepComponentFactory>,
+    ) -> Result<(), ProcessError> {
+        if seed_outputs
+            .iter()
+            .any(|port| !schema.outputs.contains_key(port))
+        {
+            return Err(ProcessError::new(protocol::FailureCode::Assignment));
+        }
+        let id = implementation.factory.clone();
+        self.register_step(implementation, schema, factory)?;
+        self.seed_outputs.insert(id, seed_outputs);
+        Ok(())
+    }
+    /// Register an immutable step schema and independent per-instance factory.
+    pub fn register_step(
+        &mut self,
+        implementation: FactoryRegistration,
+        schema: crate::step::StepSchema,
+        factory: Arc<dyn super::step::StepComponentFactory>,
+    ) -> Result<(), ProcessError> {
+        if implementation.factory.is_empty()
+            || implementation.revision.is_empty()
+            || self.revisions.contains_key(&implementation.factory)
+        {
+            return Err(ProcessError::new(protocol::FailureCode::Factory));
+        }
+        step_wire::import_schema(step_wire::export_schema(&schema))?;
+        self.revisions
+            .insert(implementation.factory.clone(), implementation.revision);
+        self.steps.insert(implementation.factory, (schema, factory));
+        Ok(())
+    }
     /// Construct an empty allowlist.
     #[must_use]
     pub fn new() -> Self {
@@ -115,7 +173,10 @@ impl ProcessRegistry {
         implementation: FactoryRegistration,
         factory: Arc<dyn ComponentFactory>,
     ) -> Result<(), ProcessError> {
-        if implementation.factory.is_empty() || implementation.revision.is_empty() {
+        if implementation.factory.is_empty()
+            || implementation.revision.is_empty()
+            || self.revisions.contains_key(&implementation.factory)
+        {
             return Err(ProcessError::new(protocol::FailureCode::Factory));
         }
         self.local

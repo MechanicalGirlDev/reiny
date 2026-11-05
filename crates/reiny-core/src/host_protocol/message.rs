@@ -31,6 +31,8 @@ pub struct Authenticate {
     deny_unknown_fields
 )]
 pub enum OwnerMessage {
+    /// Explicitly negotiated synchronous-step extension.
+    Steps(alloc::boxed::Box<super::step::StepOwnerMessage>),
     /// Authentication succeeded, not graph admission or permission to run.
     Authenticated {
         /// Owner's exact linked contracts, for the host to check.
@@ -65,6 +67,8 @@ pub enum OwnerMessage {
     deny_unknown_fields
 )]
 pub enum HostMessage {
+    /// Explicit step capability negotiation and correlated execution events.
+    Steps(alloc::boxed::Box<super::step::StepHostMessage>),
     /// First host message, before constructing any application component.
     Authenticate(Authenticate),
     /// One actual compiled report, not an admission ticket or approved binding.

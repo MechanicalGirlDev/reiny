@@ -78,8 +78,9 @@ impl ComponentHost {
                     .register(
                         id.clone(),
                         Arc::new(Factory {
-                            factory: factory.clone(),
+                            implementation: factory.clone(),
                             calls: Mutex::new(Some(calls_rx)),
+                            prepared: None,
                         }),
                     )
                     .map_err(StepLaunchError::Host)?;
@@ -104,10 +105,10 @@ impl ComponentHost {
             .collect();
         let driver = Driver {
             scheduler,
-            executor: Executor {
+            executor: Box::new(Executor {
                 calls,
                 failure: None,
-            },
+            }),
             requests: received,
             gate: gate.clone(),
         };

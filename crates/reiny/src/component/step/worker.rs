@@ -12,21 +12,24 @@ use crate::{
     },
 };
 
-pub(super) struct Call {
-    tick: StepTick,
-    inputs: StepInputs,
-    reply: oneshot::Sender<Result<StepOutputs, (StepFailureKind, String)>>,
+pub(in crate::component) struct Call {
+    pub tick: StepTick,
+    pub inputs: StepInputs,
+    pub reply: oneshot::Sender<Result<StepOutputs, (StepFailureKind, String)>>,
 }
 
+pub(in crate::component) type Prepared = Arc<std::sync::OnceLock<(StepOutputs, Vec<u8>)>>;
+
 /// A distinct adapter per instance, never a component shared between factories.
-pub(super) struct Factory {
-    pub factory: Arc<dyn StepComponentFactory>,
+pub(in crate::component) struct Factory {
+    pub implementation: Arc<dyn StepComponentFactory>,
     pub calls: Mutex<Option<mpsc::UnboundedReceiver<Call>>>,
+    pub prepared: Option<Prepared>,
 }
 
 impl ComponentFactory for Factory {
     fn create(&self, config: Option<&toml::Table>) -> crate::Result<Box<dyn Component>> {
-        let component = self.factory.create(config)?;
+        let component = self.implementation.create(config)?;
         let calls = self
             .calls
             .lock()
@@ -37,6 +40,7 @@ impl ComponentFactory for Factory {
             component,
             calls,
             panicked: false,
+            prepared: self.prepared.clone(),
         }))
     }
 }
@@ -45,11 +49,22 @@ struct Adapter {
     component: Box<dyn super::StepComponent>,
     calls: mpsc::UnboundedReceiver<Call>,
     panicked: bool,
+    prepared: Option<Prepared>,
 }
 
 impl Component for Adapter {
     fn prepare<'a>(&'a mut self, ctx: &'a ComponentContext) -> ComponentFuture<'a> {
-        self.component.prepare(ctx)
+        Box::pin(async move {
+            self.component.prepare(ctx).await?;
+            if let Some(prepared) = self.prepared.take() {
+                let outputs = self.component.prepared_outputs()?;
+                let contract = self.component.prepared_contract()?;
+                prepared
+                    .set((outputs, contract))
+                    .map_err(|_| anyhow::anyhow!("prepared object already captured"))?;
+            }
+            Ok(())
+        })
     }
 
     fn run<'a>(&'a mut self, ctx: &'a ComponentContext) -> ComponentFuture<'a> {
@@ -92,6 +107,16 @@ impl Component for Adapter {
 pub(super) struct Executor {
     pub calls: BTreeMap<String, mpsc::UnboundedSender<Call>>,
     pub failure: Option<StepFailureKind>,
+}
+
+impl super::driver::DriverExecutor for Executor {
+    fn begin(&mut self, _: &super::control::Run) {
+        self.failure = None;
+    }
+
+    fn failure(&self) -> Option<StepFailureKind> {
+        self.failure
+    }
 }
 
 impl StepExecutor for Executor {

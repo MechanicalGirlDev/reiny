@@ -17,7 +17,13 @@ use crate::step::{
 pub(crate) mod control;
 pub(super) mod driver;
 mod launch;
-mod worker;
+mod session;
+pub(in crate::component) mod worker;
+
+pub use session::{
+    DispatchFailure, ManagedStepExecutor, ManagedStepFuture, ManagedStepSession,
+    StepDispatchContext,
+};
 
 #[cfg(test)]
 mod tests;
@@ -26,6 +32,14 @@ mod tests;
 pub trait StepComponent: Send + 'static {
     /// Open and retain all ordinary declared ports before managed admission.
     fn prepare<'a>(&'a mut self, ctx: &'a ComponentContext) -> ComponentFuture<'a>;
+    /// Snapshot the actual prepared object, without advancing its state.
+    fn prepared_outputs(&self) -> Result<crate::step::StepOutputs, crate::step::NodeError> {
+        Ok(std::collections::BTreeMap::new())
+    }
+    /// Application-owned configuration-dependent admission evidence.
+    fn prepared_contract(&self) -> Result<Vec<u8>, crate::step::NodeError> {
+        Ok(Vec::new())
+    }
     /// Compute exactly the outputs declared by the immutable step schema.
     fn step<'a>(
         &'a mut self,
@@ -205,6 +219,17 @@ pub struct StepRun {
 }
 
 impl StepRun {
+    pub(in crate::component) fn retained_result(
+        &self,
+    ) -> Option<Result<Arc<StepReceipt>, StepRunError>> {
+        self.run.result.get().cloned().or_else(|| {
+            self.gate
+                .gone()
+                .then_some(Err(StepRunError::SupervisorGone {
+                    tick: self.run.tick,
+                }))
+        })
+    }
     /// Distinct acceptance identity, even for a pre-dispatch retry.
     #[must_use]
     pub fn id(&self) -> StepRunId {

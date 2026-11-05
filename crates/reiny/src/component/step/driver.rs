@@ -4,7 +4,6 @@ use tokio::sync::{mpsc, watch};
 use super::{
     StepRunError,
     control::{ControlledCommit, Gate, Run},
-    worker::Executor,
 };
 use crate::{
     component::{HostError, HostErrorCode, staged},
@@ -18,9 +17,17 @@ pub(super) struct Request {
 
 pub(in crate::component) struct Driver {
     pub(super) scheduler: StepScheduler,
-    pub(super) executor: Executor,
+    pub(super) executor: Box<dyn DriverExecutor>,
     pub(super) requests: mpsc::UnboundedReceiver<Request>,
     pub gate: Arc<Gate>,
+}
+
+pub(super) trait DriverExecutor: crate::step::StepExecutor {
+    fn begin(&mut self, run: &Run);
+    fn failure(&self) -> Option<StepFailureKind>;
+    fn shutdown(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
 }
 
 struct Lifetime {
@@ -41,7 +48,7 @@ impl Drop for Lifetime {
 
 impl Driver {
     pub(in crate::component) fn run(
-        self,
+        mut self,
         stop: watch::Sender<bool>,
         control: mpsc::Sender<staged::Request>,
     ) -> impl std::future::Future<Output = ()> + Send {
@@ -54,12 +61,13 @@ impl Driver {
         };
         async move {
             self.serve(control).await;
+            self.executor.shutdown().await;
             lifetime.completed = !lifetime.gate.gone();
             drop(lifetime);
         }
     }
 
-    async fn serve(mut self, control: mpsc::Sender<staged::Request>) {
+    async fn serve(&mut self, control: mpsc::Sender<staged::Request>) {
         loop {
             let request = tokio::select! {
                 biased;
@@ -99,7 +107,7 @@ impl Driver {
 
     async fn advance(&mut self, request: Request) -> Option<StepFailure> {
         let Request { run, request } = request;
-        self.executor.failure = None;
+        self.executor.begin(&run);
         let control = ControlledCommit {
             gate: &self.gate,
             run: &run,
@@ -107,7 +115,7 @@ impl Driver {
         let result = {
             let advancement =
                 self.scheduler
-                    .advance_controlled(&mut self.executor, request, &control);
+                    .advance_controlled(&mut *self.executor, request, &control);
             tokio::pin!(advancement);
             tokio::select! {
                 biased;
@@ -118,7 +126,7 @@ impl Driver {
         let failure = match result {
             Ok(Ok(_)) => return None, // Gate already retained the success.
             Ok(Err(SchedulerError::Failed(failure) | SchedulerError::Faulted(failure))) => {
-                let kind = self.executor.failure.unwrap_or(failure.kind);
+                let kind = self.executor.failure().unwrap_or(failure.kind);
                 self.scheduler.interrupted(kind).unwrap_or(*failure)
             }
             Ok(Err(SchedulerError::Request(_))) => {
