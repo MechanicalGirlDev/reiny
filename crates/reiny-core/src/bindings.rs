@@ -111,6 +111,14 @@ impl From<ReceiveBuffer> for BufferRepr {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EndpointContract {
+    /// Application-owned semantic assertions, compared exactly at graph admission.
+    ///
+    /// Keys and values are opaque, immutable application contract identifiers.
+    /// They may describe units, target identity, element order, clock and update
+    /// rules; Reiny neither interprets nor implements those rules. Empty means
+    /// unspecified, and is compatible only with another empty map.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub semantics: BTreeMap<String, String>,
     /// Expected protobuf message name, or RPC request name.
     #[serde(rename = "type")]
     pub type_name: String,
@@ -312,6 +320,8 @@ pub enum ReportErrorCode {
     Schema,
     /// Endpoint kinds or replay and retention policies are incompatible.
     Policy,
+    /// Application-owned semantic assertions differ at an exact graph edge.
+    Semantics,
 }
 
 /// Side of a module port involved in report validation.
@@ -433,12 +443,23 @@ pub fn validate_port_name(value: &str) -> Result<(), BindingError> {
     require(segment(value), "invalid endpoint name")
 }
 
+/// Validate opaque application assertions without interpreting or normalizing them.
+pub fn validate_semantics(semantics: &BTreeMap<String, String>) -> Result<(), BindingError> {
+    require(
+        semantics
+            .iter()
+            .all(|(key, value)| !key.trim().is_empty() && !value.trim().is_empty()),
+        "semantic assertion keys and values must not be blank",
+    )
+}
+
 impl EndpointContract {
     /// Validate a concrete endpoint's type, operation and direction-owned policies.
     ///
     /// Forwarded aliases and optional caller type assertions must be resolved before
     /// using this validator; an empty type is not a concrete endpoint.
     pub fn validate(&self, input: bool) -> Result<(), BindingError> {
+        validate_semantics(&self.semantics)?;
         require(type_name(&self.type_name), "invalid endpoint type")?;
         require(
             self.buffer != ReceiveBuffer::Latest(0),
@@ -522,6 +543,7 @@ impl ModuleBindings {
                     &port.contract.type_name,
                     &port.contract.response,
                     port.contract.kind == PortKind::Rpc,
+                    &port.contract.semantics,
                 );
                 if let Some(previous) = addresses.insert(source, contract) {
                     require(

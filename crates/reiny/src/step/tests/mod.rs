@@ -12,6 +12,7 @@ mod fault_executor;
 mod planning;
 mod requests;
 mod routing;
+mod semantics;
 
 #[derive(Clone, PartialEq, prost::Message)]
 pub(super) struct Number {

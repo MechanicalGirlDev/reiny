@@ -206,6 +206,9 @@ pub fn validate_graph(entries: &[ReportEntry<'_>]) -> Result<(), ReportError> {
                 if input.contract.kind != output.contract.kind {
                     return Err(error(Code::Policy, "source endpoint kind differs"));
                 }
+                if input.contract.semantics != output.contract.semantics {
+                    return Err(error(Code::Semantics, "source semantic assertions differ"));
+                }
                 match (&input.response, &output.response) {
                     (None, None) => {}
                     (Some(expected), Some(actual)) => {

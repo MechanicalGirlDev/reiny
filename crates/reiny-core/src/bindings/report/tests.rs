@@ -10,6 +10,126 @@ mod individual;
 #[path = "ordering.rs"]
 mod ordering;
 
+#[test]
+fn semantic_contracts_match_exactly_for_streams_rpc_and_every_fan_in_source() {
+    for make in [stream_graph, rpc_graph] {
+        let [source, receiver] = make();
+        for key in ["units", "identity", "ordering", "time", "update"] {
+            for value in [None, Some("app.v1"), Some("app.v2")] {
+                let mut source = source.bindings.clone();
+                let mut receiver = receiver.bindings.clone();
+                for port in source.outputs.values_mut() {
+                    port.contract.semantics.insert(key.into(), "app.v1".into());
+                }
+                if let Some(value) = value {
+                    receiver
+                        .inputs
+                        .get_mut("state")
+                        .unwrap()
+                        .contract
+                        .semantics
+                        .insert(key.into(), value.into());
+                }
+                let fixtures = [fixture(source), fixture(receiver)];
+                if value == Some("app.v1") {
+                    check(&fixtures).unwrap();
+                } else {
+                    let error = check(&fixtures).unwrap_err();
+                    assert_eq!(error.code, ReportErrorCode::Semantics);
+                    assert_eq!(error.source.as_deref(), Some(&address("left")));
+                }
+            }
+        }
+    }
+    let [mut source, mut receiver] = stream_graph();
+    source
+        .bindings
+        .outputs
+        .get_mut("left")
+        .unwrap()
+        .contract
+        .semantics
+        .insert("units".into(), "app.v1".into());
+    receiver
+        .bindings
+        .inputs
+        .get_mut("state")
+        .unwrap()
+        .contract
+        .semantics
+        .insert("units".into(), "app.v1".into());
+    let fixtures = [fixture(source.bindings), fixture(receiver.bindings)];
+    let error = check(&fixtures).unwrap_err();
+    assert_eq!(error.code, ReportErrorCode::Semantics);
+    assert_eq!(error.source.as_deref(), Some(&address("right")));
+}
+
+#[test]
+fn report_cannot_erase_or_replace_declared_semantics() {
+    let [mut source, _] = stream_graph();
+    source
+        .bindings
+        .outputs
+        .get_mut("left")
+        .unwrap()
+        .contract
+        .semantics
+        .insert("units".into(), "app.v1".into());
+    assert_eq!(
+        validate_report(&source.bindings, &source.report)
+            .unwrap_err()
+            .code,
+        ReportErrorCode::Contract
+    );
+    let mut source = fixture(source.bindings);
+    source
+        .report
+        .outputs
+        .get_mut("left")
+        .unwrap()
+        .contract
+        .semantics
+        .insert("units".into(), "app.v2".into());
+    assert_eq!(
+        validate_report(&source.bindings, &source.report)
+            .unwrap_err()
+            .code,
+        ReportErrorCode::Contract
+    );
+}
+
+#[test]
+fn semantics_require_the_same_key_set_but_never_choose_another_source() {
+    let [mut source, mut receiver] = stream_graph();
+    receiver
+        .bindings
+        .inputs
+        .get_mut("state")
+        .unwrap()
+        .sources
+        .truncate(1);
+    source
+        .bindings
+        .outputs
+        .get_mut("right")
+        .unwrap()
+        .contract
+        .semantics
+        .insert("units".into(), "app.v1".into());
+    receiver
+        .bindings
+        .inputs
+        .get_mut("state")
+        .unwrap()
+        .contract
+        .semantics
+        .insert("units".into(), "app.v1".into());
+    let fixtures = [fixture(source.bindings), fixture(receiver.bindings)];
+    let error = check(&fixtures).unwrap_err();
+    assert_eq!(error.code, ReportErrorCode::Semantics);
+    assert_eq!(error.source.as_deref(), Some(&address("left")));
+}
+
 type Mutation<T> = fn(&mut T);
 
 struct Fixture {

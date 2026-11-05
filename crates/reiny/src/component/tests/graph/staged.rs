@@ -2,6 +2,73 @@ use super::*;
 use crate::bindings::{ReportEntry, validate_graph};
 
 #[tokio::test]
+async fn opened_ports_preserve_application_semantics_in_compiled_reports() {
+    let mut graph = graph(Role::Source);
+    let semantics = std::collections::BTreeMap::from([
+        ("units".into(), "app.si.v1".into()),
+        ("ordering".into(), "app.xy.v1".into()),
+    ]);
+    graph.instances[0]
+        .bindings
+        .outputs
+        .get_mut("out")
+        .expect("output")
+        .contract
+        .semantics = semantics.clone();
+    graph.instances[1]
+        .bindings
+        .inputs
+        .get_mut("in")
+        .expect("input")
+        .contract
+        .semantics = semantics.clone();
+    let authority = graph
+        .instances
+        .iter()
+        .map(|spec| spec.bindings.clone())
+        .collect::<Vec<_>>();
+    let (handle, mut control) = ComponentHost::prepare(
+        graph.registry,
+        options(Arc::new(Local::new())),
+        graph.instances,
+    )
+    .expect("prepare");
+    let reports = control.prepared().await.expect("compiled reports");
+    for report in &reports {
+        for (name, port) in report.inputs.iter().chain(&report.outputs) {
+            if name != "unrelated" {
+                assert_eq!(port.contract.semantics, semantics);
+                assert_eq!(port.schema, Probe::SCHEMA_FINGERPRINT);
+            }
+        }
+        let encoded = serde_json::to_string(report).expect("serialize");
+        let decoded: crate::bindings::ModuleReport =
+            serde_json::from_str(&encoded).expect("report roundtrip");
+        assert_eq!(&decoded, report);
+    }
+    let entries = authority
+        .iter()
+        .map(|bindings| ReportEntry {
+            bindings,
+            report: reports
+                .iter()
+                .find(|report| report.namespace == bindings.namespace)
+                .expect("matching report"),
+        })
+        .collect::<Vec<_>>();
+    validate_graph(&entries).expect("matching graph");
+    assert!(graph.records.try_recv().is_err());
+    control.commit().await.expect("commit");
+    control.activate().await.expect("activate");
+    let delivery = timeout(PATIENCE, graph.deliveries.recv())
+        .await
+        .expect("deadline")
+        .expect("delivery");
+    assert_eq!(delivery.value.value, 42);
+    assert!(matches!(handle.stop().await, HostOutcome::Stopped));
+}
+
+#[tokio::test]
 async fn separate_host_reports_admit_only_as_one_validated_graph() {
     for role in [Role::Source, Role::WrongSchema] {
         let Graph {

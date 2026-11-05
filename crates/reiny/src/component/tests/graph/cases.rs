@@ -1,6 +1,75 @@
 use super::*;
 
 #[tokio::test]
+async fn semantic_assertions_are_reported_and_admitted_before_run() {
+    for compatible in [true, false] {
+        let mut graph = graph(Role::Source);
+        let semantics = std::collections::BTreeMap::from([
+            ("units".into(), "example.si.v1".into()),
+            ("identity".into(), "example.target-a.v1".into()),
+            ("ordering".into(), "example.xy.v1".into()),
+            ("time".into(), "example.monotonic-observation.v1".into()),
+            ("update".into(), "example.every-step.v1".into()),
+        ]);
+        graph.instances[0]
+            .bindings
+            .outputs
+            .get_mut("out")
+            .expect("output")
+            .contract
+            .semantics = semantics.clone();
+        graph.instances[1]
+            .bindings
+            .inputs
+            .get_mut("in")
+            .expect("input")
+            .contract
+            .semantics = semantics.clone();
+        if !compatible {
+            graph.instances[1]
+                .bindings
+                .inputs
+                .get_mut("in")
+                .expect("input")
+                .contract
+                .semantics
+                .insert("units".into(), "example.other.v1".into());
+        }
+        let engine = Arc::new(Local::new());
+        let handle =
+            ComponentHost::launch(graph.registry, options(engine.clone()), graph.instances)
+                .expect("launch");
+        if compatible {
+            handle.wait_running().await.expect("admitted");
+            let delivery = timeout(PATIENCE, graph.deliveries.recv())
+                .await
+                .expect("deadline")
+                .expect("delivery");
+            assert_eq!(delivery.value.value, 42);
+            assert_eq!(delivery.source_port, "out");
+            assert!(matches!(handle.stop().await, HostOutcome::Stopped));
+        } else {
+            let (primary, cleanup) = failure(terminal(&handle).await);
+            assert_eq!(
+                primary.report.expect("graph error").code,
+                ReportErrorCode::Semantics
+            );
+            assert_eq!(cleanup, Vec::<HostError>::new());
+            while let Ok(record) = graph.records.try_recv() {
+                assert!(!matches!(record.stage, Stage::Run));
+            }
+            assert_eq!(
+                engine
+                    .alive(&Key::module("components", None, READY_CHUNK), PATIENCE)
+                    .await
+                    .expect("presence"),
+                Vec::<Key>::new()
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn two_components_deliver_shared_payload_only_from_the_named_source() {
     let mut graph = graph(Role::Source);
     let engine = Arc::new(Local::new());

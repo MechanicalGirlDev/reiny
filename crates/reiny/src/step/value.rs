@@ -1,27 +1,56 @@
-use std::{borrow::Cow, fmt};
+use std::{collections::BTreeMap, fmt};
 
 use crate::{
     MessageType, SCHEMA_FINGERPRINT_VERSION,
     encoded::{EncodedType, SchemaError},
 };
 
-/// Exact protobuf schema identity, independent of routing authority.
+/// Exact protobuf schema identity and application assertions, independent of routing authority.
 ///
 /// Every identity uses the supported fingerprint version: encoded construction
 /// validates it, and native construction reads the current compiled schema.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct StepType {
-    type_name: Cow<'static, str>,
-    fingerprint: u64,
+    data: TypeData,
 }
+
+// Keep compiled construction const and mismatch errors compact without changing
+// their public fields. Imported identities and assertions own their allocation.
+#[derive(Clone, Debug)]
+enum TypeData {
+    Compiled {
+        type_name: &'static str,
+        fingerprint: u64,
+    },
+    Owned(Box<OwnedType>),
+}
+
+#[derive(Clone, Debug)]
+struct OwnedType {
+    type_name: String,
+    fingerprint: u64,
+    semantics: BTreeMap<String, String>,
+}
+
+impl PartialEq for StepType {
+    fn eq(&self, other: &Self) -> bool {
+        self.type_name() == other.type_name()
+            && self.fingerprint() == other.fingerprint()
+            && self.semantics() == other.semantics()
+    }
+}
+
+impl Eq for StepType {}
 
 impl StepType {
     /// Read a message's compiled schema identity.
     #[must_use]
     pub const fn of<T: MessageType>() -> Self {
         Self {
-            type_name: Cow::Borrowed(T::TYPE_NAME),
-            fingerprint: T::SCHEMA_FINGERPRINT,
+            data: TypeData::Compiled {
+                type_name: T::TYPE_NAME,
+                fingerprint: T::SCHEMA_FINGERPRINT,
+            },
         }
     }
 
@@ -29,24 +58,66 @@ impl StepType {
     pub fn from_encoded_type(ty: EncodedType) -> Result<Self, SchemaError> {
         let fingerprint = ty.fingerprint();
         Ok(Self {
-            type_name: Cow::Owned(ty.into_type_name()),
-            fingerprint,
+            data: TypeData::Owned(Box::new(OwnedType {
+                type_name: ty.into_type_name(),
+                fingerprint,
+                semantics: BTreeMap::new(),
+            })),
         })
+    }
+
+    /// Replace the application-owned assertions, compared exactly at admission.
+    ///
+    /// These opaque identifiers may describe units, identity, order, clocks or
+    /// update rules. Reiny does not prove or implement them. Empty assertions
+    /// match only empty assertions; this grants no routing authority.
+    pub fn with_semantics(
+        mut self,
+        semantics: BTreeMap<String, String>,
+    ) -> Result<Self, crate::bindings::BindingError> {
+        crate::bindings::validate_semantics(&semantics)?;
+        match &mut self.data {
+            TypeData::Compiled {
+                type_name,
+                fingerprint,
+            } => {
+                self.data = TypeData::Owned(Box::new(OwnedType {
+                    type_name: (*type_name).into(),
+                    fingerprint: *fingerprint,
+                    semantics,
+                }));
+            }
+            TypeData::Owned(data) => data.semantics = semantics,
+        }
+        Ok(self)
+    }
+
+    /// Borrow the immutable application assertions.
+    #[must_use]
+    pub const fn semantics(&self) -> &BTreeMap<String, String> {
+        static EMPTY: BTreeMap<String, String> = BTreeMap::new();
+        match &self.data {
+            TypeData::Compiled { .. } => &EMPTY,
+            TypeData::Owned(data) => &data.semantics,
+        }
     }
 
     /// Complete protobuf message name.
     #[must_use]
     pub const fn type_name(&self) -> &str {
-        match &self.type_name {
-            Cow::Borrowed(name) => name,
-            Cow::Owned(name) => name.as_str(),
+        match &self.data {
+            TypeData::Compiled { type_name, .. } => type_name,
+            TypeData::Owned(data) => data.type_name.as_str(),
         }
     }
 
     /// Transitive schema fingerprint.
     #[must_use]
     pub const fn fingerprint(&self) -> u64 {
-        self.fingerprint
+        match &self.data {
+            TypeData::Compiled { fingerprint, .. } => *fingerprint,
+            TypeData::Owned(data) => data.fingerprint,
+        }
     }
 
     /// Version of the fingerprint algorithm.
@@ -64,6 +135,17 @@ pub struct StepValue {
 }
 
 impl StepValue {
+    /// Explicitly assert application semantics for this owned snapshot.
+    ///
+    /// This does not convert or validate the payload.
+    pub fn with_semantics(
+        mut self,
+        semantics: BTreeMap<String, String>,
+    ) -> Result<Self, crate::bindings::BindingError> {
+        self.step_type = self.step_type.with_semantics(semantics)?;
+        Ok(self)
+    }
+
     /// Take ownership of an opaque, immutable encoded snapshot.
     ///
     /// The schema identity does not establish that the bytes decode or that
@@ -95,9 +177,14 @@ impl StepValue {
     }
 
     /// Check all schema identity fields before decoding the protobuf snapshot.
+    ///
+    /// Application assertions are checked by graph and scheduler admission, not
+    /// by protobuf decoding. Decoding neither proves nor changes those assertions.
     pub fn decode<T: prost::Message + Default + MessageType>(&self) -> Result<T, StepValueError> {
         let expected = StepType::of::<T>();
-        if self.step_type != expected {
+        if self.step_type.type_name() != expected.type_name()
+            || self.step_type.fingerprint() != expected.fingerprint()
+        {
             return Err(StepValueError::TypeMismatch {
                 expected,
                 actual: self.step_type.clone(),
