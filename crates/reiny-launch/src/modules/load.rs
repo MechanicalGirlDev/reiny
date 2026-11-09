@@ -33,7 +33,7 @@ impl Loader {
                     self.resolver.resolve(&child_namespace, &dir, source)?
                 }
             };
-            let mut child = read_manifest(&child_dir)?;
+            let mut child = read_manifest(&child_dir.join("main.yaml"))?;
             if call.inputs.keys().ne(child.inputs.keys()) {
                 return Err(invalid(
                     &child_namespace,

@@ -1,10 +1,10 @@
 use super::{
     BTreeMap, DeploymentPlan, Loader, ModuleError, ModuleManifest, Path, PathBuf, SourceResolver,
-    absolute, invalid, manifest_dir, read_manifest, validate_definition, validate_name,
+    absolute, invalid, manifest_path, read_manifest, validate_definition, validate_name,
 };
 
 impl DeploymentPlan {
-    /// Load a root directory or its `main.yaml`, resolve sources and check all ports.
+    /// Load an explicit runtime manifest or a directory's `main.yaml`.
     ///
     /// No build or executable module is run. `update` explicitly refreshes Git refs.
     pub fn load(path: &Path, update: bool) -> Result<Self, ModuleError> {
@@ -25,9 +25,9 @@ impl DeploymentPlan {
     ) -> Result<Self, crate::PrepareError> {
         cancel.check()?;
         let result = (|| {
-            let root = manifest_dir(path)?;
-            let manifest = read_manifest(&root)?;
-            Self::resolve(root, manifest, update, Some(cancel))
+            let path = manifest_path(path)?;
+            let manifest = read_manifest(&path)?;
+            Self::resolve(path, manifest, update, Some(cancel))
         })();
         if cancel.is_cancelled() {
             Err(crate::PrepareError::Cancelled)
@@ -37,15 +37,24 @@ impl DeploymentPlan {
     }
 
     fn resolve(
-        root: PathBuf,
+        root_manifest: PathBuf,
         manifest: ModuleManifest,
         update: bool,
         cancel: Option<&crate::CancelToken>,
     ) -> Result<Self, ModuleError> {
+        let root = root_manifest
+            .parent()
+            .ok_or_else(|| {
+                invalid(
+                    root_manifest.display().to_string(),
+                    "manifest has no directory",
+                )
+            })?
+            .to_path_buf();
         let deployment = manifest.deployment.clone().ok_or_else(|| {
             invalid(
                 root.display().to_string(),
-                "root main.yaml requires deployment",
+                "root runtime manifest requires deployment",
             )
         })?;
         validate_name(&deployment, "deployment")?;
@@ -108,6 +117,7 @@ impl DeploymentPlan {
         loader.resolver.finish()?;
         Ok(Self {
             root,
+            root_manifest,
             deployment,
             domain,
             module_sources,
@@ -118,6 +128,21 @@ impl DeploymentPlan {
             resources: connected.resources,
         })
     }
+
+    /// Return the authored manifest for a resolved instance.
+    ///
+    /// Root selection is explicit; child sources retain the `main.yaml` convention.
+    /// Unknown namespaces return `None`. [`Self::module_sources`] remains directories.
+    #[must_use]
+    pub fn manifest_path(&self, namespace: &str) -> Option<PathBuf> {
+        self.module_sources.get(namespace).map(|directory| {
+            if namespace == self.deployment {
+                self.root_manifest.clone()
+            } else {
+                directory.join("main.yaml")
+            }
+        })
+    }
 }
 
 /// Check a runtime definition, resolving it when it declares a deployment root.
@@ -126,12 +151,12 @@ impl DeploymentPlan {
 /// sources. Deployment roots use the same resolver as [`DeploymentPlan::load`],
 /// without building artifacts or starting processes. Schema catalogs are not read.
 pub fn check_manifest(path: &Path) -> Result<Option<DeploymentPlan>, ModuleError> {
-    let root = manifest_dir(path)?;
-    let manifest = read_manifest(&root)?;
+    let path = manifest_path(path)?;
+    let manifest = read_manifest(&path)?;
     if manifest.deployment.is_some() {
-        DeploymentPlan::resolve(root, manifest, false, None).map(Some)
+        DeploymentPlan::resolve(path, manifest, false, None).map(Some)
     } else {
-        let name = root.display().to_string();
+        let name = path.display().to_string();
         if manifest.domain.is_some()
             || !manifest.providers.is_empty()
             || manifest.component_hosts.is_some()

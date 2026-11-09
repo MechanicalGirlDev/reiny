@@ -4,7 +4,7 @@ use super::{
     ProviderSpec, ResourceSpec, RunSpec, Serialize, hosted,
 };
 
-/// The contents of one `main.yaml`.
+/// The contents of one runtime manifest.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleManifest {
@@ -90,8 +90,10 @@ pub struct ArtifactResource {
 /// A validated deployment, before any build or process start.
 #[derive(Clone, Debug, Serialize)]
 pub struct DeploymentPlan {
-    /// Directory of the root `main.yaml`.
+    /// Directory of the root runtime manifest.
     pub root: PathBuf,
+    /// Absolute selected root manifest, independent of its filename.
+    pub root_manifest: PathBuf,
     /// Stable owner/state identity.
     pub deployment: String,
     /// Shared communication domain.

@@ -53,9 +53,11 @@ pub(crate) fn bundle_with_control(
     .context("preparing deployment artifacts")?;
 
     let mut manifests = BTreeMap::new();
-    for (namespace, source) in &plan.module_sources {
+    for namespace in plan.module_sources.keys() {
         control.check()?;
-        let path = source.join("main.yaml");
+        let path = plan
+            .manifest_path(namespace)
+            .context("instance source missing")?;
         let manifest: ModuleManifest = serde_yaml::from_slice(&std::fs::read(&path)?)
             .with_context(|| format!("reading {}", path.display()))?;
         manifests.insert(namespace.clone(), manifest);

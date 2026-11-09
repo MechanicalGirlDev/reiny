@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-/// `reiny check [path]`. Search upward for the nearest `main.yaml`.
+/// Check an explicit manifest, or discover `main.yaml` / `schema.yaml` upward.
 pub(crate) fn check(path: Option<&Path>) -> Result<()> {
     let dir = match path {
         Some(p) => p.to_path_buf(),
@@ -18,7 +18,10 @@ pub(crate) fn check(path: Option<&Path>) -> Result<()> {
     let explicit_manifest = dir.is_file();
     let manifest = nearest_manifest(&dir)?;
     let schema_dir = manifest.parent().context("manifest has no directory")?;
-    if manifest.file_name().is_some_and(|name| name == "main.yaml") {
+    if manifest
+        .file_name()
+        .is_some_and(|name| name != "schema.yaml")
+    {
         if let Some(plan) = reiny_launch::check_manifest(&manifest)? {
             println!(
                 "deployment: {} ({} executable modules, {} resources)",
@@ -107,13 +110,7 @@ fn nearest_manifest(path: &Path) -> Result<PathBuf> {
     let path =
         std::fs::canonicalize(path).with_context(|| format!("resolving {}", path.display()))?;
     let start = if path.is_file() {
-        if path
-            .file_name()
-            .is_some_and(|name| name == "main.yaml" || name == "schema.yaml")
-        {
-            return Ok(path);
-        }
-        bail!("expected main.yaml, schema.yaml or a module directory");
+        return Ok(path);
     } else {
         path.as_path()
     };

@@ -3,13 +3,22 @@
 This is the normative guide for describing and running a reiny deployment.
 A module definition is reusable; an instance is one invocation of it. Each
 executable instance is a graph node whose process belongs to a runtime generation.
-Every directory that takes part has exactly one `main.yaml`. The same file
-format covers three roles:
+Directory inputs and child module sources use `main.yaml`. A root can instead
+be selected by an explicit filename, such as `runtime/simulation/deployment.yaml`;
+the loader reads that exact file, even beside a different `main.yaml`. The same
+file format covers three roles:
 
 - a **root**, which names the deployment and configures providers,
 - a **composite module**, which calls child modules and wires their ports,
 - a **leaf module**, which declares one native executable with `run`, or a
   registered hosted component with `component` in version 4.
+
+Relative paths and source acquisition state (`lock.yaml` and `.reiny`) stay
+anchored to the selected manifest's directory. `plan`, `check`, `prepare`,
+`apply`, `run`, `update`, and `bundle` accept explicit runtime files; schema
+catalogs remain separate. Bundles write their resolved root as `main.yaml`.
+`DeploymentPlan.root` and `module_sources` remain directory paths;
+`root_manifest` and `manifest_path(namespace)` preserve the selected declaration.
 
 A machine-readable description of the fields lives in
 [`main.schema.yaml`](main.schema.yaml) (JSON Schema written as YAML). The Rust

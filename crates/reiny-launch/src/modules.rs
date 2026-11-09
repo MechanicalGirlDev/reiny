@@ -62,33 +62,35 @@ struct Loader {
     source_stack: Vec<PathBuf>,
 }
 
-fn manifest_dir(path: &Path) -> Result<PathBuf, ModuleError> {
-    let path = if path.is_file() {
-        if path.file_name().is_none_or(|name| name != "main.yaml") {
-            return Err(invalid(
-                path.display().to_string(),
-                "expected main.yaml or its directory",
-            ));
-        }
-        path.parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."))
+fn manifest_path(path: &Path) -> Result<PathBuf, ModuleError> {
+    let path = if path.is_dir() {
+        path.join("main.yaml")
     } else {
-        path
+        path.to_path_buf()
     };
-    std::fs::canonicalize(path).map_err(|source| ModuleError::Io {
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let directory = std::fs::canonicalize(directory).map_err(|source| ModuleError::Io {
+        path: directory.to_path_buf(),
+        source,
+    })?;
+    Ok(directory.join(
+        path.file_name()
+            .ok_or_else(|| invalid(path.display().to_string(), "manifest path has no filename"))?,
+    ))
+}
+
+fn read_manifest(path: &Path) -> Result<ModuleManifest, ModuleError> {
+    let text = std::fs::read_to_string(path).map_err(|source| ModuleError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    serde_yaml::from_str(&text).map_err(|source| ModuleError::Yaml {
         path: path.to_path_buf(),
         source,
     })
-}
-
-fn read_manifest(dir: &Path) -> Result<ModuleManifest, ModuleError> {
-    let path = dir.join("main.yaml");
-    let text = std::fs::read_to_string(&path).map_err(|source| ModuleError::Io {
-        path: path.clone(),
-        source,
-    })?;
-    serde_yaml::from_str(&text).map_err(|source| ModuleError::Yaml { path, source })
 }
 
 fn invalid(module: impl Into<String>, message: impl Into<String>) -> ModuleError {
